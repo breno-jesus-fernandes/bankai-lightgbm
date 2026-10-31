@@ -8,7 +8,12 @@ use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 
-create_exception!(_lib, LightGBMError, PyException, "Error thrown by LightGBM.");
+create_exception!(
+    _lib,
+    LightGBMError,
+    PyException,
+    "Error thrown by LightGBM."
+);
 
 fn to_py(err: lgbm_core::Error) -> PyErr {
     LightGBMError::new_err(err.to_string())
@@ -24,13 +29,17 @@ struct NativeBooster {
 impl NativeBooster {
     #[staticmethod]
     fn from_file(py: Python<'_>, path: String) -> PyResult<Self> {
-        let model = py.allow_threads(|| Gbdt::from_model_file(&path)).map_err(to_py)?;
+        let model = py
+            .allow_threads(|| Gbdt::from_model_file(&path))
+            .map_err(to_py)?;
         Ok(NativeBooster { model })
     }
 
     #[staticmethod]
     fn from_string(py: Python<'_>, model_str: String) -> PyResult<Self> {
-        let model = py.allow_threads(|| Gbdt::from_model_string(&model_str)).map_err(to_py)?;
+        let model = py
+            .allow_threads(|| Gbdt::from_model_string(&model_str))
+            .map_err(to_py)?;
         Ok(NativeBooster { model })
     }
 
@@ -91,7 +100,11 @@ impl NativeBooster {
             1 => PredictKind::RawScore,
             2 => PredictKind::LeafIndex,
             3 => PredictKind::Contrib,
-            other => return Err(LightGBMError::new_err(format!("unknown predict type {other}"))),
+            other => {
+                return Err(LightGBMError::new_err(format!(
+                    "unknown predict type {other}"
+                )));
+            }
         };
         let cfg = PredictConfig {
             kind,
@@ -102,7 +115,9 @@ impl NativeBooster {
             pred_early_stop_margin,
             num_threads: usize::try_from(num_threads).unwrap_or(0),
         };
-        let slice = data.as_slice().map_err(|e| LightGBMError::new_err(e.to_string()))?;
+        let slice = data
+            .as_slice()
+            .map_err(|e| LightGBMError::new_err(e.to_string()))?;
         let model = &self.model;
         let (out, width) = py
             .allow_threads(|| {
