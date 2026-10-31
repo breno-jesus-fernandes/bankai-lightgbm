@@ -1,0 +1,10 @@
+{
+ "num_threads": 1,
+ "verbose": -1,
+ "seed": 3,
+ "objective": "tweedie",
+ "metric": [
+  "tweedie"
+ ],
+ "tweedie_variance_power": 1.4
+}

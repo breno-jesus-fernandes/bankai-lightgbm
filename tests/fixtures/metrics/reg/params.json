@@ -1,0 +1,18 @@
+{
+ "num_threads": 1,
+ "verbose": -1,
+ "seed": 3,
+ "objective": "regression",
+ "metric": [
+  "l2",
+  "rmse",
+  "l1",
+  "huber",
+  "fair",
+  "quantile",
+  "mape",
+  "r2"
+ ],
+ "alpha": 0.7,
+ "fair_c": 1.3
+}

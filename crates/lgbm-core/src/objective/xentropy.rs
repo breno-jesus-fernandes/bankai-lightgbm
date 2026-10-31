@@ -4,7 +4,7 @@ use super::train::{Objective, check_labels_in};
 use crate::error::{Error, Result};
 use crate::io::dataset::Metadata;
 use crate::meta::K_EPSILON;
-use crate::utils::common::madd;
+use crate::utils::common::{madd, obtain_min_max_sum};
 
 /// upstream: `CrossEntropy`
 pub struct CrossEntropy {
@@ -16,8 +16,7 @@ impl CrossEntropy {
     pub fn new(md: &Metadata) -> Result<Self> {
         check_labels_in(&md.label, 0.0, 1.0, "cross_entropy")?;
         if !md.weights.is_empty() {
-            let minw = md.weights.iter().copied().fold(f32::INFINITY, f32::min);
-            let sumw: f64 = md.weights.iter().map(|&w| f64::from(w)).sum();
+            let (minw, _, sumw) = obtain_min_max_sum(&md.weights);
             if minw < 0.0 {
                 return Err(Error::InvalidParameter(
                     "[cross_entropy]: at least one weight is negative".into(),

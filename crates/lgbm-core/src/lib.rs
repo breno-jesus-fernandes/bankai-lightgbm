@@ -10,6 +10,7 @@ pub mod config;
 pub mod error;
 pub mod io;
 pub mod meta;
+pub mod metric;
 pub mod objective;
 pub mod predictor;
 pub mod tree;

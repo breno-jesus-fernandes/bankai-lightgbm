@@ -1,0 +1,9 @@
+{
+ "num_threads": 1,
+ "verbose": -1,
+ "seed": 3,
+ "objective": "cross_entropy_lambda",
+ "metric": [
+  "cross_entropy_lambda"
+ ]
+}

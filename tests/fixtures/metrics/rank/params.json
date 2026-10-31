@@ -1,0 +1,16 @@
+{
+ "num_threads": 1,
+ "verbose": -1,
+ "seed": 3,
+ "objective": "lambdarank",
+ "metric": [
+  "ndcg",
+  "map"
+ ],
+ "eval_at": [
+  1,
+  3,
+  5,
+  10
+ ]
+}

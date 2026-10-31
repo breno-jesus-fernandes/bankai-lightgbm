@@ -1,0 +1,10 @@
+{
+ "num_threads": 1,
+ "verbose": -1,
+ "seed": 3,
+ "objective": "cross_entropy",
+ "metric": [
+  "cross_entropy",
+  "kullback_leibler"
+ ]
+}

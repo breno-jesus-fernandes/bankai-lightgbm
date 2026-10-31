@@ -161,6 +161,42 @@ pub fn parse_array_fast_f64(s: &str, n: usize) -> Result<Vec<f64>> {
     Ok(out)
 }
 
+/// upstream: `Common::ObtainMinMaxSum`. The sum is accumulated pairwise in `f32` (the
+/// element type), not in the destination type, so it is not the exact sum. `w` must not
+/// be empty.
+pub fn obtain_min_max_sum(w: &[f32]) -> (f32, f32, f64) {
+    let nw = w.len();
+    let (mut minw, mut maxw, mut sumw, mut i);
+    if nw & 1 == 1 {
+        minw = w[0];
+        maxw = w[0];
+        sumw = w[0];
+        i = 2;
+    } else {
+        if w[0] < w[1] {
+            minw = w[0];
+            maxw = w[1];
+        } else {
+            minw = w[1];
+            maxw = w[0];
+        }
+        sumw = w[0] + w[1];
+        i = 3;
+    }
+    while i < nw {
+        if w[i - 1] < w[i] {
+            minw = minw.min(w[i - 1]);
+            maxw = maxw.max(w[i]);
+        } else {
+            minw = minw.min(w[i]);
+            maxw = maxw.max(w[i - 1]);
+        }
+        sumw += w[i - 1] + w[i];
+        i += 2;
+    }
+    (minw, maxw, f64::from(sumw))
+}
+
 /// `a * b + c` with the same contraction the upstream C++ build applies.
 ///
 /// Upstream wheels are compiled by clang/gcc with floating-point contraction enabled; on
@@ -266,5 +302,18 @@ mod tests {
         softmax(&mut v);
         assert!((v.iter().sum::<f64>() - 1.0).abs() < 1e-15);
         assert!(v[2] > v[1] && v[1] > v[0]);
+    }
+
+    #[test]
+    fn obtain_min_max_sum_accumulates_pairwise_in_f32() {
+        let (mi, ma, su) = obtain_min_max_sum(&[3.0]);
+        assert_eq!((mi, ma, su), (3.0, 3.0, 3.0));
+        let (mi, ma, su) = obtain_min_max_sum(&[2.0, 1.0, 4.0, 3.0]);
+        assert_eq!((mi, ma, su), (1.0, 4.0, 10.0));
+        let (mi, ma, su) = obtain_min_max_sum(&[5.0, 1.0, 2.0]);
+        assert_eq!((mi, ma, su), (1.0, 5.0, 8.0));
+        // 2^24 + 1 is not representable in f32, so the f32 accumulator loses the 1.
+        let (_, _, su) = obtain_min_max_sum(&[16_777_216.0, 1.0, 0.0, 0.0]);
+        assert_eq!(su, 16_777_216.0);
     }
 }

@@ -1,0 +1,11 @@
+{
+ "num_threads": 1,
+ "verbose": -1,
+ "seed": 3,
+ "objective": "gamma",
+ "metric": [
+  "gamma",
+  "gamma_deviance"
+ ],
+ "tweedie_variance_power": 1.4
+}
