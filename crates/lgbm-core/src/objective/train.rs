@@ -2,6 +2,7 @@
 
 use super::binary::BinaryLogloss;
 use super::multiclass::{MulticlassOva, MulticlassSoftmax};
+use super::rank::{LambdarankNdcg, RankXendcg};
 use super::regression::Regression;
 use super::xentropy::{CrossEntropy, CrossEntropyLambda};
 use crate::config::Config;
@@ -44,6 +45,8 @@ pub fn create_objective(cfg: &Config, md: &Metadata) -> Result<Box<dyn Objective
         "binary" => Box::new(BinaryLogloss::new(cfg, md, |l| l > 0.0)?),
         "multiclass" => Box::new(MulticlassSoftmax::new(cfg, md)?),
         "multiclassova" => Box::new(MulticlassOva::new(cfg, md)?),
+        "lambdarank" => Box::new(LambdarankNdcg::new(cfg, md)?),
+        "rank_xendcg" => Box::new(RankXendcg::new(cfg, md)?),
         "cross_entropy" => Box::new(CrossEntropy::new(md)?),
         "cross_entropy_lambda" => Box::new(CrossEntropyLambda::new(md)?),
         other => {

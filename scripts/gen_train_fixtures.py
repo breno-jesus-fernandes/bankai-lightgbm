@@ -3,6 +3,7 @@
 Each case writes ``tests/fixtures/train/<case>/``:
   - ``x.npy`` / ``y.npy`` (float64), ``params.json`` (``params`` + ``num_boost_round``)
   - ``w.npy`` (float32 sample weights, only for ``*_weighted`` cases)
+  - ``group.npy`` (int32 query sizes, only for ranking cases)
   - ``model.txt`` (upstream ``model_to_string()`` after ``lgb.train``)
 
 bankai must reproduce ``model.txt`` byte-for-byte (see AGENTS.md, parity tolerances).
@@ -82,6 +83,15 @@ def probability(rng: np.random.Generator) -> Data:
     return x, 1.0 / (1.0 + np.exp(-0.7 * y))
 
 
+def relevance(rng: np.random.Generator) -> Data:
+    """Graded relevance 0..4 from a noisy linear signal; 200 queries of 10 rows."""
+    x, y = reg(rng)
+    edges = np.quantile(y + rng.normal(scale=0.5, size=y.shape), [0.4, 0.65, 0.85, 0.95])
+    return x, np.searchsorted(edges, y).astype(np.float64)
+
+
+GROUP_SIZE = 10
+
 CASES: dict[str, tuple[Callable[[np.random.Generator], Data], dict[str, Any], int]] = {
     "l2_default": (reg, {"objective": "regression"}, 20),
     "l2_small": (
@@ -144,6 +154,25 @@ CASES: dict[str, tuple[Callable[[np.random.Generator], Data], dict[str, Any], in
     ),
     "xentropy": (probability, {"objective": "cross_entropy", "num_leaves": 15}, 15),
     "xentlambda": (probability, {"objective": "cross_entropy_lambda", "num_leaves": 15}, 15),
+    "lambdarank": (relevance, {"objective": "lambdarank", "num_leaves": 15}, 15),
+    "lambdarank_options": (
+        relevance,
+        {
+            "objective": "lambdarank",
+            "num_leaves": 7,
+            "lambdarank_norm": False,
+            "lambdarank_truncation_level": 4,
+            "label_gain": [0, 1, 3, 4, 10],
+            "sigmoid": 1.5,
+        },
+        10,
+    ),
+    "rank_xendcg": (relevance, {"objective": "rank_xendcg", "num_leaves": 15}, 15),
+    "rank_xendcg_seed": (
+        relevance,
+        {"objective": "rank_xendcg", "num_leaves": 7, "objective_seed": 11},
+        10,
+    ),
 }
 
 # Same data and params as the named case, trained with random sample weights.
@@ -162,6 +191,8 @@ WEIGHTED = [
     "multiclassova",
     "xentropy",
     "xentlambda",
+    "lambdarank",
+    "rank_xendcg",
 ]
 
 
@@ -173,13 +204,17 @@ def write_case(
     params: dict[str, Any],
     rounds: int,
 ) -> None:
-    booster = lgb.train(params, lgb.Dataset(x, y, weight=w), num_boost_round=rounds)
+    ranking = params["objective"] in ("lambdarank", "rank_xendcg")
+    group = np.full(len(y) // GROUP_SIZE, GROUP_SIZE, dtype=np.int32) if ranking else None
+    booster = lgb.train(params, lgb.Dataset(x, y, weight=w, group=group), num_boost_round=rounds)
     out = OUT / case
     out.mkdir(parents=True, exist_ok=True)
     np.save(out / "x.npy", x)
     np.save(out / "y.npy", y)
     if w is not None:
         np.save(out / "w.npy", w)
+    if group is not None:
+        np.save(out / "group.npy", group)
     (out / "params.json").write_text(
         json.dumps({"params": params, "num_boost_round": rounds}, indent=1)
     )

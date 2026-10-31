@@ -69,6 +69,19 @@ pub(crate) fn check_rank_labels(label: &[f32], label_gain_len: usize) -> Result<
     Ok(())
 }
 
+/// upstream: `DCGCalculator::CheckMetadata` (query size limit)
+pub(crate) fn check_label_range(boundaries: &[i32]) -> Result<()> {
+    for b in boundaries.windows(2) {
+        let rows = (b[1] - b[0]) as usize;
+        if rows > MAX_POSITION {
+            return Err(Error::InvalidParameter(format!(
+                "Number of rows {rows} exceeds upper limit of {MAX_POSITION} for a query"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// upstream: `DCGCalculator::CalMaxDCG`
 pub(crate) fn cal_max_dcg(
     ks: &[usize],
@@ -158,14 +171,7 @@ impl Ndcg {
         check_queries(md, "NDCG")?;
         check_rank_labels(&md.label, gain.len())?;
         let num_queries = md.query_boundaries.len() - 1;
-        for b in md.query_boundaries.windows(2) {
-            let rows = (b[1] - b[0]) as usize;
-            if rows > MAX_POSITION {
-                return Err(Error::InvalidParameter(format!(
-                    "Number of rows {rows} exceeds upper limit of {MAX_POSITION} for a query"
-                )));
-            }
-        }
+        check_label_range(&md.query_boundaries)?;
         let qw = query_weights(md);
         let sum_query_weights = if qw.is_empty() {
             num_queries as f64

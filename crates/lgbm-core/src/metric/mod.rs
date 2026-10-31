@@ -6,6 +6,12 @@
 mod binary;
 mod multiclass;
 mod rank;
+/// DCG helpers shared with the ranking objectives (upstream: `DCGCalculator`).
+pub(crate) mod rank_support {
+    pub(crate) use super::rank::{
+        cal_max_dcg, check_label_range, check_rank_labels, default_label_gain, discounts,
+    };
+}
 mod regression;
 mod xentropy;
 

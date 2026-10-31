@@ -3,6 +3,7 @@
 
 pub mod binary;
 pub mod multiclass;
+pub mod rank;
 pub mod regression;
 pub mod train;
 pub mod xentropy;

@@ -19,7 +19,7 @@ fn train_cases() -> Vec<PathBuf> {
         .collect();
     out.sort();
     assert!(
-        out.len() >= 41,
+        out.len() >= 47,
         "expected training fixtures; run scripts/gen_train_fixtures.py"
     );
     out
@@ -45,6 +45,11 @@ fn trained_models_match_upstream() {
             let (w, _) = load_npy(&case.join("w.npy"));
             let w: Vec<f32> = w.iter().map(|&v| v as f32).collect();
             ds.set_weights(&w).unwrap();
+        }
+        if case.join("group.npy").exists() {
+            let (g, _) = load_npy(&case.join("group.npy"));
+            let g: Vec<i32> = g.iter().map(|&v| v as i32).collect();
+            ds.set_group(&g).unwrap();
         }
         let model = match Gbdt::train(&cfg, &ds) {
             Ok(m) => m,

@@ -576,6 +576,30 @@ fn write_aligned_i32s(out: &mut Vec<u8>, vals: &[i32]) {
 }
 
 impl Dataset {
+    /// upstream: `Metadata::SetQuery`: `sizes` are the rows of each query, in order
+    /// (an empty slice clears the query information).
+    pub fn set_group(&mut self, sizes: &[i32]) -> Result<()> {
+        if sizes.is_empty() {
+            self.metadata.query_boundaries.clear();
+            return Ok(());
+        }
+        let mut boundaries = Vec::with_capacity(sizes.len() + 1);
+        boundaries.push(0i32);
+        for &s in sizes {
+            if s < 0 {
+                return Err(Error::InvalidParameter("Negative query size".into()));
+            }
+            boundaries.push(boundaries[boundaries.len() - 1] + s);
+        }
+        if boundaries[boundaries.len() - 1] as usize != self.num_data() {
+            return Err(Error::InvalidParameter(
+                "Sum of query counts is not same with #data".into(),
+            ));
+        }
+        self.metadata.query_boundaries = boundaries;
+        Ok(())
+    }
+
     /// upstream: `Metadata::SetWeights` (an empty slice clears the weights).
     pub fn set_weights(&mut self, weights: &[f32]) -> Result<()> {
         if weights.is_empty() {
