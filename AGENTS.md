@@ -85,6 +85,9 @@ Rules:
 
 ## 9. Workflow
 
+- **Commit early, commit often:** commit each green step (test + implementation) as soon as it passes. Never leave work uncommitted at the end of a session.
+- **Always push:** after every commit, `git push` the branch to GitHub (`origin`) so no progress is local-only. Work on a feature branch (e.g. `p1-predict`), never commit directly to `main`. Merge to `main` through a PR.
+- Never commit a red build. If a step is not green yet, keep it out of the commit (or mark the test `#[ignore]`/`xfail` with a reason that points to the roadmap item).
 - Keep PRs small, with one feature or one fix each. Use Conventional Commits (`feat(core): ...`, `fix(io): ...`, `perf(treelearner): ...`, `test(parity): ...`).
 - Tick the matching checkbox in `ROADMAP.md` in the same PR.
 - Update `CHANGELOG.md` for user-visible changes.
