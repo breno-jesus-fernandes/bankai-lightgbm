@@ -1,7 +1,11 @@
 //! PyO3 bindings exposed to Python as `bankai_lightgbm._lib`.
 //! The public, lightgbm-compatible API lives in `python/bankai_lightgbm`.
 
+use std::collections::HashMap;
+
 use lgbm_core::boosting::Gbdt;
+use lgbm_core::config::Config;
+use lgbm_core::io::dataset::Dataset;
 use lgbm_core::predictor::{PredictConfig, PredictKind, Predictor};
 use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::create_exception;
@@ -17,6 +21,58 @@ create_exception!(
 
 fn to_py(err: lgbm_core::Error) -> PyErr {
     LightGBMError::new_err(err.to_string())
+}
+
+/// Binned training data. Mirrors upstream's C API `DatasetHandle`.
+#[pyclass(module = "bankai_lightgbm._lib", frozen)]
+struct NativeDataset {
+    ds: Dataset,
+}
+
+#[pymethods]
+impl NativeDataset {
+    /// Bin a dense row-major `float64` matrix (`LGBM_DatasetCreateFromMat`). `params` are
+    /// the dataset parameters as strings; `categorical` are column indices.
+    #[staticmethod]
+    #[pyo3(signature = (data, label, params, categorical, weight=None, group=None))]
+    fn from_dense(
+        py: Python<'_>,
+        data: PyReadonlyArray2<'_, f64>,
+        label: Vec<f64>,
+        params: HashMap<String, String>,
+        categorical: Vec<i32>,
+        weight: Option<Vec<f32>>,
+        group: Option<Vec<i32>>,
+    ) -> PyResult<Self> {
+        let shape = data.shape().to_vec();
+        let values = data
+            .as_slice()
+            .map_err(|_| LightGBMError::new_err("data must be C-contiguous"))?
+            .to_vec();
+        let ds = py
+            .allow_threads(|| -> lgbm_core::Result<Dataset> {
+                let cfg = Config::from_params(&params)?;
+                let mut ds =
+                    Dataset::from_dense(&values, shape[0], shape[1], &label, &cfg, &categorical)?;
+                if let Some(w) = weight {
+                    ds.set_weights(&w)?;
+                }
+                if let Some(g) = group {
+                    ds.set_group(&g)?;
+                }
+                Ok(ds)
+            })
+            .map_err(to_py)?;
+        Ok(NativeDataset { ds })
+    }
+
+    fn num_data(&self) -> usize {
+        self.ds.num_data()
+    }
+
+    fn num_feature(&self) -> usize {
+        self.ds.layout.num_total_features
+    }
 }
 
 /// Native booster handle. Mirrors upstream's C API `BoosterHandle`.
@@ -39,6 +95,23 @@ impl NativeBooster {
     fn from_string(py: Python<'_>, model_str: String) -> PyResult<Self> {
         let model = py
             .allow_threads(|| Gbdt::from_model_string(&model_str))
+            .map_err(to_py)?;
+        Ok(NativeBooster { model })
+    }
+
+    /// Train `num_iterations` rounds on `dataset` (`LGBM_BoosterCreate` + `UpdateOneIter`).
+    #[staticmethod]
+    fn train(
+        py: Python<'_>,
+        params: HashMap<String, String>,
+        dataset: PyRef<'_, NativeDataset>,
+    ) -> PyResult<Self> {
+        let ds: &Dataset = &dataset.ds;
+        let model = py
+            .allow_threads(|| -> lgbm_core::Result<Gbdt> {
+                let cfg = Config::from_params(&params)?;
+                Gbdt::train(&cfg, ds)
+            })
             .map_err(to_py)?;
         Ok(NativeBooster { model })
     }
@@ -185,5 +258,6 @@ fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("LightGBMError", m.py().get_type::<LightGBMError>())?;
     m.add_class::<NativeBooster>()?;
+    m.add_class::<NativeDataset>()?;
     Ok(())
 }

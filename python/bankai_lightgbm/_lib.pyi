@@ -8,7 +8,22 @@ __version__: str
 
 class LightGBMError(Exception): ...
 
+class NativeDataset:
+    @staticmethod
+    def from_dense(
+        data: npt.NDArray[np.float64],
+        label: list[float],
+        params: dict[str, str],
+        categorical: list[int],
+        weight: list[float] | None = None,
+        group: list[int] | None = None,
+    ) -> NativeDataset: ...
+    def num_data(self) -> int: ...
+    def num_feature(self) -> int: ...
+
 class NativeBooster:
+    @staticmethod
+    def train(params: dict[str, str], dataset: NativeDataset) -> NativeBooster: ...
     @staticmethod
     def from_file(path: str) -> NativeBooster: ...
     @staticmethod
