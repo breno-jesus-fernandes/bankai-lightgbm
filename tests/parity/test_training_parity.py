@@ -100,10 +100,79 @@ def test_booster_update_matches_two_round_upstream_training() -> None:
     np.testing.assert_allclose(trained_once.predict(x), expected.predict(x), rtol=1e-12, atol=1e-15)
 
 
+def test_early_stopping_callback_matches_upstream() -> None:
+    rng = np.random.default_rng(17)
+    x_train = rng.normal(size=(100, 3))
+    y_train = x_train[:, 0] + 0.1 * x_train[:, 1]
+    x_valid = rng.normal(size=(60, 3))
+    y_valid = -x_valid[:, 0] - 0.1 * x_valid[:, 1]
+    params: dict[str, Any] = {
+        "objective": "regression",
+        "metric": "l2",
+        "verbosity": -1,
+        "num_leaves": 7,
+        "min_data_in_leaf": 2,
+        "min_data_in_bin": 1,
+        "max_bin": 31,
+        "learning_rate": 0.3,
+        "boost_from_average": False,
+        "deterministic": True,
+        "force_col_wise": True,
+        "seed": 17,
+        "num_threads": 1,
+    }
+    train_set = lgb.Dataset(x_train, label=y_train, params=dict(params))
+    valid_set = lgb.Dataset(x_valid, label=y_valid, reference=train_set, params=dict(params))
+    ours = lgb.train(
+        dict(params),
+        train_set,
+        num_boost_round=30,
+        valid_sets=[valid_set],
+        valid_names=["valid"],
+        callbacks=[lgb.early_stopping(2, verbose=False)],
+    )
+    theirs_train_set = lightgbm.Dataset(x_train, label=y_train, params=dict(params))
+    theirs_valid_set = lightgbm.Dataset(
+        x_valid, label=y_valid, reference=theirs_train_set, params=dict(params)
+    )
+    theirs = lightgbm.train(
+        dict(params),
+        theirs_train_set,
+        num_boost_round=30,
+        valid_sets=[theirs_valid_set],
+        valid_names=["valid"],
+        callbacks=[lightgbm.early_stopping(2, verbose=False)],
+    )
+
+    assert ours.best_iteration == theirs.best_iteration
+    assert ours.current_iteration() == theirs.current_iteration()
+    np.testing.assert_allclose(
+        ours.predict(x_valid), theirs.predict(x_valid), rtol=1e-12, atol=1e-15
+    )
+    assert ours.best_score.keys() == theirs.best_score.keys()
+    np.testing.assert_allclose(
+        ours.best_score["valid"]["l2"], theirs.best_score["valid"]["l2"], rtol=1e-12
+    )
+    assert ours.eval_valid() == theirs.eval_valid() == []
+
+    automatic = lgb.train(
+        {**params, "early_stopping_round": 2},
+        lgb.Dataset(x_train, label=y_train, params=dict(params)),
+        num_boost_round=30,
+        valid_sets=[lgb.Dataset(x_valid, label=y_valid, params=dict(params))],
+        valid_names=["valid"],
+    )
+    assert automatic.best_iteration == theirs.best_iteration
+    assert automatic.current_iteration() == theirs.current_iteration()
+
+
 def test_train_rejects_unimplemented_options() -> None:
     x = np.random.default_rng(0).normal(size=(40, 2))
     ds = lgb.Dataset(x, label=x[:, 0], params={"verbose": -1})
-    with pytest.raises(NotImplementedError, match="valid_sets"):
-        lgb.train({"verbose": -1}, ds, valid_sets=[ds])
+    with pytest.raises(NotImplementedError, match="feval"):
+        lgb.train({"verbose": -1}, ds, feval=lambda *_: [])
+    referenced = lgb.Dataset(x, label=x[:, 0], reference=ds)
+    with pytest.raises(NotImplementedError, match="shared reference binning"):
+        referenced.construct()
     with pytest.raises(ValueError, match="greater than zero"):
         lgb.train({"verbose": -1}, ds, num_boost_round=0)

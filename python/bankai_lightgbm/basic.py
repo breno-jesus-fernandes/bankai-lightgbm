@@ -171,6 +171,7 @@ class Dataset:
         self.pandas_categorical: list[list[Any]] | None = None
         self._categorical: list[int] = []
         self._handle: NativeDataset | None = None
+        self._evaluation_handle: NativeDataset | None = None
 
     def construct(self) -> Dataset:
         """Bin the data (no-op if already constructed)."""
@@ -189,9 +190,20 @@ class Dataset:
             raise LightGBMError("Dataset is not constructed")
         return self._handle
 
-    def _build(self) -> NativeDataset:
+    def _construct_for_eval(self) -> NativeDataset:
+        if self._evaluation_handle is None:
+            if self._handle is not None:
+                return self._handle
+            self._evaluation_handle = self._build(evaluation=True)
+        return self._evaluation_handle
+
+    def _build(self, *, evaluation: bool = False) -> NativeDataset:
         if self.reference is not None:
-            raise NotImplementedError("validation datasets (reference=) are not implemented yet")
+            if not evaluation:
+                raise NotImplementedError(
+                    "shared reference binning is not implemented yet (roadmap P2)"
+                )
+            self.reference.construct()
         if self.init_score is not None:
             raise NotImplementedError("init_score is not implemented yet (roadmap P5)")
         if _is_scipy_sparse(self.data):
@@ -209,10 +221,15 @@ class Dataset:
                 for i, dtype in enumerate(self.data.dtypes)
                 if isinstance(dtype, pd.CategoricalDtype)
             ]
-            self.pandas_categorical = [
+            observed_categorical = [
                 list(self.data[self.data.columns[i]].cat.categories) for i in pandas_cat_cols
             ] or None
-            matrix = _data_from_pandas(self.data, None)
+            self.pandas_categorical = (
+                self.reference.pandas_categorical
+                if self.reference is not None
+                else observed_categorical
+            )
+            matrix = _data_from_pandas(self.data, self.pandas_categorical)
         else:
             matrix = np.asarray(self.data, dtype=np.float64)
         if matrix.ndim != 2:
@@ -254,6 +271,7 @@ class Booster:
         self.best_score: dict[str, dict[str, float]] = {}
         self._train_set = train_set
         self._handle: NativeBooster | None = None
+        self.valid_sets: list[tuple[Dataset, str]] = []
         if train_set is not None:
             if model_file is not None or model_str is not None:
                 raise TypeError("Booster cannot take both a training set and a model")
@@ -308,6 +326,21 @@ class Booster:
             self.pandas_categorical = dataset.pandas_categorical
         return self._native().update()
 
+    def add_valid(self, data: Dataset, name: str) -> None:
+        """Register a validation dataset for :meth:`eval_valid`."""
+        self.valid_sets.append((data, name))
+
+    def eval_valid(self, feval: Any = None) -> list[tuple[str, str, float, bool]]:
+        """Evaluate configured metrics on every registered validation dataset."""
+        if feval is not None:
+            raise NotImplementedError("custom evaluation functions are not implemented yet")
+        results: list[tuple[str, str, float, bool]] = []
+        for dataset, name in self.valid_sets:
+            native_dataset = dataset._construct_for_eval()
+            params = {**dataset.params, **self.params}
+            results.extend(self._native().eval(native_dataset, _params_to_strings(params), name))
+        return results
+
     def __copy__(self) -> Booster:
         return self.__deepcopy__(None)
 
@@ -325,6 +358,8 @@ class Booster:
         model_str = state.get("_handle", state.get("handle"))
         if isinstance(model_str, str):
             state["_handle"] = NativeBooster.from_string(model_str)
+        state.setdefault("_train_set", None)
+        state.setdefault("valid_sets", [])
         self.__dict__.update(state)
 
     def model_from_string(self, model_str: str) -> Booster:

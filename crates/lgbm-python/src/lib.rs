@@ -7,6 +7,7 @@ use std::sync::Arc;
 use lgbm_core::boosting::{Gbdt, GbdtTrainer};
 use lgbm_core::config::Config;
 use lgbm_core::io::dataset::Dataset;
+use lgbm_core::metric::create_metric;
 use lgbm_core::predictor::{PredictConfig, PredictKind, Predictor};
 use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::create_exception;
@@ -28,6 +29,9 @@ fn to_py(err: lgbm_core::Error) -> PyErr {
 #[pyclass(module = "bankai_lightgbm._lib", frozen)]
 struct NativeDataset {
     ds: Arc<Dataset>,
+    data: Arc<Vec<f64>>,
+    nrow: usize,
+    ncol: usize,
 }
 
 #[pymethods]
@@ -46,15 +50,18 @@ impl NativeDataset {
         group: Option<Vec<i32>>,
     ) -> PyResult<Self> {
         let shape = data.shape().to_vec();
-        let values = data
-            .as_slice()
-            .map_err(|_| LightGBMError::new_err("data must be C-contiguous"))?
-            .to_vec();
+        let values = Arc::new(
+            data.as_slice()
+                .map_err(|_| LightGBMError::new_err("data must be C-contiguous"))?
+                .to_vec(),
+        );
+        let values_for_build = Arc::clone(&values);
+        let (nrow, ncol) = (shape[0], shape[1]);
         let ds = py
             .allow_threads(|| -> lgbm_core::Result<Dataset> {
                 let cfg = Config::from_params(&params)?;
                 let mut ds =
-                    Dataset::from_dense(&values, shape[0], shape[1], &label, &cfg, &categorical)?;
+                    Dataset::from_dense(&values_for_build, nrow, ncol, &label, &cfg, &categorical)?;
                 if let Some(w) = weight {
                     ds.set_weights(&w)?;
                 }
@@ -64,7 +71,12 @@ impl NativeDataset {
                 Ok(ds)
             })
             .map_err(to_py)?;
-        Ok(NativeDataset { ds: Arc::new(ds) })
+        Ok(NativeDataset {
+            ds: Arc::new(ds),
+            data: values,
+            nrow,
+            ncol,
+        })
     }
 
     fn num_data(&self) -> usize {
@@ -167,6 +179,57 @@ impl NativeBooster {
         });
         self.model = model;
         Ok(finished)
+    }
+
+    fn eval(
+        &self,
+        py: Python<'_>,
+        dataset: PyRef<'_, NativeDataset>,
+        params: HashMap<String, String>,
+        data_name: String,
+    ) -> PyResult<Vec<(String, String, f64, bool)>> {
+        let model = &self.model;
+        let ds = Arc::clone(&dataset.ds);
+        let data = Arc::clone(&dataset.data);
+        let (nrow, ncol) = (dataset.nrow, dataset.ncol);
+        py.allow_threads(|| -> lgbm_core::Result<Vec<(String, String, f64, bool)>> {
+            let cfg = Config::from_params(&params)?;
+            let pred_cfg = PredictConfig {
+                kind: PredictKind::RawScore,
+                num_threads: cfg.num_threads.max(0) as usize,
+                ..PredictConfig::default()
+            };
+            let predictor = Predictor::new(model, &pred_cfg)?;
+            let row_scores = predictor.predict_dense(&data, nrow, ncol)?;
+            let nclass = model.num_class();
+            let scores = if nclass > 1 {
+                let mut class_major = vec![0.0; row_scores.len()];
+                for row in 0..nrow {
+                    for class in 0..nclass {
+                        class_major[class * nrow + row] = row_scores[row * nclass + class];
+                    }
+                }
+                class_major
+            } else {
+                row_scores
+            };
+            let mut results = Vec::new();
+            for metric_name in &cfg.metric {
+                if let Some(metric) = create_metric(metric_name, &cfg, &ds.metadata)? {
+                    let values = metric.eval(&scores, model.objective());
+                    for (name, value) in metric.names().iter().zip(values) {
+                        results.push((
+                            data_name.clone(),
+                            name.clone(),
+                            value,
+                            metric.factor_to_bigger_better() > 0.0,
+                        ));
+                    }
+                }
+            }
+            Ok(results)
+        })
+        .map_err(to_py)
     }
 
     fn num_class(&self) -> usize {

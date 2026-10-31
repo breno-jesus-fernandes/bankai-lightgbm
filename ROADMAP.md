@@ -65,14 +65,14 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 - [x] DART (`drop_rate`, `max_drop`, `skip_drop`, `xgboost_dart_mode`, `uniform_drop`; byte-identical, 4 fixtures; the drop replays recorded splits on all rows)
 - [x] RF (`boosting=rf`, byte-identical; known gap: a first tree with no split is scored on out-of-bag rows only, matching upstream's non-subset path, the subset path is not modelled)
 - [x] GOSS (`data_sample_strategy=goss`, byte-identical; both the subset and dense regimes)
-- [ ] Early stopping (`early_stopping_round`, `first_metric_only`, `early_stopping_min_delta`)
+- [x] Early stopping (`early_stopping_round`, `first_metric_only`, `early_stopping_min_delta`; validation metrics and callback parity)
 - [ ] Continued training (`init_model`), `init_score`
 - [ ] Model merge/shuffle, `set_leaf_output`, `rollback_one_iter`
 
 ## P6: Python package (drop-in)
-- [ ] `Dataset` (done: dense numpy and pandas incl. categoricals, weight, group, categorical_feature; pending: scipy.sparse, pyarrow, files, references, subsets, init_score)
+- [ ] `Dataset` (done: dense numpy and pandas incl. categoricals, weight, group, categorical_feature; pending: scipy.sparse, pyarrow, files, shared reference binning, subsets, init_score)
 - [ ] `Booster` (training works: `lgb.train` gives byte-identical model text; Rust `GbdtTrainer` and Python `Booster.update()` support incremental training; pending: full method surface, `cv`)
-- [ ] Callbacks: `early_stopping`, `log_evaluation`, `record_evaluation`, `reset_parameter`
+- [ ] Callbacks: `early_stopping` ✅; pending `log_evaluation`, `record_evaluation`, `reset_parameter`
 - [ ] sklearn API: `LGBMModel`, `LGBMClassifier`, `LGBMRegressor`, `LGBMRanker`
 - [ ] Plotting: `plot_importance`, `plot_split_value_histogram`, `plot_metric`, `plot_tree`, `create_tree_digraph`
 - [ ] Port upstream `tests/python_package_test` and run it green
