@@ -6,14 +6,22 @@
 /// C `printf("%.{precision}g", v)`.
 pub fn format_g(v: f64, precision: usize) -> String {
     if v.is_nan() {
-        return if v.is_sign_negative() { "-nan".into() } else { "nan".into() };
+        return if v.is_sign_negative() {
+            "-nan".into()
+        } else {
+            "nan".into()
+        };
     }
     if v.is_infinite() {
         return if v < 0.0 { "-inf".into() } else { "inf".into() };
     }
     let p = precision.max(1);
     if v == 0.0 {
-        return if v.is_sign_negative() { "-0".into() } else { "0".into() };
+        return if v.is_sign_negative() {
+            "-0".into()
+        } else {
+            "0".into()
+        };
     }
     // Correctly rounded scientific form with p significant digits gives the exponent X.
     let sci = format!("{:.*e}", p - 1, v);
@@ -35,7 +43,11 @@ pub fn format_g_f32(v: f32, precision: usize) -> String {
 }
 
 fn strip_trailing_zeros(s: &str) -> &str {
-    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.') } else { s }
+    if s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        s
+    }
 }
 
 /// Upstream `ArrayToString<false>` for doubles: `{:g}` joined by spaces.

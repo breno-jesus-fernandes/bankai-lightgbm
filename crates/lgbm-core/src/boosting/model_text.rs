@@ -57,7 +57,8 @@ impl Gbdt {
     pub fn feature_importance(&self, num_iteration: i32, importance_type: i32) -> Result<Vec<f64>> {
         let mut num_used_model = self.models.len();
         if num_iteration > 0 {
-            num_used_model = num_used_model.min(num_iteration as usize * self.num_tree_per_iteration);
+            num_used_model =
+                num_used_model.min(num_iteration as usize * self.num_tree_per_iteration);
         }
         let mut imp = vec![0.0; self.num_features()];
         for t in &self.models[..num_used_model] {
@@ -105,7 +106,11 @@ impl Gbdt {
         }
         let _ = writeln!(s, "feature_names={}", self.feature_names.join(" "));
         if !self.monotone_constraints.is_empty() {
-            let _ = writeln!(s, "monotone_constraints={}", join_display(&self.monotone_constraints));
+            let _ = writeln!(
+                s,
+                "monotone_constraints={}",
+                join_display(&self.monotone_constraints)
+            );
         }
         let _ = writeln!(s, "feature_infos={}", self.feature_infos.join(" "));
 
@@ -139,7 +144,7 @@ impl Gbdt {
                 (iv > 0).then_some((iv, n.as_str()))
             })
             .collect();
-        pairs.sort_by(|a, b| b.0.cmp(&a.0)); // stable, descending
+        pairs.sort_by_key(|p| std::cmp::Reverse(p.0)); // stable, descending
         s.push_str("\nfeature_importances:\n");
         for (v, n) in pairs {
             let _ = writeln!(s, "{n}={v}");

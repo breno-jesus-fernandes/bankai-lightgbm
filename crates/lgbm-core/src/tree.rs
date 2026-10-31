@@ -153,7 +153,10 @@ impl Tree {
         tree.split_feature = parse_array(req("split_feature")?, n_int)?;
         tree.threshold = parse_array(req("threshold")?, n_int)?;
         tree.split_gain = match kv.get("split_gain") {
-            Some(v) => parse_array_fast_f64(v, n_int)?.into_iter().map(|x| x as f32).collect(),
+            Some(v) => parse_array_fast_f64(v, n_int)?
+                .into_iter()
+                .map(|x| x as f32)
+                .collect(),
             None => vec![0.0; n_int],
         };
         tree.internal_count = opt_array(&kv, "internal_count", n_int)?;
@@ -241,23 +244,53 @@ impl Tree {
     pub fn to_model_string(&self) -> String {
         use std::fmt::Write;
         let n_int = self.num_leaves.saturating_sub(1);
-        let gains: Vec<String> =
-            self.split_gain[..n_int.min(self.split_gain.len())].iter().map(|g| format_g(f64::from(*g), 6)).collect();
+        let gains: Vec<String> = self.split_gain[..n_int.min(self.split_gain.len())]
+            .iter()
+            .map(|g| format_g(f64::from(*g), 6))
+            .collect();
         let mut s = String::with_capacity(64 * self.num_leaves + 512);
         let _ = writeln!(s, "num_leaves={}", self.num_leaves);
         let _ = writeln!(s, "num_cat={}", self.num_cat);
-        let _ = writeln!(s, "split_feature={}", join_display(head(&self.split_feature, n_int)));
+        let _ = writeln!(
+            s,
+            "split_feature={}",
+            join_display(head(&self.split_feature, n_int))
+        );
         let _ = writeln!(s, "split_gain={}", gains.join(" "));
         let _ = writeln!(s, "threshold={}", join_g17(head(&self.threshold, n_int)));
-        let _ = writeln!(s, "decision_type={}", join_display(head(&self.decision_type, n_int)));
-        let _ = writeln!(s, "left_child={}", join_display(head(&self.left_child, n_int)));
-        let _ = writeln!(s, "right_child={}", join_display(head(&self.right_child, n_int)));
+        let _ = writeln!(
+            s,
+            "decision_type={}",
+            join_display(head(&self.decision_type, n_int))
+        );
+        let _ = writeln!(
+            s,
+            "left_child={}",
+            join_display(head(&self.left_child, n_int))
+        );
+        let _ = writeln!(
+            s,
+            "right_child={}",
+            join_display(head(&self.right_child, n_int))
+        );
         let _ = writeln!(s, "leaf_value={}", join_g17(&self.leaf_value));
         let _ = writeln!(s, "leaf_weight={}", join_g17(&self.leaf_weight));
         let _ = writeln!(s, "leaf_count={}", join_display(&self.leaf_count));
-        let _ = writeln!(s, "internal_value={}", join_g(head(&self.internal_value, n_int)));
-        let _ = writeln!(s, "internal_weight={}", join_g(head(&self.internal_weight, n_int)));
-        let _ = writeln!(s, "internal_count={}", join_display(head(&self.internal_count, n_int)));
+        let _ = writeln!(
+            s,
+            "internal_value={}",
+            join_g(head(&self.internal_value, n_int))
+        );
+        let _ = writeln!(
+            s,
+            "internal_weight={}",
+            join_g(head(&self.internal_weight, n_int))
+        );
+        let _ = writeln!(
+            s,
+            "internal_count={}",
+            join_display(head(&self.internal_count, n_int))
+        );
         if self.num_cat > 0 {
             let _ = writeln!(s, "cat_boundaries={}", join_display(&self.cat_boundaries));
             let _ = writeln!(s, "cat_threshold={}", join_display(&self.cat_threshold));

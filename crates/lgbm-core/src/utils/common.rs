@@ -84,7 +84,10 @@ pub fn atof_legacy(s: &str) -> Option<f64> {
     }
     let is_num = p < b.len() && (b[p].is_ascii_digit() || matches!(b[p], b'.' | b'e' | b'E'));
     if !is_num {
-        return match String::from_utf8_lossy(&b[p..]).to_ascii_lowercase().as_str() {
+        return match String::from_utf8_lossy(&b[p..])
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "na" | "nan" | "null" => Some(f64::NAN),
             "inf" | "infinity" => Some(sign * 1e308),
             _ => None,
@@ -145,10 +148,15 @@ pub fn atof_legacy(s: &str) -> Option<f64> {
 pub fn parse_array_fast_f64(s: &str, n: usize) -> Result<Vec<f64>> {
     let out: Vec<f64> = s
         .split_ascii_whitespace()
-        .map(|t| atof_legacy(t).ok_or_else(|| Error::Parse(format!("cannot parse number from {t:?}"))))
+        .map(|t| {
+            atof_legacy(t).ok_or_else(|| Error::Parse(format!("cannot parse number from {t:?}")))
+        })
         .collect::<Result<_>>()?;
     if out.len() != n {
-        return Err(Error::Parse(format!("array size mismatch: expected {n}, got {}", out.len())));
+        return Err(Error::Parse(format!(
+            "array size mismatch: expected {n}, got {}",
+            out.len()
+        )));
     }
     Ok(out)
 }

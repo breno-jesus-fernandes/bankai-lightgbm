@@ -228,7 +228,9 @@ mod tests {
             let o = LoadedObjective::from_model_str(s).unwrap().unwrap();
             assert_eq!(o.to_model_string(), s);
         }
-        let o = LoadedObjective::from_model_str("huber sqrt").unwrap().unwrap();
+        let o = LoadedObjective::from_model_str("huber sqrt")
+            .unwrap()
+            .unwrap();
         assert_eq!(o.to_model_string(), "huber");
     }
 
