@@ -8,18 +8,22 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 - [x] maturin/PyO3 package `bankai_lightgbm` (Python >= 3.11)
 - [x] CI: fmt, clippy, test, Python 3.11–3.13 on ubuntu/macos/windows
 - [x] Fixture generator `scripts/gen_fixtures.py` (upstream 4.7.0)
-- [ ] Parity harness helpers (`tests/parity/conftest.py`)
-- [ ] Bench harness: criterion + Python benchmark against upstream, with regression gate in CI
+- [x] Parity harness helpers (`tests/parity/conftest.py`, `crates/lgbm-core/tests/support`), platform-aware bit-exactness
+- [x] Python benchmark vs upstream (`benches/bench_predict.py`, non-zero exit if slower)
+- [ ] criterion micro-benchmarks + regression gate in CI
 - [ ] `cargo miri` job for the unsafe-allowlisted modules
 - [ ] Parameter table code generator from upstream `config.h`
 
 ## P1: Config + model I/O + prediction
 - [ ] All params + aliases + validation (`Config::from_map`, `config_auto` equivalent)
-- [ ] Model text parser and writer (`gbdt_model_text.cpp`)
-- [ ] `Tree` (numerical, categorical, and linear leaves), `dump_model` JSON
-- [ ] Predict: normal, `raw_score`, `pred_leaf`, `pred_contrib` (TreeSHAP), `start_iteration`/`num_iteration`
-- [ ] Prediction early stopping (`pred_early_stop*`)
-- **Gate:** every golden model predicts bit-exactly
+- [x] Model text parser and writer (`gbdt_model_text.cpp`), byte-identical round-trip
+- [x] `Tree` (numerical, categorical, and linear leaves), `dump_model` JSON
+- [x] Predict: normal, `raw_score`, `pred_leaf`, `pred_contrib` (TreeSHAP), `start_iteration`/`num_iteration`
+- [x] Prediction early stopping (`pred_early_stop*`)
+- [x] Python `Booster`: load/predict/save/dump/importance/pickle (dense numpy, lists, pandas)
+- [ ] Sparse (CSR/CSC) prediction input, sparse `pred_contrib` output
+- [ ] Predict from file (`data` as path) — needs P2 parsers
+- **Gate:** every golden model predicts bit-exactly ✅ (24 fixtures; 1.25–1.33x faster predict, 1.05x SHAP)
 
 ## P2: Dataset + binning
 - [ ] `BinMapper`: numerical/categorical, `max_bin`, `max_bin_by_feature`, `min_data_in_bin`, `bin_construct_sample_cnt`

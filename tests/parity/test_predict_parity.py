@@ -2,10 +2,11 @@
 
 from pathlib import Path
 
-import bankai_lightgbm as lgb
 import numpy as np
 import pytest
 from conftest import assert_parity
+
+import bankai_lightgbm as lgb
 
 
 def _x(case_dir: Path) -> np.ndarray:

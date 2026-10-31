@@ -43,6 +43,12 @@ pub struct Tree {
     max_depth: i32,
 }
 
+/// Reusable TreeSHAP working memory (one per thread).
+#[derive(Default)]
+pub struct ShapScratch {
+    path: Vec<PathElement>,
+}
+
 #[derive(Clone, Copy, Default)]
 struct PathElement {
     feature_index: i32,
@@ -605,11 +611,26 @@ impl Tree {
     ///
     /// upstream: `Tree::PredictContrib`
     pub fn predict_contrib(&self, features: &[f64], num_features: usize, output: &mut [f64]) {
+        let mut scratch = ShapScratch::default();
+        self.predict_contrib_with(features, num_features, output, &mut scratch);
+    }
+
+    /// Same as [`Tree::predict_contrib`], reusing `scratch` to avoid per-call allocation.
+    pub fn predict_contrib_with(
+        &self,
+        features: &[f64],
+        num_features: usize,
+        output: &mut [f64],
+        scratch: &mut ShapScratch,
+    ) {
         output[num_features] += self.expected_value();
         if self.num_leaves > 1 {
             let max_path_len = (self.max_depth.max(0) as usize) + 1;
-            let mut path = vec![PathElement::default(); max_path_len * (max_path_len + 1) / 2];
-            self.tree_shap(features, output, 0, 0, &mut path, 0, 1.0, 1.0, -1);
+            let need = max_path_len * (max_path_len + 1) / 2;
+            if scratch.path.len() < need {
+                scratch.path.resize(need, PathElement::default());
+            }
+            self.tree_shap(features, output, 0, 0, &mut scratch.path, 0, 1.0, 1.0, -1);
         }
     }
 

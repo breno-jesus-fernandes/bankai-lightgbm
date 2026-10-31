@@ -2,10 +2,11 @@
 
 from pathlib import Path
 
-import bankai_lightgbm as lgb
 import lightgbm
 import numpy as np
 import pytest
+
+import bankai_lightgbm as lgb
 
 FIX = Path(__file__).resolve().parent.parent / "fixtures"
 

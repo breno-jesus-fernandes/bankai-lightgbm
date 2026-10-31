@@ -8,8 +8,8 @@ cargo test --workspace --quiet
 if [ -d .venv ]; then
   # shellcheck disable=SC1091
   source .venv/bin/activate
-  ruff format --check python scripts tests
-  ruff check python scripts tests
+  ruff format --check python scripts tests benches
+  ruff check python scripts tests benches
   mypy
   maturin develop -q
   pytest -q

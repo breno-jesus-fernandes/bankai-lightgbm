@@ -42,6 +42,9 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["bankai_lightgbm"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true

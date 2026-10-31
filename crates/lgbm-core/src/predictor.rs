@@ -6,6 +6,7 @@ use rayon::prelude::*;
 use crate::boosting::Gbdt;
 use crate::error::{Error, Result};
 use crate::meta::K_ZERO_THRESHOLD;
+use crate::tree::ShapScratch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PredictKind {
@@ -174,10 +175,10 @@ impl<'a> Predictor<'a> {
             out.par_chunks_mut(k)
                 .zip(data.par_chunks(ncol.max(1)))
                 .for_each_init(
-                    || vec![0.0f64; nf],
-                    |buf, (o, row)| {
+                    || (vec![0.0f64; nf], ShapScratch::default()),
+                    |(buf, scratch), (o, row)| {
                         fill_buffer(buf, row);
-                        self.predict_one(buf, o);
+                        self.predict_one_with(buf, o, scratch);
                     },
                 );
         };
@@ -189,8 +190,12 @@ impl<'a> Predictor<'a> {
     }
 
     /// Predict one row given a dense feature buffer of length `num_features`.
-    #[inline]
     pub fn predict_one(&self, features: &[f64], out: &mut [f64]) {
+        self.predict_one_with(features, out, &mut ShapScratch::default());
+    }
+
+    #[inline]
+    fn predict_one_with(&self, features: &[f64], out: &mut [f64], scratch: &mut ShapScratch) {
         let m = self.model;
         let ntpi = m.num_tree_per_iteration();
         let trees = m.trees();
@@ -206,10 +211,11 @@ impl<'a> Predictor<'a> {
                 out.fill(0.0);
                 for it in self.start..self.start + self.num {
                     for k in 0..ntpi {
-                        trees[it * ntpi + k].predict_contrib(
+                        trees[it * ntpi + k].predict_contrib_with(
                             features,
                             nf,
                             &mut out[k * (nf + 1)..(k + 1) * (nf + 1)],
+                            scratch,
                         );
                     }
                 }
