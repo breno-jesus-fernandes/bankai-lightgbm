@@ -19,6 +19,57 @@ pub fn cases() -> Vec<PathBuf> {
     out
 }
 
+/// Every dataset fixture directory (`tests/fixtures/datasets/<case>`).
+pub fn dataset_cases() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(fixtures_dir().join("datasets"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.join("dataset.bin").exists())
+        .collect();
+    out.sort();
+    assert!(
+        !out.is_empty(),
+        "no dataset fixtures; run scripts/gen_dataset_fixtures.py"
+    );
+    out
+}
+
+/// Dataset params (`params.json`) as strings, the way the Python package passes them,
+/// plus the categorical feature indices.
+pub fn dataset_params(case: &Path) -> (std::collections::HashMap<String, String>, Vec<i32>) {
+    let text = std::fs::read_to_string(case.join("params.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let mut params = std::collections::HashMap::new();
+    for (k, val) in v["params"].as_object().unwrap() {
+        let s = match val {
+            serde_json::Value::Array(a) => a.iter().map(json_scalar).collect::<Vec<_>>().join(","),
+            other => json_scalar(other),
+        };
+        params.insert(k.clone(), s);
+    }
+    let cats = v["categorical"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_i64().unwrap() as i32)
+        .collect();
+    (params, cats)
+}
+
+fn json_scalar(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Bool(b) => {
+            if *b {
+                "true".into()
+            } else {
+                "false".into()
+            }
+        }
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// Feature matrix (row-major) and column count from `test.npy`; column 0 is the label.
 pub fn load_test_features(case: &Path) -> (Vec<f64>, usize) {
     let (all, shape) = load_npy(&case.join("test.npy"));

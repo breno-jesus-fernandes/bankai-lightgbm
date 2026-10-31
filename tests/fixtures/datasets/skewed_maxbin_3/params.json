@@ -1,0 +1,7 @@
+{
+ "params": {
+  "verbose": -1,
+  "max_bin": 3
+ },
+ "categorical": []
+}

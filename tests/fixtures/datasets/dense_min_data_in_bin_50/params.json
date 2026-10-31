@@ -1,0 +1,8 @@
+{
+ "params": {
+  "verbose": -1,
+  "min_data_in_bin": 50,
+  "min_data_in_leaf": 5
+ },
+ "categorical": []
+}

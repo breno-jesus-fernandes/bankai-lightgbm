@@ -4,6 +4,7 @@
 pub mod boosting;
 pub mod config;
 pub mod error;
+pub mod io;
 pub mod meta;
 pub mod objective;
 pub mod predictor;

@@ -7,8 +7,9 @@ pub const K_ZERO_THRESHOLD: f64 = 1e-35_f32 as f64;
 pub const K_EPSILON: f32 = 1e-15;
 
 /// How missing values are routed at a numerical split (bits 2-3 of `decision_type`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MissingType {
+    #[default]
     None,
     Zero,
     NaN,
