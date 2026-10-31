@@ -10,5 +10,6 @@
   "scale_pos_weight": 2.5,
   "num_leaves": 7
  },
- "num_boost_round": 10
+ "num_boost_round": 10,
+ "categorical": []
 }

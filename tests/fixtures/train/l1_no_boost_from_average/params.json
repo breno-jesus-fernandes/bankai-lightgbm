@@ -9,5 +9,6 @@
   "num_leaves": 15,
   "boost_from_average": false
  },
- "num_boost_round": 10
+ "num_boost_round": 10,
+ "categorical": []
 }

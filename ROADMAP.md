@@ -43,7 +43,7 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 - [ ] Histogram pool + subtraction trick, `histogram_pool_size`
 - [x] Leaf-wise growth, `num_leaves`, `max_depth`, `min_data_in_leaf`, `min_sum_hessian_in_leaf`
 - [x] Regularization: `lambda_l1`, `lambda_l2`, `min_gain_to_split`, `max_delta_step`, `path_smooth`
-- [ ] Categorical splits (`max_cat_threshold`, `cat_l2`, `cat_smooth`, `max_cat_to_onehot`, `min_data_per_group`)
+- [x] Categorical splits (`max_cat_threshold`, `cat_l2`, `cat_smooth`, `max_cat_to_onehot`, `min_data_per_group`; byte-identical, one-hot and sorted search, NaN categories, bagging; monotone + categorical still unsupported)
 - [ ] `feature_fraction`, `feature_fraction_bynode`, `bagging_fraction`/`bagging_freq`, pos/neg bagging (done, byte-identical; `bagging_by_query` and `extra_trees` still missing)
 - [ ] Monotone constraints: basic, intermediate, advanced; `monotone_penalty`
 - [ ] `interaction_constraints`, `forcedsplits_filename`, CEGB (`cegb_*`)

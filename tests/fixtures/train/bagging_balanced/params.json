@@ -11,5 +11,6 @@
   "pos_bagging_fraction": 0.5,
   "neg_bagging_fraction": 0.8
  },
- "num_boost_round": 12
+ "num_boost_round": 12,
+ "categorical": []
 }

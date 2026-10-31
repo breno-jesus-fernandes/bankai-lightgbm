@@ -8,5 +8,6 @@
   "objective": "binary",
   "is_unbalance": true
  },
- "num_boost_round": 10
+ "num_boost_round": 10,
+ "categorical": []
 }

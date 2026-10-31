@@ -13,5 +13,6 @@
   "other_rate": 0.4,
   "bagging_seed": 17
  },
- "num_boost_round": 12
+ "num_boost_round": 12,
+ "categorical": []
 }

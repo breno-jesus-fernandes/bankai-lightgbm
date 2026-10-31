@@ -7,6 +7,35 @@ use crate::io::dataset::{Dataset, GroupData};
 use crate::meta::MissingType;
 use crate::utils::common::find_in_bitset;
 
+/// The dense bin column of a feature with its bin range inside the group:
+/// `(column, min_bin, max_bin, use_min_bin)`.
+fn group_view(ds: &Dataset, inner_feature: usize) -> (&DenseBin, u32, u32, bool) {
+    let l = &ds.layout;
+    let g = &l.groups[l.feature2group[inner_feature] as usize];
+    let sub = l.feature2subfeature[inner_feature] as usize;
+    let m: &BinMapper = &g.bin_mappers[sub];
+    let most_freq_bin = m.most_freq_bin;
+    match &ds.data[l.feature2group[inner_feature] as usize] {
+        GroupData::Single(BinData::Dense(d)) => {
+            let min_bin = g.bin_offsets[sub];
+            let max_bin = g.bin_offsets[sub + 1] - 1;
+            if g.bin_mappers.len() == 1 {
+                (d, 1, max_bin, false)
+            } else {
+                (d, min_bin, max_bin, true)
+            }
+        }
+        GroupData::Multi(cols) => match &cols[sub] {
+            BinData::Dense(d) => {
+                let addi = u32::from(most_freq_bin != 0);
+                (d, 1, m.num_bin as u32 - 1 + addi, false)
+            }
+            BinData::Sparse(_) => unreachable!("sparse bins are densified before training"),
+        },
+        GroupData::Single(BinData::Sparse(_)) => unreachable!("single-value groups are dense"),
+    }
+}
+
 /// upstream: `DataPartition`. Indices of each leaf are contiguous in `indices`.
 #[derive(Debug, Clone)]
 pub struct DataPartition {
@@ -148,6 +177,40 @@ pub struct SplitRule<'a> {
 }
 
 impl<'a> SplitRule<'a> {
+    /// upstream: `FeatureGroup::Split` + `DenseBin::SplitCategorical`. `bins` is the set of
+    /// bins that go left (upstream `cat_bitset_inner`).
+    pub fn categorical(ds: &'a Dataset, inner_feature: usize, bins: &'a [u32]) -> SplitRule<'a> {
+        let l = &ds.layout;
+        let g = &l.groups[l.feature2group[inner_feature] as usize];
+        let sub = l.feature2subfeature[inner_feature] as usize;
+        let most_freq_bin = g.bin_mappers[sub].most_freq_bin;
+        let (bin, min_bin, max_bin, use_min_bin) = group_view(ds, inner_feature);
+        let offset = u32::from(most_freq_bin == 0);
+        // upstream checks the most frequent bin directly in the bitset (no `min_bin` shift).
+        let default_route = if most_freq_bin > 0 && find_in_bitset(bins, most_freq_bin) {
+            Route::Left
+        } else {
+            Route::Right
+        };
+        SplitRule {
+            bin,
+            use_min_bin,
+            minb: min_bin,
+            maxb: max_bin,
+            th: 0,
+            t_zero_bin: 0,
+            miss_is_zero: false,
+            miss_is_na: false,
+            mfb_is_zero: false,
+            mfb_is_na: false,
+            default_route,
+            missing_default_route: Route::Right,
+            multi_bin: false,
+            max_bin_route: Route::Right,
+            cat_bitset: Some((bins, min_bin, offset)),
+        }
+    }
+
     /// upstream: `FeatureGroup::Split` + `DenseBin::Split` for numerical features.
     pub fn numerical(
         ds: &'a Dataset,
@@ -161,27 +224,7 @@ impl<'a> SplitRule<'a> {
         let m: &BinMapper = &g.bin_mappers[sub];
         let default_bin = m.default_bin;
         let most_freq_bin = m.most_freq_bin;
-        let (bin, min_bin, max_bin, use_min_bin) = match &ds.data
-            [l.feature2group[inner_feature] as usize]
-        {
-            GroupData::Single(BinData::Dense(d)) => {
-                let min_bin = g.bin_offsets[sub];
-                let max_bin = g.bin_offsets[sub + 1] - 1;
-                if g.bin_mappers.len() == 1 {
-                    (d, 1, max_bin, false)
-                } else {
-                    (d, min_bin, max_bin, true)
-                }
-            }
-            GroupData::Multi(cols) => match &cols[sub] {
-                BinData::Dense(d) => {
-                    let addi = u32::from(most_freq_bin != 0);
-                    (d, 1, m.num_bin as u32 - 1 + addi, false)
-                }
-                BinData::Sparse(_) => unreachable!("sparse bins are densified before training"),
-            },
-            GroupData::Single(BinData::Sparse(_)) => unreachable!("single-value groups are dense"),
-        };
+        let (bin, min_bin, max_bin, use_min_bin) = group_view(ds, inner_feature);
         let missing_type = m.missing_type;
         let (miss_is_zero, miss_is_na, mfb_is_zero, mfb_is_na) = match missing_type {
             MissingType::None => (false, false, false, false),

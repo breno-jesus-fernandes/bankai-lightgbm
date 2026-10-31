@@ -9,5 +9,6 @@
   "num_leaves": 15,
   "bagging_fraction": 0.6
  },
- "num_boost_round": 10
+ "num_boost_round": 10,
+ "categorical": []
 }

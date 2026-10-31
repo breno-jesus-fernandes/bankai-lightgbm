@@ -5,7 +5,8 @@
 use super::col_sampler::ColSampler;
 use super::data_partition::{DataPartition, SplitRule};
 use super::feature_histogram::{
-    FeatureMeta, SplitParams, find_best_threshold_numerical, leaf_output_root,
+    CatParams, FeatureMeta, SplitParams, find_best_threshold_categorical,
+    find_best_threshold_numerical, leaf_output_root,
 };
 use super::histogram;
 use super::split_info::{K_MIN_SCORE, SplitInfo, argmax_split};
@@ -15,6 +16,7 @@ use crate::io::bin::BinType;
 use crate::io::bin_data::BinData;
 use crate::io::dataset::{Dataset, GroupData};
 use crate::tree::Tree;
+use crate::utils::common::construct_bitset;
 use crate::utils::random::Random;
 
 /// upstream: `LeafSplits` (sums for one leaf being split)
@@ -91,13 +93,22 @@ impl HistogramPool {
 }
 
 /// One numerical split of the tree being trained (replayed for out-of-bag rows).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SplitRecord {
     leaf: usize,
     right: usize,
     inner: usize,
-    threshold: u32,
-    default_left: bool,
+    kind: SplitKind,
+}
+
+#[derive(Debug, Clone)]
+enum SplitKind {
+    Numerical {
+        threshold: u32,
+        default_left: bool,
+    },
+    /// Bins that go left (`cat_bitset_inner`).
+    Categorical(Vec<u32>),
 }
 
 pub struct SerialTreeLearner<'a> {
@@ -126,6 +137,7 @@ pub struct SerialTreeLearner<'a> {
     is_constant_hessian: bool,
     ordered_gradients: Vec<f32>,
     ordered_hessians: Vec<f32>,
+    cat_params: CatParams,
 }
 
 impl<'a> SerialTreeLearner<'a> {
@@ -170,11 +182,6 @@ impl<'a> SerialTreeLearner<'a> {
         for f in 0..num_features {
             let g = &l.groups[l.feature2group[f] as usize];
             let m = &g.bin_mappers[l.feature2subfeature[f] as usize];
-            if m.bin_type == BinType::Categorical {
-                return Err(Error::Unsupported(
-                    "training with categorical features".into(),
-                ));
-            }
             let offset = i32::from(m.most_freq_bin == 0);
             let real = l.real_feature_idx[f] as usize;
             metas.push(FeatureMeta {
@@ -216,6 +223,7 @@ impl<'a> SerialTreeLearner<'a> {
             is_constant_hessian,
             ordered_gradients: Vec::with_capacity(ds.num_data()),
             ordered_hessians: Vec::with_capacity(ds.num_data()),
+            cat_params: CatParams::from_config(cfg),
         })
     }
 
@@ -582,16 +590,30 @@ impl<'a> SerialTreeLearner<'a> {
         let len = self.feature_hist_len[feature] * 2;
         let hist = &self.pool.slots[slot][start..start + len];
         let mut new_split = SplitInfo::default();
-        let splittable = find_best_threshold_numerical(
-            hist,
-            &mut self.metas[feature],
-            &self.params,
-            ls.sum_gradients,
-            ls.sum_hessians,
-            ls.num_data_in_leaf,
-            parent_output,
-            &mut new_split,
-        );
+        let splittable = if self.metas[feature].bin_type == BinType::Categorical {
+            find_best_threshold_categorical(
+                hist,
+                &mut self.metas[feature],
+                &self.params,
+                &self.cat_params,
+                ls.sum_gradients,
+                ls.sum_hessians,
+                ls.num_data_in_leaf,
+                parent_output,
+                &mut new_split,
+            )
+        } else {
+            find_best_threshold_numerical(
+                hist,
+                &mut self.metas[feature],
+                &self.params,
+                ls.sum_gradients,
+                ls.sum_hessians,
+                ls.num_data_in_leaf,
+                parent_output,
+                &mut new_split,
+            )
+        };
         self.pool.splittable[slot][feature] = splittable;
         new_split.feature = real_fidx;
         if allowed && new_split.better_than(best) {
@@ -608,34 +630,74 @@ impl<'a> SerialTreeLearner<'a> {
         let g = &l.groups[l.feature2group[inner] as usize];
         let m = &g.bin_mappers[l.feature2subfeature[inner] as usize];
         let next_leaf = tree.num_leaves;
-        let threshold_double = m.bin_to_value(info.threshold);
-        let rule = SplitRule::numerical(ds, inner, info.threshold, info.default_left);
-        self.partition.split(best_leaf, &rule, next_leaf);
-        self.splits.push(SplitRecord {
-            leaf: best_leaf,
-            right: next_leaf,
-            inner,
-            threshold: info.threshold,
-            default_left: info.default_left,
-        });
-        info.left_count = self.partition.leaf_count(best_leaf) as i32;
-        info.right_count = self.partition.leaf_count(next_leaf) as i32;
-        let right = tree.split_numerical(
-            best_leaf,
-            inner as i32,
-            info.feature,
-            info.threshold,
-            threshold_double,
-            info.left_output,
-            info.right_output,
-            info.left_count,
-            info.right_count,
-            info.left_sum_hessian,
-            info.right_sum_hessian,
-            (info.gain + self.cfg.min_gain_to_split) as f32,
-            m.missing_type,
-            info.default_left,
-        );
+        let gain = (info.gain + self.cfg.min_gain_to_split) as f32;
+        let right = if m.bin_type == BinType::Categorical {
+            // upstream: `SerialTreeLearner::SplitInner` (categorical). The tree stores the
+            // category values; partitioning uses the bins.
+            let num = info.num_cat_threshold as usize;
+            let bins = info.cat_threshold[..num].to_vec();
+            let real: Vec<u32> = bins
+                .iter()
+                .map(|&b| m.bin_2_categorical[b as usize] as u32)
+                .collect();
+            let bitset_real = construct_bitset(&real);
+            let bitset_bin = construct_bitset(&bins);
+            let rule = SplitRule::categorical(ds, inner, &bitset_bin);
+            self.partition.split(best_leaf, &rule, next_leaf);
+            self.splits.push(SplitRecord {
+                leaf: best_leaf,
+                right: next_leaf,
+                inner,
+                kind: SplitKind::Categorical(bitset_bin),
+            });
+            info.left_count = self.partition.leaf_count(best_leaf) as i32;
+            info.right_count = self.partition.leaf_count(next_leaf) as i32;
+            tree.split_categorical(
+                best_leaf,
+                inner as i32,
+                info.feature,
+                &bitset_real,
+                info.left_output,
+                info.right_output,
+                info.left_count,
+                info.right_count,
+                info.left_sum_hessian,
+                info.right_sum_hessian,
+                gain,
+                m.missing_type,
+            )
+        } else {
+            let threshold_double = m.bin_to_value(info.threshold);
+            let rule = SplitRule::numerical(ds, inner, info.threshold, info.default_left);
+            self.partition.split(best_leaf, &rule, next_leaf);
+            self.splits.push(SplitRecord {
+                leaf: best_leaf,
+                right: next_leaf,
+                inner,
+                kind: SplitKind::Numerical {
+                    threshold: info.threshold,
+                    default_left: info.default_left,
+                },
+            });
+            info.left_count = self.partition.leaf_count(best_leaf) as i32;
+            info.right_count = self.partition.leaf_count(next_leaf) as i32;
+            tree.split_numerical(
+                best_leaf,
+                inner as i32,
+                info.feature,
+                info.threshold,
+                threshold_double,
+                info.left_output,
+                info.right_output,
+                info.left_count,
+                info.right_count,
+                info.left_sum_hessian,
+                info.right_sum_hessian,
+                (info.gain + self.cfg.min_gain_to_split) as f32,
+                m.missing_type,
+                info.default_left,
+            )
+        };
         let left_ls = LeafSplits {
             leaf_index: best_leaf as i32,
             num_data_in_leaf: info.left_count,
@@ -684,7 +746,13 @@ impl<'a> SerialTreeLearner<'a> {
         let mut part = DataPartition::new(self.num_data, tree.num_leaves);
         part.init_with(rows);
         for s in &self.splits {
-            let rule = SplitRule::numerical(self.ds, s.inner, s.threshold, s.default_left);
+            let rule = match &s.kind {
+                SplitKind::Numerical {
+                    threshold,
+                    default_left,
+                } => SplitRule::numerical(self.ds, s.inner, *threshold, *default_left),
+                SplitKind::Categorical(bins) => SplitRule::categorical(self.ds, s.inner, bins),
+            };
             part.split(s.leaf, &rule, s.right);
         }
         for leaf in 0..tree.num_leaves {

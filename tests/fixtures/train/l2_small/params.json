@@ -10,5 +10,6 @@
   "min_data_in_leaf": 5,
   "learning_rate": 0.3
  },
- "num_boost_round": 15
+ "num_boost_round": 15,
+ "categorical": []
 }

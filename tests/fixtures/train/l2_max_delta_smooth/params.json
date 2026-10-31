@@ -9,5 +9,6 @@
   "max_delta_step": 0.5,
   "path_smooth": 3.0
  },
- "num_boost_round": 15
+ "num_boost_round": 15,
+ "categorical": []
 }

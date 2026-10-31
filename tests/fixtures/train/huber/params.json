@@ -9,5 +9,6 @@
   "alpha": 0.9,
   "num_leaves": 15
  },
- "num_boost_round": 15
+ "num_boost_round": 15,
+ "categorical": []
 }

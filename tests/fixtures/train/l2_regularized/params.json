@@ -11,5 +11,6 @@
   "min_gain_to_split": 0.01,
   "min_sum_hessian_in_leaf": 5.0
  },
- "num_boost_round": 15
+ "num_boost_round": 15,
+ "categorical": []
 }

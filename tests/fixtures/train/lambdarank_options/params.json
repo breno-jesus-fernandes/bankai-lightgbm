@@ -18,5 +18,6 @@
   ],
   "sigmoid": 1.5
  },
- "num_boost_round": 10
+ "num_boost_round": 10,
+ "categorical": []
 }

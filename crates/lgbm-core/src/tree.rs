@@ -399,6 +399,49 @@ impl Tree {
         self.num_leaves - 1
     }
 
+    /// upstream: `Tree::SplitCategorical`. `bitset` holds the categories that go left, as a
+    /// bitset over category values (`Common::ConstructBitset`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_categorical(
+        &mut self,
+        leaf: usize,
+        feature: i32,
+        real_feature: i32,
+        bitset: &[u32],
+        left_value: f64,
+        right_value: f64,
+        left_cnt: i32,
+        right_cnt: i32,
+        left_weight: f64,
+        right_weight: f64,
+        gain: f32,
+        missing_type: MissingType,
+    ) -> usize {
+        let node = self.split_common(
+            leaf,
+            feature,
+            real_feature,
+            left_value,
+            right_value,
+            left_cnt,
+            right_cnt,
+            left_weight,
+            right_weight,
+            gain,
+        );
+        let dt: i8 = K_CATEGORICAL_MASK | ((missing_type as i8) << 2);
+        self.decision_type[node] = dt;
+        let cat_idx = self.num_cat;
+        self.threshold_in_bin[node] = cat_idx as u32;
+        self.threshold[node] = cat_idx as f64;
+        self.num_cat += 1;
+        let last = self.cat_boundaries.last().copied().unwrap_or(0);
+        self.cat_boundaries.push(last + bitset.len() as i32);
+        self.cat_threshold.extend_from_slice(bitset);
+        self.num_leaves += 1;
+        self.num_leaves - 1
+    }
+
     /// upstream: `Tree::Shrinkage`
     pub fn apply_shrinkage(&mut self, rate: f64) {
         let n = self.num_leaves;

@@ -83,6 +83,28 @@ def probability(rng: np.random.Generator) -> Data:
     return x, 1.0 / (1.0 + np.exp(-0.7 * y))
 
 
+def categorical(rng: np.random.Generator) -> Data:
+    """Regression data where columns 0, 4 and 5 are integer categories (4, 12 and 30 levels)."""
+    x, y = reg(rng)
+    x[:, 0] = rng.integers(0, 4, size=len(y))
+    x[:, 4] = rng.integers(0, 12, size=len(y))
+    x[:, 5] = rng.integers(0, 30, size=len(y))
+    effect = np.array([0.5, -1.0, 2.0, 0.0])[x[:, 0].astype(int)]
+    effect += np.where(x[:, 4] % 3 == 0, 1.5, -0.5) + 0.05 * x[:, 5]
+    return x, y + effect
+
+
+def categorical_binary(rng: np.random.Generator) -> Data:
+    x, y = categorical(rng)
+    return x, (y > np.median(y)).astype(np.float64)
+
+
+def categorical_nan(rng: np.random.Generator) -> Data:
+    x, y = categorical(rng)
+    x[rng.random(x.shape[0]) < 0.1, 4] = np.nan
+    return x, y
+
+
 def relevance(rng: np.random.Generator) -> Data:
     """Graded relevance 0..4 from a noisy linear signal; 200 queries of 10 rows."""
     x, y = reg(rng)
@@ -91,6 +113,10 @@ def relevance(rng: np.random.Generator) -> Data:
 
 
 GROUP_SIZE = 10
+
+# Columns that are categorical in each categorical case.
+CATEGORICAL_COLS = [0, 4, 5]
+
 
 CASES: dict[str, tuple[Callable[[np.random.Generator], Data], dict[str, Any], int]] = {
     "l2_default": (reg, {"objective": "regression"}, 20),
@@ -252,6 +278,71 @@ CASES: dict[str, tuple[Callable[[np.random.Generator], Data], dict[str, Any], in
         },
         12,
     ),
+    "cat_default": (
+        categorical,
+        {"objective": "regression", "num_leaves": 15, "categorical_cols": CATEGORICAL_COLS},
+        15,
+    ),
+    "cat_onehot": (
+        categorical,
+        {
+            "objective": "regression",
+            "num_leaves": 15,
+            "max_cat_to_onehot": 32,
+            "categorical_cols": CATEGORICAL_COLS,
+        },
+        15,
+    ),
+    "cat_regularized": (
+        categorical,
+        {
+            "objective": "regression",
+            "num_leaves": 15,
+            "cat_smooth": 5.0,
+            "cat_l2": 3.0,
+            "min_data_per_group": 40,
+            "max_cat_threshold": 8,
+            "lambda_l2": 1.0,
+            "categorical_cols": CATEGORICAL_COLS,
+        },
+        15,
+    ),
+    "cat_extra_trees": (
+        categorical,
+        {
+            "objective": "regression",
+            "num_leaves": 15,
+            "extra_trees": True,
+            "categorical_cols": CATEGORICAL_COLS,
+        },
+        15,
+    ),
+    "cat_nan": (
+        categorical_nan,
+        {"objective": "regression", "num_leaves": 15, "categorical_cols": CATEGORICAL_COLS},
+        15,
+    ),
+    "cat_bagging": (
+        categorical,
+        {
+            "objective": "regression",
+            "num_leaves": 15,
+            "bagging_fraction": 0.7,
+            "bagging_freq": 1,
+            "bagging_seed": 4,
+            "categorical_cols": CATEGORICAL_COLS,
+        },
+        12,
+    ),
+    "cat_binary": (
+        categorical_binary,
+        {
+            "objective": "binary",
+            "num_leaves": 15,
+            "categorical_cols": CATEGORICAL_COLS,
+        },
+        12,
+    ),
     "rank_xendcg_seed": (
         relevance,
         {"objective": "rank_xendcg", "num_leaves": 7, "objective_seed": 11},
@@ -262,6 +353,7 @@ CASES: dict[str, tuple[Callable[[np.random.Generator], Data], dict[str, Any], in
 # Same data and params as the named case, trained with random sample weights.
 WEIGHTED = [
     "l2_default",
+    "cat_default",
     "bagging",
     "goss",
     "l1",
@@ -292,7 +384,10 @@ def write_case(
 ) -> None:
     ranking = params["objective"] in ("lambdarank", "rank_xendcg")
     group = np.full(len(y) // GROUP_SIZE, GROUP_SIZE, dtype=np.int32) if ranking else None
-    booster = lgb.train(params, lgb.Dataset(x, y, weight=w, group=group), num_boost_round=rounds)
+    params = dict(params)
+    cats = params.pop("categorical_cols", None)
+    dataset = lgb.Dataset(x, y, weight=w, group=group, categorical_feature=cats or "auto")
+    booster = lgb.train(params, dataset, num_boost_round=rounds)
     out = OUT / case
     out.mkdir(parents=True, exist_ok=True)
     np.save(out / "x.npy", x)
@@ -302,7 +397,10 @@ def write_case(
     if group is not None:
         np.save(out / "group.npy", group)
     (out / "params.json").write_text(
-        json.dumps({"params": params, "num_boost_round": rounds}, indent=1)
+        json.dumps(
+            {"params": params, "num_boost_round": rounds, "categorical": cats or []},
+            indent=1,
+        )
     )
     (out / "model.txt").write_text(booster.model_to_string())
     print(f"wrote {out} ({booster.num_trees()} trees)")

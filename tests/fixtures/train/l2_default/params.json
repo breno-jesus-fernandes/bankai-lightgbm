@@ -7,5 +7,6 @@
   "verbose": -1,
   "objective": "regression"
  },
- "num_boost_round": 20
+ "num_boost_round": 20,
+ "categorical": []
 }

@@ -11,5 +11,6 @@
   "bagging_freq": 1,
   "feature_fraction": 0.6
  },
- "num_boost_round": 12
+ "num_boost_round": 12,
+ "categorical": []
 }

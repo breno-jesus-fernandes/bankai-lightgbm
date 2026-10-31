@@ -9,5 +9,6 @@
   "num_leaves": 15,
   "feature_fraction_bynode": 0.4
  },
- "num_boost_round": 15
+ "num_boost_round": 15,
+ "categorical": []
 }

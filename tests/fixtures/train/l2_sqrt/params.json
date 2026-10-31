@@ -9,5 +9,6 @@
   "reg_sqrt": true,
   "num_leaves": 15
  },
- "num_boost_round": 10
+ "num_boost_round": 10,
+ "categorical": []
 }

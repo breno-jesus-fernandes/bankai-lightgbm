@@ -8,5 +8,6 @@
   "objective": "cross_entropy_lambda",
   "num_leaves": 15
  },
- "num_boost_round": 15
+ "num_boost_round": 15,
+ "categorical": []
 }

@@ -11,5 +11,6 @@
   "bagging_freq": 2,
   "bagging_seed": 5
  },
- "num_boost_round": 15
+ "num_boost_round": 15,
+ "categorical": []
 }

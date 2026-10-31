@@ -19,7 +19,7 @@ fn train_cases() -> Vec<PathBuf> {
         .collect();
     out.sort();
     assert!(
-        out.len() >= 58,
+        out.len() >= 66,
         "expected training fixtures; run scripts/gen_train_fixtures.py"
     );
     out
@@ -29,7 +29,12 @@ fn train_cases() -> Vec<PathBuf> {
 fn trained_models_match_upstream() {
     let mut failures = Vec::new();
     for case in train_cases() {
-        let (mut params, _) = dataset_params(&case);
+        let (mut params, cats) = dataset_params(&case);
+        // The Python Dataset forwards `categorical_feature` into the training parameters.
+        if !cats.is_empty() {
+            let list: Vec<String> = cats.iter().map(ToString::to_string).collect();
+            params.insert("categorical_feature".into(), list.join(","));
+        }
         let rounds: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(case.join("params.json")).unwrap())
                 .unwrap();
@@ -40,7 +45,7 @@ fn trained_models_match_upstream() {
         let cfg = Config::from_params(&params).unwrap();
         let (x, shape) = load_npy(&case.join("x.npy"));
         let (y, _) = load_npy(&case.join("y.npy"));
-        let mut ds = Dataset::from_dense(&x, shape[0], shape[1], &y, &cfg, &[]).unwrap();
+        let mut ds = Dataset::from_dense(&x, shape[0], shape[1], &y, &cfg, &cats).unwrap();
         if case.join("w.npy").exists() {
             let (w, _) = load_npy(&case.join("w.npy"));
             let w: Vec<f32> = w.iter().map(|&v| v as f32).collect();

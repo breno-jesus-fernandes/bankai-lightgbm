@@ -217,6 +217,19 @@ pub fn madd(a: f64, b: f64, c: f64) -> f64 {
 
 /// upstream: `Common::FindInBitset`
 #[inline]
+/// upstream: `Common::ConstructBitset`: bitset of the given (non-negative) values.
+pub fn construct_bitset(vals: &[u32]) -> Vec<u32> {
+    let mut ret: Vec<u32> = Vec::new();
+    for &v in vals {
+        let i1 = (v / 32) as usize;
+        if ret.len() < i1 + 1 {
+            ret.resize(i1 + 1, 0);
+        }
+        ret[i1] |= 1u32 << (v % 32);
+    }
+    ret
+}
+
 pub fn find_in_bitset(bits: &[u32], pos: u32) -> bool {
     let i1 = (pos / 32) as usize;
     if i1 >= bits.len() {
