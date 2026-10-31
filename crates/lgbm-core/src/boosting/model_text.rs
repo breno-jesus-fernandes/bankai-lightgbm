@@ -8,8 +8,10 @@ use super::Gbdt;
 use crate::error::{Error, Result};
 use crate::objective::LoadedObjective;
 use crate::tree::Tree;
+use crate::tree::avoid_inf;
+use crate::utils::common::atof_legacy;
 use crate::utils::common::{parse_array_any, parse_scalar};
-use crate::utils::format::join_display;
+use crate::utils::format::{format_g, join_display};
 
 /// Cursor over model text that mimics upstream's `GetLine`/`SkipNewLine`.
 struct Cursor<'a> {
@@ -159,6 +161,109 @@ impl Gbdt {
             s.push_str(&self.parser_config);
             s.push_str("\nend of parser\n");
         }
+        Ok(s)
+    }
+
+    /// upstream: `GBDT::DumpModel` (JSON). The Python layer adds `pandas_categorical`.
+    pub fn dump_model(
+        &self,
+        start_iteration: i32,
+        num_iteration: i32,
+        importance_type: i32,
+    ) -> Result<String> {
+        use std::fmt::Write;
+        let g17 = |v: f64| format_g(v, 17);
+        let ntpi = self.num_tree_per_iteration;
+        let mut s = String::from("{");
+        let _ = writeln!(s, "\"name\":\"tree\",");
+        let _ = writeln!(s, "\"version\":\"v4\",");
+        let _ = writeln!(s, "\"num_class\":{},", self.num_class);
+        let _ = writeln!(s, "\"num_tree_per_iteration\":{ntpi},");
+        let _ = writeln!(s, "\"label_index\":{},", self.label_idx);
+        let _ = writeln!(s, "\"max_feature_idx\":{},", self.max_feature_idx);
+        if let Some(o) = &self.objective {
+            let _ = writeln!(s, "\"objective\":\"{}\",", o.to_model_string());
+        }
+        let _ = writeln!(s, "\"average_output\":{},", self.average_output);
+        let _ = writeln!(
+            s,
+            "\"feature_names\":[\"{}\"],",
+            self.feature_names.join("\",\"")
+        );
+        let mc: Vec<String> = self
+            .monotone_constraints
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let _ = writeln!(s, "\"monotone_constraints\":[{}],", mc.join(","));
+
+        s.push_str("\"feature_infos\":{");
+        let mut first = true;
+        for (info, name) in self.feature_infos.iter().zip(&self.feature_names) {
+            let obj = if let Some(range) = info.strip_prefix('[') {
+                let range = range.strip_suffix(']').unwrap_or(range);
+                let (lo, hi) = range.split_once(':').unwrap_or((range, ""));
+                let parse = |x: &str| atof_legacy(x).unwrap_or(f64::NAN);
+                format!(
+                    "{{\"min_value\":{},\"max_value\":{},\"values\":[]}}",
+                    g17(avoid_inf(parse(lo))),
+                    g17(avoid_inf(parse(hi)))
+                )
+            } else if info != "none" {
+                let vals: Vec<i64> = info
+                    .split(':')
+                    .map(parse_scalar::<i64>)
+                    .collect::<Result<_>>()?;
+                // upstream ArrayArgs::ArgMin/ArgMax return the first extreme.
+                let min = vals.iter().copied().min().unwrap_or(0);
+                let max = vals.iter().copied().max().unwrap_or(0);
+                let joined: Vec<String> = vals.iter().map(ToString::to_string).collect();
+                format!(
+                    "{{\"min_value\":{min},\"max_value\":{max},\"values\":[{}]}}",
+                    joined.join(",")
+                )
+            } else {
+                continue;
+            };
+            if !first {
+                s.push(',');
+            }
+            let _ = write!(s, "\"{name}\":{obj}");
+            first = false;
+        }
+        s.push_str("},\n");
+
+        s.push_str("\"tree_info\":[");
+        let total_iteration = (self.models.len() / ntpi) as i64;
+        let start = i64::from(start_iteration).clamp(0, total_iteration) as usize;
+        let mut num_used_model = self.models.len();
+        if num_iteration > 0 {
+            num_used_model = num_used_model.min((start + num_iteration as usize) * ntpi);
+        }
+        let start_model = (start * ntpi).min(num_used_model);
+        let trees: Vec<String> = self.models[start_model..num_used_model]
+            .par_iter()
+            .enumerate()
+            .map(|(k, t)| format!("{{\"tree_index\":{},{}}}", start_model + k, t.to_json()))
+            .collect();
+        s.push_str(&trees.join(","));
+        s.push_str("],\n");
+
+        // Unlike the text format, the JSON dump does not sort importances.
+        let imp = self.feature_importance(num_iteration, importance_type)?;
+        s.push_str("\n\"feature_importances\":{");
+        let mut first = true;
+        for (v, name) in imp.iter().zip(&self.feature_names) {
+            let iv = *v as usize;
+            if iv > 0 {
+                if !first {
+                    s.push(',');
+                }
+                let _ = write!(s, "\"{name}\":{iv}");
+                first = false;
+            }
+        }
+        s.push_str("}\n}\n");
         Ok(s)
     }
 

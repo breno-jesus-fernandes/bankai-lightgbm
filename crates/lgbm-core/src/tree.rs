@@ -324,6 +324,113 @@ impl Tree {
         s
     }
 
+    /// upstream: `Tree::ToJSON` (stream precision 17, i.e. `%.17g`).
+    pub fn to_json(&self) -> String {
+        use std::fmt::Write;
+        let mut s = String::new();
+        let _ = writeln!(s, "\"num_leaves\":{},", self.num_leaves);
+        let _ = writeln!(s, "\"num_cat\":{},", self.num_cat);
+        let _ = writeln!(s, "\"shrinkage\":{},", g17(self.shrinkage));
+        if self.num_leaves == 1 {
+            s.push_str("\"tree_structure\":{");
+            let _ = writeln!(s, "\"leaf_value\":{}, ", g17(self.leaf_value[0]));
+            let count = self.leaf_count.first().copied().unwrap_or(0);
+            if self.is_linear {
+                let _ = writeln!(s, "\"leaf_count\":{count}, ");
+                s.push_str(&self.linear_model_to_json(0));
+            } else {
+                let _ = write!(s, "\"leaf_count\":{count}");
+            }
+            s.push_str("}\n");
+        } else {
+            s.push_str("\"tree_structure\":");
+            self.node_to_json(0, &mut s);
+            s.push('\n');
+        }
+        s
+    }
+
+    fn linear_model_to_json(&self, index: usize) -> String {
+        let mut s = format!("\"leaf_const\":{},\n", g17(self.leaf_const[index]));
+        let feats = &self.leaf_features[index];
+        if feats.is_empty() {
+            s.push_str("\"leaf_features\":[],\n\"leaf_coeff\":[]\n");
+        } else {
+            let f: Vec<String> = feats.iter().map(ToString::to_string).collect();
+            let c: Vec<String> = self.leaf_coeff[index].iter().map(|v| g17(*v)).collect();
+            s.push_str(&format!("\"leaf_features\":[{}], \n", f.join(", ")));
+            s.push_str(&format!("\"leaf_coeff\":[{}]\n", c.join(", ")));
+        }
+        s
+    }
+
+    /// upstream: `Tree::NodeToJSON`
+    fn node_to_json(&self, node: i32, s: &mut String) {
+        use std::fmt::Write;
+        if node >= 0 {
+            let i = node as usize;
+            let dt = self.decision_type[i];
+            s.push_str("{\n");
+            let _ = writeln!(s, "\"split_index\":{i},");
+            let _ = writeln!(s, "\"split_feature\":{},", self.split_feature[i]);
+            let _ = writeln!(
+                s,
+                "\"split_gain\":{},",
+                g17(f64::from(avoid_inf_f32(self.split_gain[i])))
+            );
+            if get_decision_type(dt, K_CATEGORICAL_MASK) {
+                let cat_idx = self.threshold[i] as usize;
+                let (lo, hi) = (
+                    self.cat_boundaries[cat_idx] as usize,
+                    self.cat_boundaries[cat_idx + 1] as usize,
+                );
+                let bits = &self.cat_threshold[lo..hi];
+                let cats: Vec<String> = (0..(hi - lo) * 32)
+                    .filter(|&c| find_in_bitset(bits, c as u32))
+                    .map(|c| c.to_string())
+                    .collect();
+                let _ = writeln!(s, "\"threshold\":\"{}\",", cats.join("||"));
+                s.push_str("\"decision_type\":\"==\",\n");
+            } else {
+                let _ = writeln!(s, "\"threshold\":{},", g17(avoid_inf(self.threshold[i])));
+                s.push_str("\"decision_type\":\"<=\",\n");
+            }
+            let dl = get_decision_type(dt, K_DEFAULT_LEFT_MASK);
+            let _ = writeln!(s, "\"default_left\":{dl},");
+            let mt = match get_missing_type(dt) {
+                MissingType::None => "None",
+                MissingType::Zero => "Zero",
+                MissingType::NaN => "NaN",
+            };
+            let _ = writeln!(s, "\"missing_type\":\"{mt}\",");
+            let _ = writeln!(s, "\"internal_value\":{},", g17(self.internal_value[i]));
+            let _ = writeln!(s, "\"internal_weight\":{},", g17(self.internal_weight[i]));
+            let _ = writeln!(s, "\"internal_count\":{},", self.internal_count[i]);
+            s.push_str("\"left_child\":");
+            self.node_to_json(self.left_child[i], s);
+            s.push_str(",\n\"right_child\":");
+            self.node_to_json(self.right_child[i], s);
+            s.push_str("\n}");
+        } else {
+            let i = (!node) as usize;
+            s.push_str("{\n");
+            let _ = writeln!(s, "\"leaf_index\":{i},");
+            let _ = writeln!(s, "\"leaf_value\":{},", g17(self.leaf_value[i]));
+            let _ = writeln!(
+                s,
+                "\"leaf_weight\":{},",
+                g17(self.leaf_weight.get(i).copied().unwrap_or(0.0))
+            );
+            if self.is_linear {
+                let _ = writeln!(s, "\"leaf_count\":{},", self.leaf_count[i]);
+                s.push_str(&self.linear_model_to_json(i));
+            } else {
+                let _ = writeln!(s, "\"leaf_count\":{}", self.leaf_count[i]);
+            }
+            s.push('}');
+        }
+    }
+
     #[inline]
     pub fn max_feature_used(&self) -> i32 {
         let mut m = self.split_feature.iter().copied().max().unwrap_or(-1);
@@ -607,6 +714,29 @@ fn opt_array<T: ParseNum + Default + Clone>(
     match kv.get(key) {
         Some(v) => parse_array(v, n),
         None => Ok(vec![T::default(); n]),
+    }
+}
+
+fn g17(v: f64) -> String {
+    format_g(v, 17)
+}
+
+/// upstream: `Common::AvoidInf(double)`
+pub fn avoid_inf(x: f64) -> f64 {
+    if x.is_nan() {
+        0.0
+    } else {
+        x.clamp(-1e300, 1e300)
+    }
+}
+
+/// upstream: `Common::AvoidInf(float)`. Clamping at `1e38f` is equivalent to upstream's
+/// comparisons against the double literal `1e38`.
+pub fn avoid_inf_f32(x: f32) -> f32 {
+    if x.is_nan() {
+        0.0
+    } else {
+        x.clamp(-1e38, 1e38)
     }
 }
 
