@@ -52,6 +52,35 @@ def reg_zero(rng: np.random.Generator) -> Data:
     return x, y
 
 
+def counts(rng: np.random.Generator) -> Data:
+    x, _ = reg(rng)
+    y = rng.poisson(np.exp(0.5 * x[:, 0] + 0.3 * np.sin(2 * x[:, 1]))).astype(np.float64)
+    return x, y
+
+
+def positive(rng: np.random.Generator) -> Data:
+    x, _ = reg(rng)
+    y = rng.gamma(2.0, np.exp(0.4 * x[:, 0] - 0.2 * x[:, 2]) / 2.0)
+    return x, y
+
+
+def binary(rng: np.random.Generator) -> Data:
+    x, y = reg(rng)
+    return x, (y + rng.normal(scale=1.0, size=y.shape) > 0.5).astype(np.float64)
+
+
+def multiclass(rng: np.random.Generator) -> Data:
+    x, _ = reg(rng)
+    logits = np.stack([x[:, 0], x[:, 1] * x[:, 2], -x[:, 0] + np.sin(x[:, 3])], axis=1)
+    logits += rng.gumbel(size=logits.shape)
+    return x, np.argmax(logits, axis=1).astype(np.float64)
+
+
+def probability(rng: np.random.Generator) -> Data:
+    x, y = reg(rng)
+    return x, 1.0 / (1.0 + np.exp(-0.7 * y))
+
+
 CASES: dict[str, tuple[Callable[[np.random.Generator], Data], dict[str, Any], int]] = {
     "l2_default": (reg, {"objective": "regression"}, 20),
     "l2_small": (
@@ -84,6 +113,36 @@ CASES: dict[str, tuple[Callable[[np.random.Generator], Data], dict[str, Any], in
     ),
     "l2_max_depth": (reg, {"objective": "regression", "max_depth": 3}, 15),
     "l2_no_boost_from_average": (reg, {"objective": "regression", "boost_from_average": False}, 10),
+    "l2_sqrt": (counts, {"objective": "regression", "reg_sqrt": True, "num_leaves": 15}, 10),
+    "l1": (reg, {"objective": "regression_l1", "num_leaves": 15}, 15),
+    "l1_no_boost_from_average": (
+        reg,
+        {"objective": "regression_l1", "num_leaves": 15, "boost_from_average": False},
+        10,
+    ),
+    "quantile": (reg, {"objective": "quantile", "alpha": 0.3, "num_leaves": 15}, 15),
+    "quantile_high": (reg, {"objective": "quantile", "alpha": 0.9, "num_leaves": 15}, 10),
+    "mape": (positive, {"objective": "mape", "num_leaves": 15}, 15),
+    "huber": (reg, {"objective": "huber", "alpha": 0.9, "num_leaves": 15}, 15),
+    "fair": (reg, {"objective": "fair", "fair_c": 0.5, "num_leaves": 15}, 15),
+    "poisson": (counts, {"objective": "poisson", "num_leaves": 15}, 15),
+    "gamma": (positive, {"objective": "gamma", "num_leaves": 15}, 15),
+    "tweedie": (counts, {"objective": "tweedie", "tweedie_variance_power": 1.3}, 15),
+    "binary": (binary, {"objective": "binary", "num_leaves": 15}, 15),
+    "binary_unbalance": (binary, {"objective": "binary", "is_unbalance": True}, 10),
+    "binary_sigmoid": (
+        binary,
+        {"objective": "binary", "sigmoid": 0.7, "scale_pos_weight": 2.5, "num_leaves": 7},
+        10,
+    ),
+    "multiclass": (multiclass, {"objective": "multiclass", "num_class": 3, "num_leaves": 7}, 10),
+    "multiclassova": (
+        multiclass,
+        {"objective": "multiclassova", "num_class": 3, "num_leaves": 7},
+        10,
+    ),
+    "xentropy": (probability, {"objective": "cross_entropy", "num_leaves": 15}, 15),
+    "xentlambda": (probability, {"objective": "cross_entropy_lambda", "num_leaves": 15}, 15),
 }
 
 

@@ -1,7 +1,11 @@
 //! Objective functions. P1 covers the prediction side: turning a model file's
 //! `objective=` line into an output transform. upstream: src/objective/
 
+pub mod binary;
+pub mod multiclass;
+pub mod regression;
 pub mod train;
+pub mod xentropy;
 
 use crate::error::{Error, Result};
 use crate::utils::common::{parse_scalar, softmax};

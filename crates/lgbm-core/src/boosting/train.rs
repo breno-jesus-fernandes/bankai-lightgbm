@@ -74,6 +74,7 @@ struct Trainer<'a> {
     objective: Box<dyn Objective>,
     learner: SerialTreeLearner<'a>,
     num_tree_per_iteration: usize,
+    class_need_train: Vec<bool>,
     score: Vec<f64>,
     gradients: Vec<f32>,
     hessians: Vec<f32>,
@@ -85,12 +86,14 @@ impl<'a> Trainer<'a> {
         let n = ds.num_data();
         let ntpi = objective.num_model_per_iteration();
         let learner = SerialTreeLearner::new(cfg, ds, objective.is_constant_hessian())?;
+        let class_need_train = (0..ntpi).map(|k| objective.class_need_train(k)).collect();
         Ok(Trainer {
             cfg,
             ds,
             objective,
             learner,
             num_tree_per_iteration: ntpi,
+            class_need_train,
             score: vec![0.0; n * ntpi],
             gradients: vec![0.0; n * ntpi],
             hessians: vec![0.0; n * ntpi],
@@ -129,7 +132,7 @@ impl<'a> Trainer<'a> {
         let mut should_continue = false;
         for k in 0..ntpi {
             let off = k * n;
-            let mut tree = if self.ds.layout.num_features > 0 {
+            let mut tree = if self.class_need_train[k] && self.ds.layout.num_features > 0 {
                 self.learner
                     .train(&self.gradients[off..off + n], &self.hessians[off..off + n])
             } else {
@@ -137,6 +140,7 @@ impl<'a> Trainer<'a> {
             };
             if tree.num_leaves > 1 {
                 should_continue = true;
+                self.renew_tree_output(&mut tree, off..off + n);
                 tree.apply_shrinkage(self.cfg.learning_rate);
                 self.learner
                     .add_prediction_to_score(&tree, &mut self.score[off..off + n]);
@@ -169,6 +173,23 @@ impl<'a> Trainer<'a> {
             return true;
         }
         false
+    }
+
+    /// upstream: `SerialTreeLearner::RenewTreeOutput` (no bagging, single machine)
+    fn renew_tree_output(&self, tree: &mut Tree, class_range: std::ops::Range<usize>) {
+        if !self.objective.is_renew_tree_output() {
+            return;
+        }
+        let score = &self.score[class_range];
+        for leaf in 0..tree.num_leaves {
+            let indices = self.learner.partition.indices_on_leaf(leaf);
+            if !indices.is_empty() {
+                let out = self
+                    .objective
+                    .renew_tree_output(tree.leaf_value[leaf], score, indices);
+                tree.set_leaf_output(leaf, out);
+            }
+        }
     }
 
     fn into_model(self) -> Gbdt {

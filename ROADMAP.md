@@ -41,8 +41,8 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 ## P3: Serial tree learner + GBDT
 - [ ] Histogram construction: col-wise and row-wise, `force_col_wise`/`force_row_wise` auto-choice, SIMD
 - [ ] Histogram pool + subtraction trick, `histogram_pool_size`
-- [ ] Leaf-wise growth, `num_leaves`, `max_depth`, `min_data_in_leaf`, `min_sum_hessian_in_leaf`
-- [ ] Regularization: `lambda_l1`, `lambda_l2`, `min_gain_to_split`, `max_delta_step`, `path_smooth`
+- [x] Leaf-wise growth, `num_leaves`, `max_depth`, `min_data_in_leaf`, `min_sum_hessian_in_leaf`
+- [x] Regularization: `lambda_l1`, `lambda_l2`, `min_gain_to_split`, `max_delta_step`, `path_smooth`
 - [ ] Categorical splits (`max_cat_threshold`, `cat_l2`, `cat_smooth`, `max_cat_to_onehot`, `min_data_per_group`)
 - [ ] `feature_fraction`, `feature_fraction_bynode`, `bagging_fraction`/`bagging_freq`, pos/neg bagging, `extra_trees`
 - [ ] Monotone constraints: basic, intermediate, advanced; `monotone_penalty`
@@ -53,8 +53,8 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 - **Gate:** identical trees on fixed seeds; training as fast as upstream
 
 ## P4: Objectives + metrics
-- [ ] Regression: `l2`, `l1`, `huber`, `fair`, `poisson`, `quantile`, `mape`, `gamma`, `tweedie`
-- [ ] `binary`, `multiclass`, `multiclassova`, `cross_entropy`, `cross_entropy_lambda`
+- [x] Regression: `l2`, `l1`, `huber`, `fair`, `poisson`, `quantile`, `mape`, `gamma`, `tweedie` (byte-identical training; sample weights only for `l2` so far)
+- [x] `binary`, `multiclass`, `multiclassova`, `cross_entropy`, `cross_entropy_lambda` (unweighted)
 - [ ] Ranking: `lambdarank` (incl. position bias), `rank_xendcg`
 - [ ] Custom objective (fobj) path
 - [ ] All metrics: l1/l2/rmse/quantile/huber/fair/poisson/mape/gamma/gamma_deviance/tweedie, ndcg@k, map@k, auc, average_precision, binary_logloss/error, auc_mu, multi_logloss/error (`multi_error_top_k`), cross_entropy, cross_entropy_lambda, kullback_leibler

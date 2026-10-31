@@ -1,0 +1,14 @@
+{
+ "params": {
+  "deterministic": true,
+  "num_threads": 1,
+  "force_col_wise": true,
+  "seed": 7,
+  "verbose": -1,
+  "objective": "binary",
+  "sigmoid": 0.7,
+  "scale_pos_weight": 2.5,
+  "num_leaves": 7
+ },
+ "num_boost_round": 10
+}

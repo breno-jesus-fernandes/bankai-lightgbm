@@ -1,5 +1,9 @@
 //! Training-side objectives (gradients, init scores). upstream: src/objective/*.hpp
 
+use super::binary::BinaryLogloss;
+use super::multiclass::{MulticlassOva, MulticlassSoftmax};
+use super::regression::Regression;
+use super::xentropy::{CrossEntropy, CrossEntropyLambda};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::io::dataset::Metadata;
@@ -9,105 +13,63 @@ pub trait Objective: Send + Sync {
     fn name(&self) -> &'static str;
     /// upstream `ObjectiveFunction::ToString` (the model file's `objective=` line).
     fn to_model_string(&self) -> String;
+    /// Gradients for all `num_model_per_iteration()` classes (class-major, like `score`).
     fn get_gradients(&self, score: &[f64], gradients: &mut [f32], hessians: &mut [f32]);
     fn boost_from_score(&self, class_id: usize) -> f64;
     fn is_constant_hessian(&self) -> bool;
     fn num_model_per_iteration(&self) -> usize {
         1
     }
+    /// upstream: `ObjectiveFunction::ClassNeedTrain`
+    fn class_need_train(&self, _class_id: usize) -> bool {
+        true
+    }
     fn is_renew_tree_output(&self) -> bool {
         false
+    }
+    /// upstream: `ObjectiveFunction::RenewTreeOutput`, with the residual getter
+    /// `label[i] - score[i]` and no bagging. `indices` are the rows of one leaf.
+    fn renew_tree_output(&self, output: f64, _score: &[f64], _indices: &[i32]) -> f64 {
+        output
     }
 }
 
 /// upstream: `ObjectiveFunction::CreateObjectiveFunction(const std::string&, const Config&)`
-pub fn create_objective(cfg: &Config, metadata: &Metadata) -> Result<Box<dyn Objective>> {
-    match cfg.objective.as_str() {
-        "regression" => Ok(Box::new(RegressionL2::new(cfg, metadata))),
-        other => Err(Error::Unsupported(format!(
-            "training with objective={other}"
-        ))),
+/// followed by `Init(metadata, num_data)`.
+pub fn create_objective(cfg: &Config, md: &Metadata) -> Result<Box<dyn Objective>> {
+    let name = cfg.objective.as_str();
+    if !md.weights.is_empty() && name != "regression" {
+        return Err(Error::Unsupported(format!(
+            "training objective={name} with sample weights"
+        )));
     }
+    Ok(match name {
+        "regression" | "regression_l1" | "quantile" | "huber" | "fair" | "poisson" | "mape"
+        | "gamma" | "tweedie" => Box::new(Regression::new(name, cfg, md)?),
+        "binary" => Box::new(BinaryLogloss::new(cfg, md, |l| l > 0.0)?),
+        "multiclass" => Box::new(MulticlassSoftmax::new(cfg, md)?),
+        "multiclassova" => Box::new(MulticlassOva::new(cfg, md)?),
+        "cross_entropy" => Box::new(CrossEntropy::new(md)?),
+        "cross_entropy_lambda" => Box::new(CrossEntropyLambda::new(md)?),
+        other => {
+            return Err(Error::Unsupported(format!(
+                "training with objective={other}"
+            )));
+        }
+    })
 }
 
 /// upstream: `Common::Sign`
-fn sign(x: f64) -> f64 {
-    f64::from(i32::from(x > 0.0) - i32::from(x < 0.0))
+pub(crate) fn sign(x: f64) -> i32 {
+    i32::from(x > 0.0) - i32::from(x < 0.0)
 }
 
-/// upstream: `RegressionL2loss`
-pub struct RegressionL2 {
-    sqrt: bool,
-    label: Vec<f32>,
-    weights: Vec<f32>,
-}
-
-impl RegressionL2 {
-    pub fn new(cfg: &Config, md: &Metadata) -> Self {
-        let sqrt = cfg.reg_sqrt;
-        let label = if sqrt {
-            md.label
-                .iter()
-                .map(|&l| (sign(f64::from(l)) * f64::from(l).abs().sqrt()) as f32)
-                .collect()
-        } else {
-            md.label.clone()
-        };
-        RegressionL2 {
-            sqrt,
-            label,
-            weights: md.weights.clone(),
-        }
-    }
-}
-
-impl Objective for RegressionL2 {
-    fn name(&self) -> &'static str {
-        "regression"
-    }
-
-    fn to_model_string(&self) -> String {
-        if self.sqrt {
-            "regression sqrt".into()
-        } else {
-            "regression".into()
-        }
-    }
-
-    fn get_gradients(&self, score: &[f64], gradients: &mut [f32], hessians: &mut [f32]) {
-        if self.weights.is_empty() {
-            for i in 0..self.label.len() {
-                gradients[i] = (score[i] - f64::from(self.label[i])) as f32;
-                hessians[i] = 1.0;
-            }
-        } else {
-            for i in 0..self.label.len() {
-                gradients[i] = ((score[i] - f64::from(self.label[i])) as f32) * self.weights[i];
-                hessians[i] = self.weights[i];
-            }
-        }
-    }
-
-    fn boost_from_score(&self, _class_id: usize) -> f64 {
-        let mut suml = 0.0f64;
-        let sumw;
-        if self.weights.is_empty() {
-            sumw = self.label.len() as f64;
-            for &l in &self.label {
-                suml += f64::from(l);
-            }
-        } else {
-            let mut w = 0.0f64;
-            for (&l, &wt) in self.label.iter().zip(&self.weights) {
-                suml = crate::utils::common::madd(f64::from(l), f64::from(wt), suml);
-                w += f64::from(wt);
-            }
-            sumw = w;
-        }
-        suml / sumw
-    }
-
-    fn is_constant_hessian(&self) -> bool {
-        self.weights.is_empty()
+/// upstream: `Common::CheckElementsIntervalClosed`
+pub(crate) fn check_labels_in(label: &[f32], lo: f32, hi: f32, name: &str) -> Result<()> {
+    match label.iter().find(|&&l| !(lo..=hi).contains(&l)) {
+        Some(l) => Err(Error::InvalidParameter(format!(
+            "[{name}]: does not tolerate element [{l}] outside [{lo}, {hi}]"
+        ))),
+        None => Ok(()),
     }
 }
