@@ -62,7 +62,7 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 - [x] All metrics: l1/l2/rmse/quantile/huber/fair/poisson/mape/gamma/gamma_deviance/tweedie/r2, ndcg@k, map@k, auc, average_precision, binary_logloss/error, auc_mu, multi_logloss/error (`multi_error_top_k`), cross_entropy, cross_entropy_lambda, kullback_leibler (bit-exact vs upstream on 24 fixtures; wiring into training/early stopping is P5)
 
 ## P5: Boosting variants + training loop
-- [ ] DART (`drop_rate`, `max_drop`, `skip_drop`, `xgboost_dart_mode`, `uniform_drop`)
+- [x] DART (`drop_rate`, `max_drop`, `skip_drop`, `xgboost_dart_mode`, `uniform_drop`; byte-identical, 4 fixtures; the drop replays recorded splits on all rows)
 - [x] RF (`boosting=rf`, byte-identical; known gap: a first tree with no split is scored on out-of-bag rows only, matching upstream's non-subset path, the subset path is not modelled)
 - [x] GOSS (`data_sample_strategy=goss`, byte-identical; both the subset and dense regimes)
 - [ ] Early stopping (`early_stopping_round`, `first_metric_only`, `early_stopping_min_delta`)

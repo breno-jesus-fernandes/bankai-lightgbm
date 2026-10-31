@@ -11,8 +11,9 @@ use crate::meta::K_EPSILON;
 use crate::objective::LoadedObjective;
 use crate::objective::train::{Objective, create_objective};
 use crate::tree::Tree;
-use crate::treelearner::serial::SerialTreeLearner;
+use crate::treelearner::serial::{SerialTreeLearner, SplitRecord};
 use crate::utils::format::format_g;
+use crate::utils::random::Random;
 
 /// upstream: `BinMapper::bin_info_string` (stream precision 17)
 fn bin_info_string(m: &crate::io::bin::BinMapper) -> String {
@@ -47,7 +48,7 @@ impl Gbdt {
     /// Train a model on `ds` with `cfg` (upstream `Booster` construction + `num_iterations`
     /// calls to `GBDT::TrainOneIter`).
     pub fn train(cfg: &Config, ds: &Dataset) -> Result<Gbdt> {
-        if cfg.boosting != "gbdt" && cfg.boosting != "rf" {
+        if !matches!(cfg.boosting.as_str(), "gbdt" | "rf" | "dart") {
             return Err(Error::Unsupported(format!("boosting={}", cfg.boosting)));
         }
         let objective = create_objective(cfg, &ds.metadata)?;
@@ -81,6 +82,25 @@ struct Trainer<'a> {
     rf_init: Vec<f64>,
     /// The RF residual base broadcast over rows (class-major).
     rf_pred: Vec<f64>,
+    /// DART state (`boosting=dart`).
+    dart: Option<DartState>,
+    /// Shrinkage of the tree being trained (upstream `shrinkage_rate_`; DART changes it).
+    shrinkage: f64,
+    /// Splits of every model tree, for replays on all rows (DART only).
+    tree_splits: Vec<Vec<SplitRecord>>,
+}
+
+/// upstream: `DART` members.
+struct DartState {
+    tree_weight: Vec<f64>,
+    sum_weight: f64,
+    drop_index: Vec<usize>,
+    rng: Random,
+}
+
+/// upstream `std::min(a, b)`: `b` only when strictly smaller.
+fn min_upstream(a: f64, b: f64) -> f64 {
+    if b < a { b } else { a }
 }
 
 impl<'a> Trainer<'a> {
@@ -109,6 +129,14 @@ impl<'a> Trainer<'a> {
             rf,
             rf_init: Vec::new(),
             rf_pred: Vec::new(),
+            dart: (cfg.boosting == "dart").then(|| DartState {
+                tree_weight: Vec::new(),
+                sum_weight: 0.0,
+                drop_index: Vec::new(),
+                rng: Random::new(cfg.drop_seed),
+            }),
+            shrinkage: cfg.learning_rate,
+            tree_splits: Vec::new(),
         };
         if rf {
             // upstream: RF::Init. Boosting() runs once: gradients come from the initial
@@ -237,6 +265,9 @@ impl<'a> Trainer<'a> {
         for (k, init) in init_scores.iter_mut().enumerate() {
             *init = self.boost_from_average(k);
         }
+        if self.dart.is_some() {
+            self.dart_drop();
+        }
         self.objective
             .get_gradients(&self.score, &mut self.gradients, &mut self.hessians);
         let iter = self.iter;
@@ -263,7 +294,7 @@ impl<'a> Trainer<'a> {
             if tree.num_leaves > 1 {
                 should_continue = true;
                 self.renew_tree_output(&mut tree, &self.score[off..off + n]);
-                tree.apply_shrinkage(self.cfg.learning_rate);
+                tree.apply_shrinkage(self.shrinkage);
                 self.learner
                     .add_prediction_to_score(&tree, &mut self.score[off..off + n]);
                 if let Some(oob) = &oob {
@@ -288,6 +319,14 @@ impl<'a> Trainer<'a> {
                 tree.as_constant_tree(0.0, n as i32);
             }
             tree.finish_training();
+            if self.dart.is_some() {
+                let splits = if tree.num_leaves > 1 {
+                    self.learner.last_splits()
+                } else {
+                    Vec::new()
+                };
+                self.tree_splits.push(splits);
+            }
             self.models.push(tree);
         }
         if !should_continue {
@@ -297,11 +336,142 @@ impl<'a> Trainer<'a> {
             if self.models.len() > ntpi {
                 for _ in 0..ntpi {
                     self.models.pop();
+                    self.tree_splits.pop();
                 }
             }
             return true;
         }
+        if self.dart.is_some() {
+            self.dart_normalize();
+            if let Some(state) = self.dart.as_mut()
+                && !self.cfg.uniform_drop
+            {
+                state.tree_weight.push(self.shrinkage);
+                state.sum_weight += self.shrinkage;
+            }
+        }
         false
+    }
+
+    /// Adds model `idx` (class `k`) to the training score for all rows, through its
+    /// recorded splits (upstream: `ScoreUpdater::AddScore(tree, cur_tree_id)`).
+    fn add_model_to_train_score(&mut self, idx: usize, k: usize) {
+        let n = self.ds.num_data();
+        let rows: Vec<i32> = (0..n as i32).collect();
+        self.learner.add_prediction_for_rows(
+            &self.models[idx],
+            &self.tree_splits[idx],
+            &rows,
+            &mut self.score[k * n..(k + 1) * n],
+        );
+    }
+
+    /// upstream: `DART::DroppingTrees`. Chooses the trees to drop, removes them from the
+    /// training score and sets the shrinkage of the new tree.
+    fn dart_drop(&mut self) {
+        let ntpi = self.num_tree_per_iteration;
+        let iter = self.iter.max(0) as usize;
+        let cfg = self.cfg;
+        let Some(state) = self.dart.as_mut() else {
+            return;
+        };
+        let mut drop_index: Vec<usize> = Vec::new();
+        let is_skip = f64::from(state.rng.next_float()) < cfg.skip_drop;
+        if !is_skip {
+            let mut drop_rate = cfg.drop_rate;
+            // upstream: `static_cast<size_t>(config_->max_drop)` (a negative value wraps)
+            let max_drop_size = cfg.max_drop as i64 as u64;
+            if !cfg.uniform_drop {
+                let inv_average_weight = state.tree_weight.len() as f64 / state.sum_weight;
+                if cfg.max_drop > 0 {
+                    drop_rate = min_upstream(
+                        drop_rate,
+                        f64::from(cfg.max_drop) * inv_average_weight / state.sum_weight,
+                    );
+                }
+                for i in 0..iter {
+                    let w = state.tree_weight.get(i).copied().unwrap_or(0.0);
+                    if f64::from(state.rng.next_float()) < drop_rate * w * inv_average_weight {
+                        drop_index.push(i);
+                        if drop_index.len() as u64 >= max_drop_size {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                if cfg.max_drop > 0 {
+                    drop_rate = min_upstream(drop_rate, f64::from(cfg.max_drop) / iter as f64);
+                }
+                for i in 0..iter {
+                    if f64::from(state.rng.next_float()) < drop_rate {
+                        drop_index.push(i);
+                        if drop_index.len() as u64 >= max_drop_size {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        for &i in &drop_index {
+            for k in 0..ntpi {
+                let idx = i * ntpi + k;
+                self.models[idx].apply_shrinkage(-1.0);
+                self.add_model_to_train_score(idx, k);
+            }
+        }
+        let num_drop = drop_index.len() as f64;
+        self.shrinkage = if !cfg.xgboost_dart_mode {
+            cfg.learning_rate / (1.0 + num_drop)
+        } else if drop_index.is_empty() {
+            cfg.learning_rate
+        } else {
+            cfg.learning_rate / (cfg.learning_rate + num_drop)
+        };
+        if let Some(state) = self.dart.as_mut() {
+            state.drop_index = drop_index;
+        }
+    }
+
+    /// upstream: `DART::Normalize`. Restores the dropped trees, rescaled by the number of
+    /// dropped trees, and updates their weights.
+    fn dart_normalize(&mut self) {
+        let ntpi = self.num_tree_per_iteration;
+        let cfg = self.cfg;
+        let drop_index = match self.dart.as_ref() {
+            Some(state) => state.drop_index.clone(),
+            None => return,
+        };
+        let k = drop_index.len() as f64;
+        let lr = cfg.learning_rate;
+        for &i in &drop_index {
+            for c in 0..ntpi {
+                let idx = i * ntpi + c;
+                if !cfg.xgboost_dart_mode {
+                    self.models[idx].apply_shrinkage(1.0 / (k + 1.0));
+                    self.models[idx].apply_shrinkage(-k);
+                } else {
+                    self.models[idx].apply_shrinkage(self.shrinkage);
+                    self.models[idx].apply_shrinkage(-k / lr);
+                }
+                self.add_model_to_train_score(idx, c);
+            }
+            if !cfg.uniform_drop
+                && let Some(state) = self.dart.as_mut()
+            {
+                let w = state.tree_weight.get(i).copied().unwrap_or(0.0);
+                if !cfg.xgboost_dart_mode {
+                    state.sum_weight -= w * (1.0 / (k + 1.0));
+                    if let Some(t) = state.tree_weight.get_mut(i) {
+                        *t *= k / (k + 1.0);
+                    }
+                } else {
+                    state.sum_weight -= w * (1.0 / (k + lr));
+                    if let Some(t) = state.tree_weight.get_mut(i) {
+                        *t *= k / (k + lr);
+                    }
+                }
+            }
+        }
     }
 
     /// upstream: `SerialTreeLearner::RenewTreeOutput` (no bagging, single machine)

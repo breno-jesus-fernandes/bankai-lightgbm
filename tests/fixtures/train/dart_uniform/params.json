@@ -1,0 +1,18 @@
+{
+ "params": {
+  "deterministic": true,
+  "num_threads": 1,
+  "force_col_wise": true,
+  "seed": 7,
+  "verbose": -1,
+  "objective": "regression",
+  "boosting": "dart",
+  "num_leaves": 15,
+  "learning_rate": 0.2,
+  "uniform_drop": true,
+  "drop_rate": 0.3,
+  "max_drop": 3
+ },
+ "num_boost_round": 15,
+ "categorical": []
+}

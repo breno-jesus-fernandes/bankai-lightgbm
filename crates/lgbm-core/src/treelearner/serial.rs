@@ -94,7 +94,7 @@ impl HistogramPool {
 
 /// One numerical split of the tree being trained (replayed for out-of-bag rows).
 #[derive(Debug, Clone)]
-struct SplitRecord {
+pub(crate) struct SplitRecord {
     leaf: usize,
     right: usize,
     inner: usize,
@@ -102,7 +102,7 @@ struct SplitRecord {
 }
 
 #[derive(Debug, Clone)]
-enum SplitKind {
+pub(crate) enum SplitKind {
     Numerical {
         threshold: u32,
         default_left: bool,
@@ -806,12 +806,32 @@ impl<'a> SerialTreeLearner<'a> {
     /// last tree's splits are replayed on `rows` with the same bin routing used in training,
     /// so each row lands in the leaf the tree would have sent it to.
     pub fn add_out_of_bag_prediction(&self, tree: &Tree, rows: &[i32], score: &mut [f64]) {
-        if tree.num_leaves <= 1 || rows.is_empty() {
+        if tree.num_leaves <= 1 {
             return;
         }
-        let mut part = DataPartition::new(self.num_data, tree.num_leaves);
+        self.add_prediction_for_rows(tree, &self.splits, rows, score);
+    }
+
+    /// The splits of the last tree trained (for later replays on any rows).
+    pub(crate) fn last_splits(&self) -> Vec<SplitRecord> {
+        self.splits.clone()
+    }
+
+    /// Adds `tree` to `score` for `rows`, routing them through `splits` with the training
+    /// routing (upstream: `Tree::AddPredictionToScore` on the given rows).
+    pub(crate) fn add_prediction_for_rows(
+        &self,
+        tree: &Tree,
+        splits: &[SplitRecord],
+        rows: &[i32],
+        score: &mut [f64],
+    ) {
+        if rows.is_empty() {
+            return;
+        }
+        let mut part = DataPartition::new(self.num_data, tree.num_leaves.max(1));
         part.init_with(rows);
-        for s in &self.splits {
+        for s in splits {
             let rule = match &s.kind {
                 SplitKind::Numerical {
                     threshold,

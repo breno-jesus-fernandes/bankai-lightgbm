@@ -397,6 +397,54 @@ CASES: dict[str, tuple[Callable[[np.random.Generator], Data], dict[str, Any], in
         },
         10,
     ),
+    "dart": (
+        reg,
+        {
+            "objective": "regression",
+            "boosting": "dart",
+            "num_leaves": 15,
+            "learning_rate": 0.2,
+            "drop_rate": 0.2,
+        },
+        15,
+    ),
+    "dart_uniform": (
+        reg,
+        {
+            "objective": "regression",
+            "boosting": "dart",
+            "num_leaves": 15,
+            "learning_rate": 0.2,
+            "uniform_drop": True,
+            "drop_rate": 0.3,
+            "max_drop": 3,
+        },
+        15,
+    ),
+    "dart_xgboost": (
+        reg,
+        {
+            "objective": "regression",
+            "boosting": "dart",
+            "num_leaves": 15,
+            "learning_rate": 0.3,
+            "xgboost_dart_mode": True,
+            "skip_drop": 0.3,
+            "drop_seed": 9,
+        },
+        15,
+    ),
+    "dart_binary": (
+        binary,
+        {
+            "objective": "binary",
+            "boosting": "dart",
+            "num_leaves": 7,
+            "learning_rate": 0.25,
+            "drop_rate": 0.4,
+        },
+        12,
+    ),
     "cat_bagging": (
         categorical,
         {
