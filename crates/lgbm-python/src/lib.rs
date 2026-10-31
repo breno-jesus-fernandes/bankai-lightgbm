@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lgbm_core::boosting::Gbdt;
+use lgbm_core::boosting::{Gbdt, GbdtTrainer};
 use lgbm_core::config::Config;
 use lgbm_core::io::dataset::Dataset;
 use lgbm_core::predictor::{PredictConfig, PredictKind, Predictor};
@@ -77,9 +77,10 @@ impl NativeDataset {
 }
 
 /// Native booster handle. Mirrors upstream's C API `BoosterHandle`.
-#[pyclass(module = "bankai_lightgbm._lib", frozen)]
+#[pyclass(module = "bankai_lightgbm._lib")]
 struct NativeBooster {
     model: Gbdt,
+    trainer: Option<GbdtTrainer>,
 }
 
 #[pymethods]
@@ -89,7 +90,10 @@ impl NativeBooster {
         let model = py
             .allow_threads(|| Gbdt::from_model_file(&path))
             .map_err(to_py)?;
-        Ok(NativeBooster { model })
+        Ok(NativeBooster {
+            model,
+            trainer: None,
+        })
     }
 
     #[staticmethod]
@@ -97,7 +101,10 @@ impl NativeBooster {
         let model = py
             .allow_threads(|| Gbdt::from_model_string(&model_str))
             .map_err(to_py)?;
-        Ok(NativeBooster { model })
+        Ok(NativeBooster {
+            model,
+            trainer: None,
+        })
     }
 
     /// Train `num_iterations` rounds on `dataset` (`LGBM_BoosterCreate` + `UpdateOneIter`).
@@ -108,13 +115,58 @@ impl NativeBooster {
         dataset: PyRef<'_, NativeDataset>,
     ) -> PyResult<Self> {
         let ds = Arc::clone(&dataset.ds);
-        let model = py
-            .allow_threads(|| -> lgbm_core::Result<Gbdt> {
+        let (trainer, model) = py
+            .allow_threads(|| -> lgbm_core::Result<(GbdtTrainer, Gbdt)> {
                 let cfg = Config::from_params(&params)?;
-                Gbdt::train_shared(Arc::new(cfg), ds)
+                let cfg = Arc::new(cfg);
+                let mut trainer = GbdtTrainer::new(Arc::clone(&cfg), ds)?;
+                for _ in 0..cfg.num_iterations {
+                    if trainer.update_one_iter() {
+                        break;
+                    }
+                }
+                let model = trainer.snapshot();
+                Ok((trainer, model))
             })
             .map_err(to_py)?;
-        Ok(NativeBooster { model })
+        Ok(NativeBooster {
+            model,
+            trainer: Some(trainer),
+        })
+    }
+
+    #[staticmethod]
+    fn create_training(
+        py: Python<'_>,
+        params: HashMap<String, String>,
+        dataset: PyRef<'_, NativeDataset>,
+    ) -> PyResult<Self> {
+        let ds = Arc::clone(&dataset.ds);
+        let trainer = py
+            .allow_threads(|| -> lgbm_core::Result<GbdtTrainer> {
+                let cfg = Config::from_params(&params)?;
+                GbdtTrainer::new(Arc::new(cfg), ds)
+            })
+            .map_err(to_py)?;
+        let model = trainer.snapshot();
+        Ok(NativeBooster {
+            model,
+            trainer: Some(trainer),
+        })
+    }
+
+    fn update(&mut self, py: Python<'_>) -> PyResult<bool> {
+        let Some(trainer) = self.trainer.as_mut() else {
+            return Err(LightGBMError::new_err(
+                "Cannot continue training a Booster loaded from a model; construct it with a training Dataset.",
+            ));
+        };
+        let (finished, model) = py.allow_threads(|| {
+            let finished = trainer.update_one_iter();
+            (finished, trainer.snapshot())
+        });
+        self.model = model;
+        Ok(finished)
     }
 
     fn num_class(&self) -> usize {

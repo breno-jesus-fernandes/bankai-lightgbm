@@ -287,6 +287,27 @@ class Booster:
         self._handle = NativeBooster.train(_params_to_strings(merged), dataset._handle_or_raise())
         self.pandas_categorical = dataset.pandas_categorical
 
+    def update(self, train_set: Dataset | None = None, fobj: Any = None) -> bool:
+        """Train one additional iteration and return whether training has finished."""
+        if fobj is not None:
+            raise NotImplementedError("custom objectives are not implemented yet (roadmap P4)")
+        if train_set is not None:
+            if self._train_set is not None and train_set is not self._train_set:
+                raise NotImplementedError("changing the training Dataset is not implemented yet")
+            self._train_set = train_set
+        if self._handle is None:
+            if self._train_set is None:
+                raise LightGBMError("Booster has no training Dataset")
+            dataset = self._train_set.construct()
+            merged = {**dataset.params, **self.params}
+            if dataset._categorical:
+                merged["categorical_feature"] = ",".join(str(c) for c in dataset._categorical)
+            self._handle = NativeBooster.create_training(
+                _params_to_strings(merged), dataset._handle_or_raise()
+            )
+            self.pandas_categorical = dataset.pandas_categorical
+        return self._native().update()
+
     def __copy__(self) -> Booster:
         return self.__deepcopy__(None)
 

@@ -27,6 +27,14 @@ def test_introspection_matches(pair: tuple[lgb.Booster, lightgbm.Booster, np.nda
     assert ours.feature_name() == theirs.feature_name()
 
 
+def test_update_requires_training_state(
+    pair: tuple[lgb.Booster, lightgbm.Booster, np.ndarray],
+) -> None:
+    ours, _, _ = pair
+    with pytest.raises(lgb.LightGBMError, match="Cannot continue training"):
+        ours.update()
+
+
 def test_float32_and_list_inputs(pair: tuple[lgb.Booster, lightgbm.Booster, np.ndarray]) -> None:
     ours, theirs, x = pair
     x32 = x.astype(np.float32)

@@ -71,7 +71,7 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 
 ## P6: Python package (drop-in)
 - [ ] `Dataset` (done: dense numpy and pandas incl. categoricals, weight, group, categorical_feature; pending: scipy.sparse, pyarrow, files, references, subsets, init_score)
-- [ ] `Booster` (training works: `lgb.train` gives byte-identical model text; Rust `GbdtTrainer` now supports iteration updates and snapshots; pending: Python `Booster.update`, full method surface, `cv`)
+- [ ] `Booster` (training works: `lgb.train` gives byte-identical model text; Rust `GbdtTrainer` and Python `Booster.update()` support incremental training; pending: full method surface, `cv`)
 - [ ] Callbacks: `early_stopping`, `log_evaluation`, `record_evaluation`, `reset_parameter`
 - [ ] sklearn API: `LGBMModel`, `LGBMClassifier`, `LGBMRegressor`, `LGBMRanker`
 - [ ] Plotting: `plot_importance`, `plot_split_value_histogram`, `plot_metric`, `plot_tree`, `create_tree_digraph`
