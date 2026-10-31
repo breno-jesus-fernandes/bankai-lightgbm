@@ -45,8 +45,9 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 - [x] Regularization: `lambda_l1`, `lambda_l2`, `min_gain_to_split`, `max_delta_step`, `path_smooth`
 - [x] Categorical splits (`max_cat_threshold`, `cat_l2`, `cat_smooth`, `max_cat_to_onehot`, `min_data_per_group`; byte-identical, one-hot and sorted search, NaN categories, bagging; monotone + categorical still unsupported)
 - [ ] `feature_fraction`, `feature_fraction_bynode`, `bagging_fraction`/`bagging_freq`, pos/neg bagging (done, byte-identical; `bagging_by_query` and `extra_trees` still missing)
-- [ ] Monotone constraints: basic, intermediate, advanced; `monotone_penalty`
-- [ ] `interaction_constraints`, `forcedsplits_filename`, CEGB (`cegb_*`)
+- [ ] Monotone constraints: basic (done, byte-identical, with `monotone_penalty`); intermediate and advanced still missing
+- [x] `interaction_constraints` (byte-identical; by-tree and by-node sampling)
+- [ ] `forcedsplits_filename`, CEGB (`cegb_*`)
 - [ ] `linear_tree` (`linear_lambda`)
 - [ ] Quantized training (`use_quantized_grad`, `num_grad_quant_bins`, ...)
 - [ ] `refit`, `deterministic`

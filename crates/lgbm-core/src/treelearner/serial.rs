@@ -138,6 +138,13 @@ pub struct SerialTreeLearner<'a> {
     ordered_gradients: Vec<f32>,
     ordered_hessians: Vec<f32>,
     cat_params: CatParams,
+    /// upstream `Tree::branch_features`: real feature indices on the path to each leaf.
+    branch_features: Vec<Vec<i32>>,
+    /// upstream `BasicLeafConstraints`: output bounds of each leaf (`monotone_constraints`).
+    monotone_active: bool,
+    monotone_penalization: f64,
+    monotone_bounds: Vec<(f64, f64)>,
+    leaf_depth: Vec<i32>,
 }
 
 impl<'a> SerialTreeLearner<'a> {
@@ -196,8 +203,11 @@ impl<'a> SerialTreeLearner<'a> {
             });
             feature_hist_len.push((m.num_bin - offset) as usize);
         }
-        if !cfg.monotone_constraints.is_empty() {
-            return Err(Error::Unsupported("monotone_constraints".into()));
+        if !cfg.monotone_constraints.is_empty() && cfg.monotone_constraints_method != "basic" {
+            return Err(Error::Unsupported(format!(
+                "monotone_constraints_method={}",
+                cfg.monotone_constraints_method
+            )));
         }
         let num_leaves = cfg.num_leaves as usize;
         Ok(SerialTreeLearner {
@@ -224,6 +234,11 @@ impl<'a> SerialTreeLearner<'a> {
             ordered_gradients: Vec::with_capacity(ds.num_data()),
             ordered_hessians: Vec::with_capacity(ds.num_data()),
             cat_params: CatParams::from_config(cfg),
+            branch_features: vec![Vec::new(); num_leaves],
+            monotone_active: !cfg.monotone_constraints.is_empty(),
+            monotone_penalization: cfg.monotone_penalty,
+            monotone_bounds: vec![(-f64::MAX, f64::MAX); num_leaves],
+            leaf_depth: vec![0; num_leaves],
         })
     }
 
@@ -266,6 +281,11 @@ impl<'a> SerialTreeLearner<'a> {
     /// upstream: `SerialTreeLearner::BeforeTrain` (no column sampling, no bagging)
     fn before_train(&mut self, gradients: &[f32], hessians: &[f32], rows: Option<&[i32]>) {
         self.pool.reset_map();
+        for b in &mut self.branch_features {
+            b.clear();
+        }
+        self.monotone_bounds.fill((-f64::MAX, f64::MAX));
+        self.leaf_depth.fill(0);
         self.col_sampler.reset_by_tree();
         match rows {
             Some(r) => self.partition.init_with(r),
@@ -485,6 +505,16 @@ impl<'a> SerialTreeLearner<'a> {
         }
     }
 
+    /// Output bounds of a leaf when monotone constraints are active (upstream: the
+    /// `USE_MC` template instantiations).
+    fn mc_bounds(&self, leaf: i32) -> Option<(f64, f64)> {
+        if self.monotone_active {
+            Some(self.monotone_bounds[leaf as usize])
+        } else {
+            None
+        }
+    }
+
     /// upstream: `SerialTreeLearner::FindBestSplitsFromHistograms`
     fn find_best_splits_from_histograms(
         &mut self,
@@ -495,9 +525,12 @@ impl<'a> SerialTreeLearner<'a> {
         let mut smaller_best = SplitInfo::default();
         let mut larger_best = SplitInfo::default();
         // upstream draws the by-node sample for the smaller leaf, then the larger leaf.
-        let smaller_mask = self.col_sampler.get_by_node();
+        let smaller_mask = self
+            .col_sampler
+            .get_by_node(&self.branch_features[self.smaller.leaf_index as usize]);
         let larger_mask = if self.larger.leaf_index >= 0 {
-            self.col_sampler.get_by_node()
+            self.col_sampler
+                .get_by_node(&self.branch_features[self.larger.leaf_index as usize])
         } else {
             Vec::new()
         };
@@ -590,6 +623,7 @@ impl<'a> SerialTreeLearner<'a> {
         let len = self.feature_hist_len[feature] * 2;
         let hist = &self.pool.slots[slot][start..start + len];
         let mut new_split = SplitInfo::default();
+        let mc = self.mc_bounds(ls.leaf_index);
         let splittable = if self.metas[feature].bin_type == BinType::Categorical {
             find_best_threshold_categorical(
                 hist,
@@ -600,6 +634,7 @@ impl<'a> SerialTreeLearner<'a> {
                 ls.sum_hessians,
                 ls.num_data_in_leaf,
                 parent_output,
+                mc,
                 &mut new_split,
             )
         } else {
@@ -611,10 +646,16 @@ impl<'a> SerialTreeLearner<'a> {
                 ls.sum_hessians,
                 ls.num_data_in_leaf,
                 parent_output,
+                mc,
                 &mut new_split,
             )
         };
         self.pool.splittable[slot][feature] = splittable;
+        // upstream: ComputeBestSplitForFeature, monotone_penalty (applied even at 0)
+        if self.monotone_active && self.metas[feature].monotone_type != 0 {
+            let depth = self.leaf_depth[ls.leaf_index as usize];
+            new_split.gain *= monotone_split_gain_penalty(depth, self.monotone_penalization);
+        }
         new_split.feature = real_fidx;
         if allowed && new_split.better_than(best) {
             *best = new_split;
@@ -630,6 +671,11 @@ impl<'a> SerialTreeLearner<'a> {
         let g = &l.groups[l.feature2group[inner] as usize];
         let m = &g.bin_mappers[l.feature2subfeature[inner] as usize];
         let next_leaf = tree.num_leaves;
+        // upstream: `Tree::Split` keeps the path features of both children.
+        let path = self.branch_features[best_leaf].clone();
+        self.branch_features[next_leaf] = path;
+        self.branch_features[next_leaf].push(info.feature);
+        self.branch_features[best_leaf].push(info.feature);
         let gain = (info.gain + self.cfg.min_gain_to_split) as f32;
         let right = if m.bin_type == BinType::Categorical {
             // upstream: `SerialTreeLearner::SplitInner` (categorical). The tree stores the
@@ -698,6 +744,26 @@ impl<'a> SerialTreeLearner<'a> {
                 info.default_left,
             )
         };
+        // upstream: BasicLeafConstraints::Update. The new leaf starts from the parent's
+        // bounds; numerical monotone splits then clamp the children at the midpoint.
+        let mono = self.metas[inner].monotone_type;
+        self.monotone_bounds[next_leaf] = self.monotone_bounds[best_leaf];
+        if self.metas[inner].bin_type != BinType::Categorical {
+            let mid = (info.left_output + info.right_output) / 2.0;
+            if mono < 0 {
+                let b = &mut self.monotone_bounds[best_leaf];
+                b.0 = b.0.max(mid);
+                let n = &mut self.monotone_bounds[next_leaf];
+                n.1 = n.1.min(mid);
+            } else if mono > 0 {
+                let b = &mut self.monotone_bounds[best_leaf];
+                b.1 = b.1.min(mid);
+                let n = &mut self.monotone_bounds[next_leaf];
+                n.0 = n.0.max(mid);
+            }
+        }
+        self.leaf_depth[next_leaf] = self.leaf_depth[best_leaf] + 1;
+        self.leaf_depth[best_leaf] += 1;
         let left_ls = LeafSplits {
             leaf_index: best_leaf as i32,
             num_data_in_leaf: info.left_count,
@@ -773,4 +839,18 @@ fn two_slots(slots: &mut [Vec<f64>], a: usize, b: usize) -> (&Vec<f64>, &mut Vec
         let (x, y) = slots.split_at_mut(a);
         (&y[0], &mut x[b])
     }
+}
+
+/// upstream: `LeafConstraintsBase::ComputeMonotoneSplitGainPenalty`. Applied to every split
+/// on a monotone feature, so with the default `monotone_penalty = 0` it is `1 + kEpsilon`.
+fn monotone_split_gain_penalty(depth: i32, penalization: f64) -> f64 {
+    let eps = f64::from(crate::meta::K_EPSILON);
+    let d = f64::from(depth);
+    if penalization >= d + 1.0 {
+        return eps;
+    }
+    if penalization <= 1.0 {
+        return 1.0 - penalization / 2f64.powf(d) + eps;
+    }
+    1.0 - 2f64.powf(penalization - 1.0 - d) + eps
 }

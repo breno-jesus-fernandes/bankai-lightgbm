@@ -186,6 +186,7 @@ pub fn find_best_threshold_numerical(
     sum_hessian: f64,
     num_data: i32,
     parent_output: f64,
+    mc: Option<(f64, f64)>,
     output: &mut SplitInfo,
 ) -> bool {
     output.default_left = true;
@@ -204,6 +205,7 @@ pub fn find_best_threshold_numerical(
                 sum_hessian,
                 num_data,
                 parent_output,
+                mc,
                 output,
             )
         };
@@ -240,6 +242,7 @@ fn numerical<const RAND: bool, const L1: bool, const MAX_OUT: bool, const SMOOTH
     sum_hessian: f64,
     num_data: i32,
     parent_output: f64,
+    mc: Option<(f64, f64)>,
     output: &mut SplitInfo,
 ) -> bool {
     // upstream: BeforeNumerical
@@ -271,7 +274,7 @@ fn numerical<const RAND: bool, const L1: bool, const MAX_OUT: bool, const SMOOTH
     macro_rules! seq {
         ($rev:literal, $skip:literal, $na:literal) => {
             splittable |= sequential::<RAND, L1, MAX_OUT, SMOOTH, $rev, $skip, $na>(
-                hist, meta, p, args, output,
+                hist, meta, p, args, mc, output,
             )
         };
     }
@@ -316,6 +319,7 @@ fn sequential<
         i32,
         f64,
     ),
+    mc: Option<(f64, f64)>,
     output: &mut SplitInfo,
 ) -> bool {
     let offset = meta.offset;
@@ -328,7 +332,45 @@ fn sequential<
     let cnt_factor = f64::from(num_data) / sum_hessian;
     let grad = |t: i32| hist[(t as usize) << 1];
     let hess = |t: i32| hist[((t as usize) << 1) + 1];
+    let mono = meta.monotone_type;
+    let mc_invalid = mc.is_some_and(|(lo, hi)| lo > hi);
     let gains = |slg: f64, slh: f64, srg: f64, srh: f64, lc: i32, rc: i32| {
+        if let Some((mn, mx)) = mc {
+            // upstream: GetSplitGains<USE_MC>: clamped outputs, monotone direction check.
+            let lo = clamp_to(
+                calculate_splitted_leaf_output::<L1, MAX_OUT, SMOOTH>(
+                    slg,
+                    slh,
+                    p.lambda_l1,
+                    p.lambda_l2,
+                    p.max_delta_step,
+                    p.path_smooth,
+                    lc,
+                    parent_output,
+                ),
+                mn,
+                mx,
+            );
+            let ro = clamp_to(
+                calculate_splitted_leaf_output::<L1, MAX_OUT, SMOOTH>(
+                    srg,
+                    srh,
+                    p.lambda_l1,
+                    p.lambda_l2,
+                    p.max_delta_step,
+                    p.path_smooth,
+                    rc,
+                    parent_output,
+                ),
+                mn,
+                mx,
+            );
+            if (mono > 0 && lo > ro) || (mono < 0 && lo < ro) {
+                return 0.0;
+            }
+            return leaf_gain_given_output::<L1>(slg, slh, p.lambda_l1, p.lambda_l2, lo)
+                + leaf_gain_given_output::<L1>(srg, srh, p.lambda_l1, p.lambda_l2, ro);
+        }
         leaf_gain::<L1, MAX_OUT, SMOOTH>(
             slg,
             slh,
@@ -397,7 +439,7 @@ fn sequential<
                 continue;
             }
             is_splittable = true;
-            if current_gain > best_gain {
+            if current_gain > best_gain && !mc_invalid {
                 best_left_count = left_count;
                 best_sum_left_gradient = sum_left_gradient;
                 best_sum_left_hessian = sum_left_hessian;
@@ -466,7 +508,7 @@ fn sequential<
                 continue;
             }
             is_splittable = true;
-            if current_gain > best_gain {
+            if current_gain > best_gain && !mc_invalid {
                 best_left_count = left_count;
                 best_sum_left_gradient = sum_left_gradient;
                 best_sum_left_hessian = sum_left_hessian;
@@ -481,7 +523,7 @@ fn sequential<
     // other direction's scan; the caller ORs the results, and we check both here.
     if is_splittable && best_gain > output.gain + min_gain_shift {
         let out = |sg: f64, sh: f64, n: i32| {
-            calculate_splitted_leaf_output::<L1, MAX_OUT, SMOOTH>(
+            let v = calculate_splitted_leaf_output::<L1, MAX_OUT, SMOOTH>(
                 sg,
                 sh,
                 p.lambda_l1,
@@ -490,7 +532,8 @@ fn sequential<
                 p.path_smooth,
                 n,
                 parent_output,
-            )
+            );
+            clamp_opt(v, mc)
         };
         output.threshold = best_threshold;
         output.left_output = out(
@@ -534,6 +577,26 @@ impl CatParams {
             max_cat_to_onehot: cfg.max_cat_to_onehot,
             min_data_per_group: cfg.min_data_per_group,
         }
+    }
+}
+
+/// upstream: `CalculateSplittedLeafOutput<USE_MC>` clamps to the leaf's bounds.
+#[inline(always)]
+fn clamp_to(v: f64, lo: f64, hi: f64) -> f64 {
+    if v < lo {
+        lo
+    } else if v > hi {
+        hi
+    } else {
+        v
+    }
+}
+
+#[inline(always)]
+fn clamp_opt(v: f64, mc: Option<(f64, f64)>) -> f64 {
+    match mc {
+        Some((lo, hi)) => clamp_to(v, lo, hi),
+        None => v,
     }
 }
 
@@ -612,7 +675,8 @@ fn output_rt(
     )
 }
 
-/// upstream: `GetSplitGains` without monotone constraints.
+/// upstream: `GetSplitGains`. With bounds (`mc`), outputs are clamped to the leaf's
+/// constraint and the gain is taken from the clamped outputs.
 #[allow(clippy::too_many_arguments)]
 fn split_gains_rt(
     sl_g: f64,
@@ -625,7 +689,30 @@ fn split_gains_rt(
     rc: i32,
     parent_output: f64,
     flags: (bool, bool, bool),
+    mc: Option<(f64, f64)>,
 ) -> f64 {
+    if mc.is_some() {
+        let lp = SplitParams {
+            lambda_l2: l2,
+            ..*p
+        };
+        let lo = clamp_opt(
+            output_rt(sl_g, sl_h, &lp, l2, p.path_smooth, lc, parent_output, flags),
+            mc,
+        );
+        let ro = clamp_opt(
+            output_rt(sr_g, sr_h, &lp, l2, p.path_smooth, rc, parent_output, flags),
+            mc,
+        );
+        let l1 = flags.0;
+        return if l1 {
+            leaf_gain_given_output::<true>(sl_g, sl_h, p.lambda_l1, l2, lo)
+                + leaf_gain_given_output::<true>(sr_g, sr_h, p.lambda_l1, l2, ro)
+        } else {
+            leaf_gain_given_output::<false>(sl_g, sl_h, p.lambda_l1, l2, lo)
+                + leaf_gain_given_output::<false>(sr_g, sr_h, p.lambda_l1, l2, ro)
+        };
+    }
     let smooth = p.path_smooth;
     leaf_gain_rt(
         sl_g,
@@ -664,6 +751,7 @@ pub fn find_best_threshold_categorical(
     sum_hessian: f64,
     num_data: i32,
     parent_output: f64,
+    mc: Option<(f64, f64)>,
     output: &mut SplitInfo,
 ) -> bool {
     // upstream: FindBestThreshold adds 2 * kEpsilon before dispatching
@@ -761,6 +849,7 @@ pub fn find_best_threshold_categorical(
                 cnt,
                 parent_output,
                 flags,
+                mc,
             );
             if current_gain <= min_gain_shift {
                 continue;
@@ -846,6 +935,7 @@ pub fn find_best_threshold_categorical(
                     right_count,
                     parent_output,
                     flags,
+                    mc,
                 );
                 if current_gain > min_gain_shift {
                     is_splittable = true;
@@ -865,28 +955,34 @@ pub fn find_best_threshold_categorical(
 
     if is_splittable {
         let num_data_left = best_left_count;
-        output.left_output = output_rt(
-            best_sum_left_gradient,
-            best_sum_left_hessian,
-            p,
-            l2,
-            p.path_smooth,
-            num_data_left,
-            parent_output,
-            flags,
+        output.left_output = clamp_opt(
+            output_rt(
+                best_sum_left_gradient,
+                best_sum_left_hessian,
+                p,
+                l2,
+                p.path_smooth,
+                num_data_left,
+                parent_output,
+                flags,
+            ),
+            mc,
         );
         output.left_count = best_left_count;
         output.left_sum_gradient = best_sum_left_gradient;
         output.left_sum_hessian = best_sum_left_hessian - EPS;
-        output.right_output = output_rt(
-            sum_gradient - best_sum_left_gradient,
-            sum_hessian - best_sum_left_hessian,
-            p,
-            l2,
-            p.path_smooth,
-            num_data - best_left_count,
-            parent_output,
-            flags,
+        output.right_output = clamp_opt(
+            output_rt(
+                sum_gradient - best_sum_left_gradient,
+                sum_hessian - best_sum_left_hessian,
+                p,
+                l2,
+                p.path_smooth,
+                num_data - best_left_count,
+                parent_output,
+                flags,
+            ),
+            mc,
         );
         output.right_count = num_data - best_left_count;
         output.right_sum_gradient = sum_gradient - best_sum_left_gradient;

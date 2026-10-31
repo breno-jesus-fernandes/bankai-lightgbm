@@ -4,8 +4,10 @@
 //! same order as upstream (by-tree once per tree, then by-node for the smaller leaf and
 //! then the larger leaf), so the sampled features match bit for bit.
 
+use std::collections::BTreeSet;
+
 use crate::config::Config;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::io::dataset::Dataset;
 use crate::utils::random::Random;
 
@@ -29,14 +31,15 @@ pub struct ColSampler {
     used_cnt_bytree: usize,
     is_feature_used: Vec<bool>,
     used_feature_indices: Vec<usize>,
+    /// upstream `interaction_constraints_`: sets of real feature indices.
+    interaction_constraints: Vec<BTreeSet<i32>>,
+    /// Inner index of each real feature (`-1` when unused).
+    used_feature_map: Vec<i32>,
 }
 
 impl ColSampler {
     /// upstream: `ColSampler::ColSampler` + `SetTrainingData`
     pub fn new(cfg: &Config, ds: &Dataset) -> Result<Self> {
-        if !cfg.interaction_constraints.is_empty() {
-            return Err(Error::Unsupported("interaction_constraints".into()));
-        }
         let l = &ds.layout;
         let mut valid_feature_indices = Vec::new();
         let mut valid_inner = Vec::new();
@@ -63,6 +66,12 @@ impl ColSampler {
             used_cnt_bytree,
             is_feature_used: vec![true; l.num_features],
             used_feature_indices: Vec::new(),
+            interaction_constraints: cfg
+                .interaction_constraints_vector
+                .iter()
+                .map(|c| c.iter().copied().collect())
+                .collect(),
+            used_feature_map: l.used_feature_map.clone(),
         };
         s.reset_by_tree();
         Ok(s)
@@ -92,32 +101,100 @@ impl ColSampler {
         &self.is_feature_used
     }
 
-    /// upstream: `ColSampler::GetByNode` without interaction constraints. Returns a mask
-    /// over inner feature indices.
-    pub fn get_by_node(&mut self) -> Vec<bool> {
+    /// upstream: `ColSampler::GetByNode`. `branch_features` are the real feature indices
+    /// split on the path to the leaf. Returns a mask over inner feature indices.
+    pub fn get_by_node(&mut self, branch_features: &[i32]) -> Vec<bool> {
+        let constrained = !self.interaction_constraints.is_empty();
+        let allowed = if constrained {
+            self.allowed_features(branch_features)
+        } else {
+            BTreeSet::new()
+        };
         let mut ret = vec![false; self.num_features];
         if self.fraction_bynode >= 1.0 {
-            return vec![true; self.num_features];
+            if !constrained {
+                return vec![true; self.num_features];
+            }
+            for &feat in &allowed {
+                let inner = self.inner_of(feat);
+                if inner >= 0 {
+                    ret[inner as usize] = true;
+                }
+            }
+            return ret;
         }
         if self.need_reset_bytree {
-            let cnt = get_cnt(self.used_feature_indices.len(), self.fraction_bynode);
-            let picks = self
-                .random
-                .sample(self.used_feature_indices.len() as i32, cnt as i32);
+            let mut used_cnt = get_cnt(self.used_feature_indices.len(), self.fraction_bynode);
+            let filtered: Vec<usize>;
+            let candidates: &[usize] = if constrained {
+                filtered = self
+                    .used_feature_indices
+                    .iter()
+                    .copied()
+                    .filter(|&fi| allowed.contains(&(self.valid_feature_indices[fi] as i32)))
+                    .collect();
+                used_cnt = used_cnt.min(filtered.len());
+                &filtered
+            } else {
+                &self.used_feature_indices
+            };
+            let picks = self.random.sample(candidates.len() as i32, used_cnt as i32);
             for p in picks {
-                let vi = self.used_feature_indices[p as usize];
+                let vi = candidates[p as usize];
                 ret[self.valid_inner[vi]] = true;
             }
         } else {
-            let cnt = get_cnt(self.valid_feature_indices.len(), self.fraction_bynode);
-            let picks = self
-                .random
-                .sample(self.valid_feature_indices.len() as i32, cnt as i32);
+            let mut used_cnt = get_cnt(self.valid_feature_indices.len(), self.fraction_bynode);
+            let filtered: Vec<usize>;
+            let candidates: &[usize] = if constrained {
+                filtered = self
+                    .valid_feature_indices
+                    .iter()
+                    .copied()
+                    .filter(|&f| allowed.contains(&(f as i32)))
+                    .collect();
+                used_cnt = used_cnt.min(filtered.len());
+                &filtered
+            } else {
+                &self.valid_feature_indices
+            };
+            let picks = self.random.sample(candidates.len() as i32, used_cnt as i32);
             for p in picks {
-                ret[self.valid_inner[p as usize]] = true;
+                let real = candidates[p as usize];
+                ret[self.inner_of(real as i32) as usize] = true;
             }
         }
         ret
+    }
+
+    /// upstream: the `allowed_features` computation in `ColSampler::GetByNode`.
+    fn allowed_features(&self, branch: &[i32]) -> BTreeSet<i32> {
+        let mut allowed: BTreeSet<i32> = branch.iter().copied().collect();
+        for constraint in &self.interaction_constraints {
+            let mut num_found = 0usize;
+            if branch.is_empty() {
+                allowed.extend(constraint.iter().copied());
+            }
+            for feat in branch {
+                if !constraint.contains(feat) {
+                    break;
+                }
+                num_found += 1;
+                if num_found == branch.len() {
+                    allowed.extend(constraint.iter().copied());
+                    break;
+                }
+            }
+        }
+        allowed
+    }
+
+    /// upstream: `Dataset::InnerFeatureIndex` (`-1` when the feature is unused).
+    fn inner_of(&self, real: i32) -> i32 {
+        self.used_feature_map
+            .get(real as usize)
+            .copied()
+            .unwrap_or(-1)
     }
 }
 

@@ -322,6 +322,54 @@ CASES: dict[str, tuple[Callable[[np.random.Generator], Data], dict[str, Any], in
         {"objective": "regression", "num_leaves": 15, "categorical_cols": CATEGORICAL_COLS},
         15,
     ),
+    "interaction": (
+        reg,
+        {"objective": "regression", "num_leaves": 15, "interaction_constraints": "[0,1,2],[3,4,5]"},
+        15,
+    ),
+    "interaction_sampled": (
+        reg,
+        {
+            "objective": "regression",
+            "num_leaves": 15,
+            "interaction_constraints": "[0,1],[2,3,4],[5]",
+            "feature_fraction": 0.7,
+            "feature_fraction_bynode": 0.6,
+            "feature_fraction_seed": 13,
+        },
+        15,
+    ),
+    "interaction_bynode": (
+        reg,
+        {
+            "objective": "regression",
+            "num_leaves": 15,
+            "interaction_constraints": "[0,2,4],[1,3,5]",
+            "feature_fraction_bynode": 0.5,
+        },
+        15,
+    ),
+    "monotone": (
+        reg,
+        {"objective": "regression", "num_leaves": 15, "monotone_constraints": "1,0,-1,1,0,0"},
+        15,
+    ),
+    "monotone_penalty": (
+        reg,
+        {
+            "objective": "regression",
+            "num_leaves": 31,
+            "monotone_constraints": "-1,1,0,0,0,1",
+            "monotone_penalty": 1.5,
+            "min_data_in_leaf": 10,
+        },
+        15,
+    ),
+    "monotone_zero": (
+        reg,
+        {"objective": "regression", "num_leaves": 15, "monotone_constraints": "0,0,0,0,0,0"},
+        12,
+    ),
     "cat_bagging": (
         categorical,
         {
@@ -353,6 +401,7 @@ CASES: dict[str, tuple[Callable[[np.random.Generator], Data], dict[str, Any], in
 # Same data and params as the named case, trained with random sample weights.
 WEIGHTED = [
     "l2_default",
+    "monotone",
     "cat_default",
     "bagging",
     "goss",
