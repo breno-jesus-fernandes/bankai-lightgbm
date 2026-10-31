@@ -89,6 +89,7 @@ Rules:
 ## 9. Workflow
 
 - **Commit early, commit often:** commit each green step (test + implementation) as soon as it passes. Never leave work uncommitted at the end of a session.
+- Run `scripts/check.sh` before every commit. It runs fmt, clippy, cargo test, ruff, mypy, maturin and pytest, and must end with `all green`. Optionally, enable it as a pre-commit hook in your own clone.
 - **Always push:** after every commit, `git push` the branch to GitHub (`origin`) so no progress is local-only. Work on a feature branch (e.g. `p1-predict`), never commit directly to `main`. Merge to `main` through a PR.
 - Never commit a red build. If a step is not green yet, keep it out of the commit (or mark the test `#[ignore]`/`xfail` with a reason that points to the roadmap item).
 - Keep PRs small, with one feature or one fix each. Use Conventional Commits (`feat(core): ...`, `fix(io): ...`, `perf(treelearner): ...`, `test(parity): ...`).
@@ -117,6 +118,9 @@ uv venv -p 3.11 && source .venv/bin/activate
 uv pip install maturin pytest numpy "lightgbm==4.7.0"
 maturin develop -r
 pytest tests/parity
+
+# Everything (run before each commit)
+scripts/check.sh
 
 # Fixtures (needs upstream lightgbm installed)
 python scripts/gen_fixtures.py
