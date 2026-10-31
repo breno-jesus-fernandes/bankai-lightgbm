@@ -8,11 +8,20 @@ use lgbm_core::predictor::{PredictConfig, PredictKind, Predictor};
 use support::*;
 
 fn run(kind: PredictKind, npy: &str) {
+    run_range(kind, npy, 0, -1);
+}
+
+fn run_range(kind: PredictKind, npy: &str, start_iteration: i32, num_iteration: i32) {
     for case in cases() {
+        if !case.join(npy).exists() {
+            continue;
+        }
         let model = Gbdt::from_model_file(case.join("model.txt")).unwrap();
         let (x, ncol) = load_test_features(&case);
         let cfg = PredictConfig {
             kind,
+            start_iteration,
+            num_iteration,
             ..PredictConfig::default()
         };
         let pred = Predictor::new(&model, &cfg).unwrap();
@@ -40,6 +49,21 @@ fn leaf_index_matches_upstream() {
 #[test]
 fn shap_contrib_matches_upstream() {
     run(PredictKind::Contrib, "pred_contrib.npy");
+}
+
+#[test]
+fn start_and_num_iteration_match_upstream() {
+    run_range(PredictKind::Normal, "pred_iter_3_5.npy", 3, 5);
+}
+
+#[test]
+fn linear_tree_contrib_is_rejected_like_upstream() {
+    let model = Gbdt::from_model_file(fixtures_dir().join("linear_tree/model.txt")).unwrap();
+    let cfg = PredictConfig {
+        kind: PredictKind::Contrib,
+        ..PredictConfig::default()
+    };
+    assert!(Predictor::new(&model, &cfg).is_err());
 }
 
 #[test]

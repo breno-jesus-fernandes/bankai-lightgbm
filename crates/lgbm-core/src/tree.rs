@@ -352,13 +352,26 @@ impl Tree {
     }
 
     /// upstream: `Tree::ExpectedValue`
+    ///
+    /// The upstream macOS/arm64 build vectorizes this loop: whole blocks of 16 leaves use
+    /// an unfused multiply then a sequential add, and the scalar tail is a fused
+    /// multiply-add. We reproduce that rounding so SHAP bias terms are bit-identical.
     pub fn expected_value(&self) -> f64 {
         if self.num_leaves == 1 {
             return self.leaf_value[0];
         }
         let total = f64::from(self.internal_count[0]);
+        let n = self.num_leaves;
+        let vec_end = if cfg!(all(target_arch = "aarch64", target_os = "macos")) && n >= 16 {
+            n & !15
+        } else {
+            0
+        };
         let mut v = 0.0;
-        for i in 0..self.num_leaves {
+        for i in 0..vec_end {
+            v += (f64::from(self.leaf_count[i]) / total) * self.leaf_value[i];
+        }
+        for i in vec_end..n {
             v = madd(f64::from(self.leaf_count[i]) / total, self.leaf_value[i], v);
         }
         v

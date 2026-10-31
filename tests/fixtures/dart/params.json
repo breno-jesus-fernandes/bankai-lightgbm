@@ -1,0 +1,13 @@
+{
+ "params": {
+  "deterministic": true,
+  "num_threads": 1,
+  "seed": 42,
+  "verbose": -1,
+  "objective": "binary",
+  "boosting": "dart",
+  "drop_rate": 0.3
+ },
+ "dataset": {},
+ "num_boost_round": 20
+}

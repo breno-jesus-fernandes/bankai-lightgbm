@@ -19,21 +19,15 @@ pub fn cases() -> Vec<PathBuf> {
     out
 }
 
-/// Feature matrix (row-major) and column count from `test.csv`; column 0 is the label.
+/// Feature matrix (row-major) and column count from `test.npy`; column 0 is the label.
 pub fn load_test_features(case: &Path) -> (Vec<f64>, usize) {
-    let text = std::fs::read_to_string(case.join("test.csv")).unwrap();
-    let mut data = Vec::new();
-    let mut ncol = 0;
-    for line in text.lines().filter(|l| !l.is_empty()) {
-        let vals: Vec<f64> = line
-            .split(',')
-            .skip(1)
-            .map(|s| s.trim().parse().unwrap())
-            .collect();
-        ncol = vals.len();
-        data.extend(vals);
+    let (all, shape) = load_npy(&case.join("test.npy"));
+    let (nrow, ncol) = (shape[0], shape[1]);
+    let mut data = Vec::with_capacity(nrow * (ncol - 1));
+    for r in 0..nrow {
+        data.extend_from_slice(&all[r * ncol + 1..(r + 1) * ncol]);
     }
-    (data, ncol)
+    (data, ncol - 1)
 }
 
 /// Minimal `.npy` reader for little-endian `<f8`, `<i4`, `<i8`; returns values as f64 and shape.
@@ -90,14 +84,41 @@ pub fn load_npy(path: &Path) -> (Vec<f64>, Vec<usize>) {
     (vals, shape)
 }
 
-/// Bit-exact comparison with a readable failure message.
+/// Whether this build runs on the platform that generated the fixtures
+/// (`tests/fixtures/platform.json`). Only then is bit-exact parity required.
+pub fn on_fixture_platform() -> bool {
+    let text = std::fs::read_to_string(fixtures_dir().join("platform.json")).unwrap_or_default();
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" if os == "darwin" => "arm64",
+        "x86_64" if os == "windows" => "amd64",
+        other => other,
+    };
+    text.contains(&format!("\"system\": \"{os}\""))
+        && text.contains(&format!("\"machine\": \"{arch}\""))
+}
+
+fn ulp_distance(a: f64, b: f64) -> u64 {
+    let key = |x: f64| {
+        let i = x.to_bits() as i64;
+        if i < 0 { i64::MIN - i } else { i }
+    };
+    key(a).abs_diff(key(b))
+}
+
+/// Bit-exact comparison on the fixture platform; elsewhere allow a few ULPs, since
+/// upstream's own rounding differs between compilers/architectures (see AGENTS.md).
 pub fn assert_bits_eq(case: &Path, what: &str, got: &[f64], want: &[f64]) {
+    let max_ulps = if on_fixture_platform() { 0 } else { 64 };
     assert_eq!(got.len(), want.len(), "{}: {what} length", case.display());
     for (i, (g, w)) in got.iter().zip(want).enumerate() {
-        assert!(
-            g.to_bits() == w.to_bits() || (g.is_nan() && w.is_nan()),
-            "{}: {what}[{i}] got {g:e} want {w:e}",
-            case.display()
-        );
+        let ok = (g.is_nan() && w.is_nan())
+            || g.to_bits() == w.to_bits()
+            || (max_ulps > 0 && ulp_distance(*g, *w) <= max_ulps)
+            || (max_ulps > 0 && (g - w).abs() <= 1e-15);
+        assert!(ok, "{}: {what}[{i}] got {g:e} want {w:e}", case.display());
     }
 }

@@ -48,6 +48,9 @@ Rules:
 - **Predicting with an upstream model file:** must match bit-exactly. A difference of at most 1 ULP is allowed only where upstream itself is non-deterministic.
 - **Training with `deterministic=true, num_threads=1, seed=<fixed>`:** tree structure must be identical (features, thresholds, leaf counts). Leaf values must match within `rtol=1e-12`.
 - **Multithreaded training:** prediction `rtol=1e-6`, and metric values within `1e-6`.
+- **Bit-exactness is platform-specific.** Upstream's rounding depends on how its compiler built each wheel. FMA contraction and auto-vectorized reductions both change the last bits. Golden fixtures record their platform in `tests/fixtures/platform.json`. Tests require bit-exact results only on that platform, and allow ≤64 ULP elsewhere (`tests/support::assert_bits_eq`).
+- To reproduce upstream rounding, use `utils::common::madd` wherever upstream writes `x += a * b`. It is fused on aarch64, as clang does. When parity is off by a few ULPs, disassemble upstream's `lib_lightgbm` (`otool -tV` / `objdump -d`) before guessing. Example: `Tree::ExpectedValue` is vectorized in blocks of 16 (unfused) with a fused scalar tail on macOS/arm64.
+- Upstream has two float parsers: `StringToArray` (precise, `fast_double_parser`) and `StringToArrayFast` (legacy `Common::Atof`, *not* correctly rounded). Port each call site with the same parser. Today, prediction only depends on the precise fields.
 - Never compare fixtures with `==` on floats in Python. Use `np.testing.assert_allclose` with the documented tolerance, or `assert_array_equal` for bit-exact cases.
 
 ## 5. Performance is a requirement
