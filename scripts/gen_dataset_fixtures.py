@@ -53,6 +53,16 @@ def sparse(rng: np.random.Generator) -> Data:
     return x, x[:, 0] + x[:, 1]
 
 
+def one_hot(rng: np.random.Generator) -> Data:
+    """Mutually exclusive indicator columns (classic EFB) plus dense columns."""
+    n, k = 5000, 40
+    owner = rng.integers(0, k, size=n)
+    onehot = np.zeros((n, k))
+    onehot[np.arange(n), owner] = rng.uniform(1, 2, size=n)
+    dense_cols = rng.normal(size=(n, 3))
+    return np.hstack([dense_cols, onehot]), dense_cols[:, 0] + owner * 0.1
+
+
 def categorical(rng: np.random.Generator) -> Data:
     n = 3000
     x = rng.normal(size=(n, 5))
@@ -101,6 +111,9 @@ CASES: dict[str, tuple[Callable[[np.random.Generator], Data], dict[str, Any], li
     "sparse_bundle": (sparse, {}, []),
     "sparse_no_bundle": (sparse, {"enable_bundle": False}, []),
     "sparse_no_sparse": (sparse, {"is_enable_sparse": False}, []),
+    "one_hot_bundle": (one_hot, {}, []),
+    "one_hot_no_sparse": (one_hot, {"is_enable_sparse": False}, []),
+    "one_hot_max_bin_8": (one_hot, {"max_bin": 8}, []),
     "categorical": (categorical, {}, [0, 1, 2, 3]),
     "categorical_small": (categorical, {"max_cat_to_onehot": 8, "min_data_in_bin": 1}, [0, 1, 2]),
     "big_sampled": (big, {"bin_construct_sample_cnt": 5000, "data_random_seed": 7}, []),

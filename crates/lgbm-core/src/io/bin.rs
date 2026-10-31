@@ -335,11 +335,20 @@ pub struct FindBinParams<'a> {
 impl BinMapper {
     /// upstream: `BinMapper::FindBin`. `values` holds the sampled non-zero values
     /// (`|v| > kZeroThreshold` or NaN); zeros are implied by `total_sample_cnt`.
-    pub fn find_bin(values: &mut Vec<f64>, p: &FindBinParams<'_>) -> BinMapper {
+    ///
+    /// Like upstream, `values` is modified in place: non-NaN values are compacted to the
+    /// front and sorted; entries past them keep stale contents. Upstream's feature bundling
+    /// later reads this mutated buffer, so the exact layout matters.
+    pub fn find_bin(values: &mut [f64], p: &FindBinParams<'_>) -> BinMapper {
         let mut m = BinMapper::default();
         let num_sample_values = values.len();
-        values.retain(|v| !v.is_nan());
-        let non_na_cnt = values.len();
+        let mut non_na_cnt = 0usize;
+        for i in 0..num_sample_values {
+            if !values[i].is_nan() {
+                values[non_na_cnt] = values[i];
+                non_na_cnt += 1;
+            }
+        }
         let mut na_cnt = 0usize;
         m.missing_type = if !p.use_missing {
             MissingType::None
@@ -356,8 +365,9 @@ impl BinMapper {
         m.default_bin = 0;
         let zero_cnt = (p.total_sample_cnt - num_sample_values - na_cnt) as i32;
 
-        // std::stable_sort with operator< (no NaN left at this point)
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // std::stable_sort with operator< over the non-NaN prefix
+        values[..num_sample_values]
+            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mut distinct_values: Vec<f64> = Vec::new();
         let mut counts: Vec<i32> = Vec::new();
         if num_sample_values == 0 || (values[0] > 0.0 && zero_cnt > 0) {
@@ -730,19 +740,19 @@ mod tests {
             total_sample_cnt: 10,
             ..params(255)
         };
-        assert!(!BinMapper::find_bin(&mut vec![5.0; 10], &p).is_trivial);
+        assert!(!BinMapper::find_bin(&mut [5.0; 10], &p).is_trivial);
         let p = FindBinParams {
             pre_filter: true,
             min_split_data: 1,
             ..p
         };
-        assert!(BinMapper::find_bin(&mut vec![5.0; 10], &p).is_trivial);
+        assert!(BinMapper::find_bin(&mut [5.0; 10], &p).is_trivial);
         // all-zero column: a single bin, trivial even without the filter
         let p = FindBinParams {
             pre_filter: false,
             ..p
         };
-        assert!(BinMapper::find_bin(&mut Vec::new(), &p).is_trivial);
+        assert!(BinMapper::find_bin(&mut [], &p).is_trivial);
     }
 
     #[test]

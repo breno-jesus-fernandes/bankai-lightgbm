@@ -62,3 +62,61 @@ fn bin_mappers_match_upstream() {
         }
     }
 }
+
+#[test]
+fn feature_groups_match_upstream() {
+    use lgbm_core::io::dataset::DatasetLayout;
+    for case in dataset_cases() {
+        let upstream = BinaryDataset::read_file(case.join("dataset.bin")).unwrap();
+        let (params, cats) = dataset_params(&case);
+        let cfg = Config::from_params(&params).unwrap();
+        let (x, shape) = load_npy(&case.join("x.npy"));
+        let ours = DatasetLayout::construct_dense(&x, shape[0], shape[1], &cfg, &cats).unwrap();
+        let h = &upstream.header;
+        let c = case.display();
+        assert_eq!(
+            ours.num_features as i32, h.num_features,
+            "{c}: num_features"
+        );
+        assert_eq!(ours.groups.len() as i32, h.num_groups, "{c}: num_groups");
+        assert_eq!(
+            ours.used_feature_map, h.used_feature_map,
+            "{c}: used_feature_map"
+        );
+        assert_eq!(
+            ours.real_feature_idx, h.real_feature_idx,
+            "{c}: real_feature_idx"
+        );
+        assert_eq!(ours.feature2group, h.feature2group, "{c}: feature2group");
+        assert_eq!(
+            ours.feature2subfeature, h.feature2subfeature,
+            "{c}: feature2subfeature"
+        );
+        assert_eq!(
+            ours.group_bin_boundaries, h.group_bin_boundaries,
+            "{c}: group_bin_boundaries"
+        );
+        assert_eq!(
+            ours.group_feature_start, h.group_feature_start,
+            "{c}: group_feature_start"
+        );
+        assert_eq!(
+            ours.group_feature_cnt, h.group_feature_cnt,
+            "{c}: group_feature_cnt"
+        );
+        for (g, (og, ug)) in ours.groups.iter().zip(&upstream.groups).enumerate() {
+            assert_eq!(
+                og.is_multi_val, ug.is_multi_val,
+                "{c}: group {g} is_multi_val"
+            );
+            assert_eq!(
+                og.is_dense_multi_val, ug.is_dense_multi_val,
+                "{c}: group {g} is_dense_multi_val"
+            );
+            assert_eq!(og.is_sparse, ug.is_sparse, "{c}: group {g} is_sparse");
+            for (a, b) in og.bin_mappers.iter().zip(&ug.bin_mappers) {
+                assert!(a.bitwise_eq(b), "{c}: group {g} mapper");
+            }
+        }
+    }
+}
