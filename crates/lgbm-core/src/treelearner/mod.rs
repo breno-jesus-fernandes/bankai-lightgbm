@@ -1,5 +1,6 @@
 //! Tree learners. upstream: src/treelearner/
 
+pub mod col_sampler;
 pub mod data_partition;
 pub mod feature_histogram;
 #[allow(unsafe_code)]

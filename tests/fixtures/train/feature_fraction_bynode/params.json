@@ -1,0 +1,13 @@
+{
+ "params": {
+  "deterministic": true,
+  "num_threads": 1,
+  "force_col_wise": true,
+  "seed": 7,
+  "verbose": -1,
+  "objective": "regression",
+  "num_leaves": 15,
+  "feature_fraction_bynode": 0.4
+ },
+ "num_boost_round": 15
+}

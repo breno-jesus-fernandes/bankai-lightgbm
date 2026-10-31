@@ -44,7 +44,7 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 - [x] Leaf-wise growth, `num_leaves`, `max_depth`, `min_data_in_leaf`, `min_sum_hessian_in_leaf`
 - [x] Regularization: `lambda_l1`, `lambda_l2`, `min_gain_to_split`, `max_delta_step`, `path_smooth`
 - [ ] Categorical splits (`max_cat_threshold`, `cat_l2`, `cat_smooth`, `max_cat_to_onehot`, `min_data_per_group`)
-- [ ] `feature_fraction`, `feature_fraction_bynode`, `bagging_fraction`/`bagging_freq`, pos/neg bagging, `extra_trees`
+- [ ] `feature_fraction`, `feature_fraction_bynode`, `bagging_fraction`/`bagging_freq`, pos/neg bagging (done, byte-identical; `bagging_by_query` and `extra_trees` still missing)
 - [ ] Monotone constraints: basic, intermediate, advanced; `monotone_penalty`
 - [ ] `interaction_constraints`, `forcedsplits_filename`, CEGB (`cegb_*`)
 - [ ] `linear_tree` (`linear_lambda`)
@@ -62,7 +62,8 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 
 ## P5: Boosting variants + training loop
 - [ ] DART (`drop_rate`, `max_drop`, `skip_drop`, `xgboost_dart_mode`, `uniform_drop`)
-- [ ] RF, GOSS (`data_sample_strategy=goss`)
+- [ ] RF
+- [x] GOSS (`data_sample_strategy=goss`, byte-identical; both the subset and dense regimes)
 - [ ] Early stopping (`early_stopping_round`, `first_metric_only`, `early_stopping_min_delta`)
 - [ ] Continued training (`init_model`), `init_score`
 - [ ] Model merge/shuffle, `set_leaf_output`, `rollback_one_iter`

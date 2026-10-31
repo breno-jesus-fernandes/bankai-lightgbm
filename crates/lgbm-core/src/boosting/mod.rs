@@ -2,6 +2,7 @@
 
 mod gbdt;
 mod model_text;
+mod sample;
 mod train;
 
 pub use gbdt::Gbdt;

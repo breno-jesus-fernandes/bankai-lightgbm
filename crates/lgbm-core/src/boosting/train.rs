@@ -2,6 +2,7 @@
 //! `BoostFromAverage`, `UpdateScore`)
 
 use super::Gbdt;
+use super::sample::SampleStrategy;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::io::bin::BinType;
@@ -49,14 +50,6 @@ impl Gbdt {
         if cfg.boosting != "gbdt" {
             return Err(Error::Unsupported(format!("boosting={}", cfg.boosting)));
         }
-        if cfg.data_sample_strategy != "bagging"
-            || (cfg.bagging_freq > 0 && cfg.bagging_fraction < 1.0)
-        {
-            return Err(Error::Unsupported("bagging / GOSS".into()));
-        }
-        if cfg.feature_fraction < 1.0 || cfg.feature_fraction_bynode < 1.0 {
-            return Err(Error::Unsupported("feature_fraction < 1".into()));
-        }
         let objective = create_objective(cfg, &ds.metadata)?;
         let mut trainer = Trainer::new(cfg, ds, objective)?;
         for _ in 0..cfg.num_iterations {
@@ -71,6 +64,9 @@ impl Gbdt {
 struct Trainer<'a> {
     cfg: &'a Config,
     ds: &'a Dataset,
+    sampler: SampleStrategy,
+    /// upstream `iter_`: completed iterations, used by the sampling schedules.
+    iter: i32,
     objective: Box<dyn Objective>,
     learner: SerialTreeLearner<'a>,
     num_tree_per_iteration: usize,
@@ -85,11 +81,16 @@ impl<'a> Trainer<'a> {
     fn new(cfg: &'a Config, ds: &'a Dataset, objective: Box<dyn Objective>) -> Result<Self> {
         let n = ds.num_data();
         let ntpi = objective.num_model_per_iteration();
-        let learner = SerialTreeLearner::new(cfg, ds, objective.is_constant_hessian())?;
+        let sampler = SampleStrategy::new(cfg, &ds.metadata, ntpi)?;
+        // upstream: `GetIsConstHessian`. GOSS rescales hessians, so they are never constant.
+        let constant_hessian = objective.is_constant_hessian() && !sampler.changes_hessians();
+        let learner = SerialTreeLearner::new(cfg, ds, constant_hessian)?;
         let class_need_train = (0..ntpi).map(|k| objective.class_need_train(k)).collect();
         Ok(Trainer {
             cfg,
             ds,
+            sampler,
+            iter: 0,
             objective,
             learner,
             num_tree_per_iteration: ntpi,
@@ -128,13 +129,30 @@ impl<'a> Trainer<'a> {
         }
         self.objective
             .get_gradients(&self.score, &mut self.gradients, &mut self.hessians);
+        let iter = self.iter;
+        self.iter += 1;
+        // upstream: `Bagging`/GOSS run after gradients; GOSS may rescale them in place.
+        let rows: Option<Vec<i32>> = self
+            .sampler
+            .sample(iter, &mut self.gradients, &mut self.hessians)
+            .map(<[i32]>::to_vec);
+        let oob: Option<Vec<i32>> = rows.as_ref().map(|bag| {
+            let mut in_bag = vec![false; n];
+            for &r in bag {
+                in_bag[r as usize] = true;
+            }
+            (0..n).filter(|&i| !in_bag[i]).map(|i| i as i32).collect()
+        });
 
         let mut should_continue = false;
         for k in 0..ntpi {
             let off = k * n;
             let mut tree = if self.class_need_train[k] && self.ds.layout.num_features > 0 {
-                self.learner
-                    .train(&self.gradients[off..off + n], &self.hessians[off..off + n])
+                self.learner.train(
+                    &self.gradients[off..off + n],
+                    &self.hessians[off..off + n],
+                    rows.as_deref(),
+                )
             } else {
                 Tree::new_training(2)
             };
@@ -144,6 +162,13 @@ impl<'a> Trainer<'a> {
                 tree.apply_shrinkage(self.cfg.learning_rate);
                 self.learner
                     .add_prediction_to_score(&tree, &mut self.score[off..off + n]);
+                if let Some(oob) = &oob {
+                    self.learner.add_out_of_bag_prediction(
+                        &tree,
+                        oob,
+                        &mut self.score[off..off + n],
+                    );
+                }
                 if init_scores[k].abs() > f64::from(K_EPSILON) {
                     tree.add_bias(init_scores[k]);
                 }

@@ -168,6 +168,90 @@ CASES: dict[str, tuple[Callable[[np.random.Generator], Data], dict[str, Any], in
         10,
     ),
     "rank_xendcg": (relevance, {"objective": "rank_xendcg", "num_leaves": 15}, 15),
+    "feature_fraction": (
+        reg,
+        {"objective": "regression", "num_leaves": 15, "feature_fraction": 0.5},
+        15,
+    ),
+    "feature_fraction_bynode": (
+        reg,
+        {"objective": "regression", "num_leaves": 15, "feature_fraction_bynode": 0.4},
+        15,
+    ),
+    "feature_fraction_both": (
+        reg,
+        {
+            "objective": "regression",
+            "num_leaves": 15,
+            "feature_fraction": 0.7,
+            "feature_fraction_bynode": 0.5,
+            "feature_fraction_seed": 9,
+        },
+        15,
+    ),
+    "bagging": (
+        reg,
+        {
+            "objective": "regression",
+            "num_leaves": 15,
+            "bagging_fraction": 0.6,
+            "bagging_freq": 2,
+            "bagging_seed": 5,
+        },
+        15,
+    ),
+    "bagging_no_freq": (
+        reg,
+        {"objective": "regression", "num_leaves": 15, "bagging_fraction": 0.6},
+        10,
+    ),
+    "bagging_balanced": (
+        binary,
+        {
+            "objective": "binary",
+            "num_leaves": 15,
+            "bagging_freq": 1,
+            "pos_bagging_fraction": 0.5,
+            "neg_bagging_fraction": 0.8,
+        },
+        12,
+    ),
+    "bagging_feature_fraction": (
+        reg,
+        {
+            "objective": "regression",
+            "num_leaves": 15,
+            "bagging_fraction": 0.7,
+            "bagging_freq": 1,
+            "feature_fraction": 0.6,
+        },
+        12,
+    ),
+    "goss": (
+        reg,
+        {
+            "objective": "regression",
+            "num_leaves": 15,
+            "data_sample_strategy": "goss",
+            "learning_rate": 0.1,
+            "top_rate": 0.2,
+            "other_rate": 0.1,
+        },
+        25,
+    ),
+    "goss_dense_sample": (
+        reg,
+        {
+            "objective": "regression",
+            "num_leaves": 7,
+            "data_sample_strategy": "goss",
+            "learning_rate": 0.2,
+            "top_rate": 0.3,
+            "other_rate": 0.4,
+            "bagging_seed": 17,
+        },
+        12,
+    ),
     "rank_xendcg_seed": (
         relevance,
         {"objective": "rank_xendcg", "num_leaves": 7, "objective_seed": 11},
@@ -178,6 +262,8 @@ CASES: dict[str, tuple[Callable[[np.random.Generator], Data], dict[str, Any], in
 # Same data and params as the named case, trained with random sample weights.
 WEIGHTED = [
     "l2_default",
+    "bagging",
+    "goss",
     "l1",
     "quantile",
     "mape",

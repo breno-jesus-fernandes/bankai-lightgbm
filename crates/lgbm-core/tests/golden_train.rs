@@ -19,7 +19,7 @@ fn train_cases() -> Vec<PathBuf> {
         .collect();
     out.sort();
     assert!(
-        out.len() >= 47,
+        out.len() >= 58,
         "expected training fixtures; run scripts/gen_train_fixtures.py"
     );
     out

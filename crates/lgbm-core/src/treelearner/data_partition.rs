@@ -40,6 +40,15 @@ impl DataPartition {
         }
     }
 
+    /// upstream: `DataPartition::SetUsedDataIndices` + `Init`: the root leaf holds `rows`
+    /// (bagged rows, ascending) instead of all rows.
+    pub fn init_with(&mut self, rows: &[i32]) {
+        self.leaf_begin.fill(0);
+        self.leaf_count.fill(0);
+        self.leaf_count[0] = rows.len();
+        self.indices[..rows.len()].copy_from_slice(rows);
+    }
+
     pub fn leaf_count(&self, leaf: usize) -> usize {
         self.leaf_count[leaf]
     }
