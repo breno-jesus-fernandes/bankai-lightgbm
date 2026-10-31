@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+rayon.workspace = true
 
 [lints]
 workspace = true
