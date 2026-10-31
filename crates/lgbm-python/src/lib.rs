@@ -68,6 +68,54 @@ impl NativeBooster {
         self.model.objective().map(|o| o.raw.clone())
     }
 
+    fn save_model_to_string(
+        &self,
+        py: Python<'_>,
+        start_iteration: i32,
+        num_iteration: i32,
+        importance_type: i32,
+    ) -> PyResult<String> {
+        py.allow_threads(|| {
+            self.model
+                .save_model_to_string(start_iteration, num_iteration, importance_type)
+        })
+        .map_err(to_py)
+    }
+
+    fn dump_model(
+        &self,
+        py: Python<'_>,
+        start_iteration: i32,
+        num_iteration: i32,
+        importance_type: i32,
+    ) -> PyResult<String> {
+        py.allow_threads(|| {
+            self.model
+                .dump_model(start_iteration, num_iteration, importance_type)
+        })
+        .map_err(to_py)
+    }
+
+    fn feature_importance(&self, num_iteration: i32, importance_type: i32) -> PyResult<Vec<f64>> {
+        self.model
+            .feature_importance(num_iteration, importance_type)
+            .map_err(to_py)
+    }
+
+    fn upper_bound(&self) -> f64 {
+        self.model.upper_bound_value()
+    }
+
+    fn lower_bound(&self) -> f64 {
+        self.model.lower_bound_value()
+    }
+
+    fn leaf_value(&self, tree_idx: usize, leaf_idx: usize) -> PyResult<f64> {
+        self.model
+            .leaf_value(tree_idx, leaf_idx)
+            .ok_or_else(|| LightGBMError::new_err("tree or leaf index out of range"))
+    }
+
     /// Predict a C-contiguous float64 matrix. `kind`: 0 normal, 1 raw, 2 leaf, 3 contrib
     /// (upstream `C_API_PREDICT_*`). Returns `nrow x num_pred_one_row`.
     #[pyo3(signature = (data, kind, start_iteration, num_iteration, pred_early_stop=false,

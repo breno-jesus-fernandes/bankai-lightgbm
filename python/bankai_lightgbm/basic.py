@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,8 @@ _C_API_PREDICT_NORMAL = 0
 _C_API_PREDICT_RAW_SCORE = 1
 _C_API_PREDICT_LEAF_INDEX = 2
 _C_API_PREDICT_CONTRIB = 3
+
+_FEATURE_IMPORTANCE_TYPE_MAPPER = {"split": 0, "gain": 1}
 
 # Prediction parameters and their upstream aliases (include/LightGBM/config.h).
 _PREDICT_PARAM_ALIASES: dict[str, tuple[str, ...]] = {
@@ -51,6 +54,20 @@ def _load_pandas_categorical(raw: str | None) -> list[list[Any]] | None:
         return None
     loaded = json.loads(raw)
     return None if loaded is None else list(loaded)
+
+
+def _json_default_with_numpy(obj: Any) -> Any:
+    """Convert numpy classes to JSON serializable objects."""
+    if isinstance(obj, (np.integer, np.floating, np.bool_)):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+
+def _dump_pandas_categorical(pandas_categorical: list[list[Any]] | None) -> str:
+    categorical_json = json.dumps(pandas_categorical, default=_json_default_with_numpy)
+    return f"\npandas_categorical:{categorical_json}\n"
 
 
 def _data_from_pandas(data: Any, pandas_categorical: list[list[Any]] | None) -> npt.NDArray[Any]:
@@ -117,6 +134,104 @@ class Booster:
                 "to create Booster instance"
             )
         self.pandas_categorical = _load_pandas_categorical(self._handle.pandas_categorical())
+
+    def __copy__(self) -> Booster:
+        return self.__deepcopy__(None)
+
+    def __deepcopy__(self, *args: Any, **kwargs: Any) -> Booster:
+        return Booster(model_str=self.model_to_string(num_iteration=-1))
+
+    def __getstate__(self) -> dict[str, Any]:
+        this = self.__dict__.copy()
+        this.pop("train_set", None)
+        this.pop("valid_sets", None)
+        this["_handle"] = self.model_to_string(num_iteration=-1)
+        return this
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        model_str = state.get("_handle", state.get("handle"))
+        if isinstance(model_str, str):
+            state["_handle"] = NativeBooster.from_string(model_str)
+        self.__dict__.update(state)
+
+    def model_from_string(self, model_str: str) -> Booster:
+        """Load Booster from a string."""
+        self._handle = NativeBooster.from_string(model_str)
+        self.pandas_categorical = _load_pandas_categorical(self._handle.pandas_categorical())
+        return self
+
+    def model_to_string(
+        self,
+        num_iteration: int | None = None,
+        start_iteration: int = 0,
+        importance_type: str = "split",
+    ) -> str:
+        """Save Booster to string (same bytes as ``lightgbm.Booster.model_to_string``)."""
+        if num_iteration is None:
+            num_iteration = self.best_iteration
+        ret = self._handle.save_model_to_string(
+            int(start_iteration),
+            int(num_iteration),
+            _FEATURE_IMPORTANCE_TYPE_MAPPER[importance_type],
+        )
+        return ret + _dump_pandas_categorical(self.pandas_categorical)
+
+    def save_model(
+        self,
+        filename: str | Path,
+        num_iteration: int | None = None,
+        start_iteration: int = 0,
+        importance_type: str = "split",
+    ) -> Booster:
+        """Save Booster to file."""
+        text = self.model_to_string(num_iteration, start_iteration, importance_type)
+        Path(filename).write_text(text, encoding="utf-8", newline="")
+        return self
+
+    def dump_model(
+        self,
+        num_iteration: int | None = None,
+        start_iteration: int = 0,
+        importance_type: str = "split",
+        object_hook: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Dump Booster to JSON format."""
+        if num_iteration is None:
+            num_iteration = self.best_iteration
+        raw = self._handle.dump_model(
+            int(start_iteration),
+            int(num_iteration),
+            _FEATURE_IMPORTANCE_TYPE_MAPPER[importance_type],
+        )
+        ret: dict[str, Any] = json.loads(raw, object_hook=object_hook)
+        ret["pandas_categorical"] = json.loads(
+            json.dumps(self.pandas_categorical, default=_json_default_with_numpy)
+        )
+        return ret
+
+    def feature_importance(
+        self, importance_type: str = "split", iteration: int | None = None
+    ) -> npt.NDArray[Any]:
+        """Get feature importances (int32 for ``split``, float64 for ``gain``)."""
+        if iteration is None:
+            iteration = self.best_iteration
+        type_int = _FEATURE_IMPORTANCE_TYPE_MAPPER[importance_type]
+        result = np.array(
+            self._handle.feature_importance(int(iteration), type_int), dtype=np.float64
+        )
+        return result.astype(np.int32) if type_int == 0 else result
+
+    def upper_bound(self) -> float:
+        """Get upper bound value of a model."""
+        return self._handle.upper_bound()
+
+    def lower_bound(self) -> float:
+        """Get lower bound value of a model."""
+        return self._handle.lower_bound()
+
+    def get_leaf_output(self, tree_id: int, leaf_id: int) -> float:
+        """Get the output of a leaf."""
+        return self._handle.leaf_value(int(tree_id), int(leaf_id))
 
     def num_trees(self) -> int:
         return self._handle.num_trees()

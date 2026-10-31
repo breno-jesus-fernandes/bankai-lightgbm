@@ -86,6 +86,39 @@ impl Gbdt {
             .is_none_or(|o| o.need_accurate_prediction)
     }
 
+    /// upstream: `GBDT::GetUpperBoundValue` (sum of each tree's max leaf value).
+    pub fn upper_bound_value(&self) -> f64 {
+        let mut v = 0.0;
+        for t in &self.models {
+            v += t
+                .leaf_value
+                .iter()
+                .copied()
+                .skip(1)
+                .fold(t.leaf_value[0], |a, b| if b > a { b } else { a });
+        }
+        v
+    }
+
+    /// upstream: `GBDT::GetLowerBoundValue` (sum of each tree's min leaf value).
+    pub fn lower_bound_value(&self) -> f64 {
+        let mut v = 0.0;
+        for t in &self.models {
+            v += t
+                .leaf_value
+                .iter()
+                .copied()
+                .skip(1)
+                .fold(t.leaf_value[0], |a, b| if b < a { b } else { a });
+        }
+        v
+    }
+
+    /// upstream: `GBDT::GetLeafValue`
+    pub fn leaf_value(&self, tree_idx: usize, leaf_idx: usize) -> Option<f64> {
+        self.models.get(tree_idx)?.leaf_value.get(leaf_idx).copied()
+    }
+
     /// Clamp `(start, num)` the way upstream's `InitPredict` does. `num <= 0` means "all".
     pub fn iteration_range(&self, start_iteration: i32, num_iteration: i32) -> (usize, usize) {
         let total = self.current_iteration() as i64;
