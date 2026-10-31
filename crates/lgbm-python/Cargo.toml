@@ -1,0 +1,23 @@
+[package]
+name = "lgbm-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "_lib"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+lgbm-core.workspace = true
+pyo3 = { version = "0.25", features = ["abi3-py311"] }
+
+[features]
+# maturin enables this; plain `cargo test` must not, or linking fails on macOS.
+extension-module = ["pyo3/extension-module"]
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
