@@ -49,10 +49,8 @@ pub fn dataset_params(case: &Path) -> (std::collections::HashMap<String, String>
     }
     let cats = v["categorical"]
         .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c.as_i64().unwrap() as i32)
-        .collect();
+        .map(|a| a.iter().map(|c| c.as_i64().unwrap() as i32).collect())
+        .unwrap_or_default();
     (params, cats)
 }
 

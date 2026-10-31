@@ -41,6 +41,11 @@ pub struct Tree {
     pub leaf_features: Vec<Vec<i32>>,
     /// Depth of the deepest leaf; computed lazily for SHAP (`-1` until then).
     max_depth: i32,
+    // Training-time state (not serialized).
+    pub leaf_parent: Vec<i32>,
+    pub leaf_depth: Vec<i32>,
+    pub split_feature_inner: Vec<i32>,
+    pub threshold_in_bin: Vec<u32>,
 }
 
 /// Reusable TreeSHAP working memory (one per thread).
@@ -148,6 +153,10 @@ impl Tree {
             leaf_coeff: Vec::new(),
             leaf_features: Vec::new(),
             max_depth: -1,
+            leaf_parent: Vec::new(),
+            leaf_depth: Vec::new(),
+            split_feature_inner: Vec::new(),
+            threshold_in_bin: Vec::new(),
         };
         if num_leaves <= 1 && !is_linear {
             tree.max_depth = 0;
@@ -244,6 +253,208 @@ impl Tree {
             }
         }
         Ok(())
+    }
+
+    /// upstream: `Tree::Tree(int max_leaves, bool track_branch_features, bool is_linear)`
+    pub fn new_training(max_leaves: usize) -> Tree {
+        let n_int = max_leaves.saturating_sub(1);
+        Tree {
+            num_leaves: 1,
+            num_cat: 0,
+            left_child: vec![0; n_int],
+            right_child: vec![0; n_int],
+            split_feature: vec![0; n_int],
+            split_gain: vec![0.0; n_int],
+            threshold: vec![0.0; n_int],
+            decision_type: vec![0; n_int],
+            cat_boundaries: vec![0],
+            cat_threshold: Vec::new(),
+            leaf_value: vec![0.0; max_leaves],
+            leaf_weight: vec![0.0; max_leaves],
+            leaf_count: vec![0; max_leaves],
+            internal_value: vec![0.0; n_int],
+            internal_weight: vec![0.0; n_int],
+            internal_count: vec![0; n_int],
+            shrinkage: 1.0,
+            is_linear: false,
+            leaf_const: Vec::new(),
+            leaf_coeff: Vec::new(),
+            leaf_features: Vec::new(),
+            max_depth: -1,
+            leaf_parent: {
+                let mut v = vec![0; max_leaves];
+                if let Some(first) = v.first_mut() {
+                    *first = -1;
+                }
+                v
+            },
+            leaf_depth: vec![0; max_leaves],
+            split_feature_inner: vec![0; n_int],
+            threshold_in_bin: vec![0; n_int],
+        }
+    }
+
+    /// upstream: `Tree::MaybeRoundToZero`
+    #[inline]
+    pub fn maybe_round_to_zero(v: f64) -> f64 {
+        if is_zero(v) { 0.0 } else { v }
+    }
+
+    /// upstream: `Tree::SetLeafOutput`
+    pub fn set_leaf_output(&mut self, leaf: usize, output: f64) {
+        self.leaf_value[leaf] = Tree::maybe_round_to_zero(output);
+    }
+
+    /// upstream: private inline `Tree::Split` (shared by numerical and categorical splits)
+    #[allow(clippy::too_many_arguments)]
+    fn split_common(
+        &mut self,
+        leaf: usize,
+        feature: i32,
+        real_feature: i32,
+        left_value: f64,
+        right_value: f64,
+        left_cnt: i32,
+        right_cnt: i32,
+        left_weight: f64,
+        right_weight: f64,
+        gain: f32,
+    ) -> usize {
+        let new_node = self.num_leaves - 1;
+        let nl = self.num_leaves;
+        let parent = self.leaf_parent[leaf];
+        if parent >= 0 {
+            let p = parent as usize;
+            if self.left_child[p] == !(leaf as i32) {
+                self.left_child[p] = new_node as i32;
+            } else {
+                self.right_child[p] = new_node as i32;
+            }
+        }
+        self.split_feature_inner[new_node] = feature;
+        self.split_feature[new_node] = real_feature;
+        self.split_gain[new_node] = gain;
+        self.left_child[new_node] = !(leaf as i32);
+        self.right_child[new_node] = !(nl as i32);
+        self.leaf_parent[leaf] = new_node as i32;
+        self.leaf_parent[nl] = new_node as i32;
+        self.internal_weight[new_node] = left_weight + right_weight;
+        self.internal_value[new_node] = self.leaf_value[leaf];
+        self.internal_count[new_node] = left_cnt + right_cnt;
+        self.leaf_value[leaf] = if left_value.is_nan() { 0.0 } else { left_value };
+        self.leaf_weight[leaf] = left_weight;
+        self.leaf_count[leaf] = left_cnt;
+        self.leaf_value[nl] = if right_value.is_nan() {
+            0.0
+        } else {
+            right_value
+        };
+        self.leaf_weight[nl] = right_weight;
+        self.leaf_count[nl] = right_cnt;
+        self.leaf_depth[nl] = self.leaf_depth[leaf] + 1;
+        self.leaf_depth[leaf] += 1;
+        new_node
+    }
+
+    /// upstream: `Tree::Split` (numerical). Returns the new (right) leaf index.
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_numerical(
+        &mut self,
+        leaf: usize,
+        feature: i32,
+        real_feature: i32,
+        threshold_bin: u32,
+        threshold_double: f64,
+        left_value: f64,
+        right_value: f64,
+        left_cnt: i32,
+        right_cnt: i32,
+        left_weight: f64,
+        right_weight: f64,
+        gain: f32,
+        missing_type: MissingType,
+        default_left: bool,
+    ) -> usize {
+        let node = self.split_common(
+            leaf,
+            feature,
+            real_feature,
+            left_value,
+            right_value,
+            left_cnt,
+            right_cnt,
+            left_weight,
+            right_weight,
+            gain,
+        );
+        let mut dt: i8 = 0;
+        if default_left {
+            dt |= K_DEFAULT_LEFT_MASK;
+        }
+        dt = (dt & 3) | ((missing_type as i8) << 2);
+        self.decision_type[node] = dt;
+        self.threshold_in_bin[node] = threshold_bin;
+        self.threshold[node] = threshold_double;
+        self.num_leaves += 1;
+        self.num_leaves - 1
+    }
+
+    /// upstream: `Tree::Shrinkage`
+    pub fn apply_shrinkage(&mut self, rate: f64) {
+        let n = self.num_leaves;
+        for i in 0..n.saturating_sub(1) {
+            self.leaf_value[i] = Tree::maybe_round_to_zero(self.leaf_value[i] * rate);
+            self.internal_value[i] = Tree::maybe_round_to_zero(self.internal_value[i] * rate);
+        }
+        self.leaf_value[n - 1] = Tree::maybe_round_to_zero(self.leaf_value[n - 1] * rate);
+        self.shrinkage *= rate;
+    }
+
+    /// upstream: `Tree::AddBias`
+    pub fn add_bias(&mut self, val: f64) {
+        let n = self.num_leaves;
+        for i in 0..n.saturating_sub(1) {
+            self.leaf_value[i] = Tree::maybe_round_to_zero(self.leaf_value[i] + val);
+            self.internal_value[i] = Tree::maybe_round_to_zero(self.internal_value[i] + val);
+        }
+        self.leaf_value[n - 1] = Tree::maybe_round_to_zero(self.leaf_value[n - 1] + val);
+        self.shrinkage = 1.0;
+    }
+
+    /// upstream: `Tree::AsConstantTree`
+    pub fn as_constant_tree(&mut self, val: f64, count: i32) {
+        self.num_leaves = 1;
+        self.shrinkage = 1.0;
+        self.leaf_value[0] = val;
+        self.leaf_count[0] = count;
+    }
+
+    /// Drop unused capacity after training so the tree serializes like upstream.
+    pub fn finish_training(&mut self) {
+        let n = self.num_leaves;
+        let ni = n.saturating_sub(1);
+        self.left_child.truncate(ni);
+        self.right_child.truncate(ni);
+        self.split_feature.truncate(ni);
+        self.split_gain.truncate(ni);
+        self.threshold.truncate(ni);
+        self.decision_type.truncate(ni);
+        self.internal_value.truncate(ni);
+        self.internal_weight.truncate(ni);
+        self.internal_count.truncate(ni);
+        self.split_feature_inner.truncate(ni);
+        self.threshold_in_bin.truncate(ni);
+        self.leaf_value.truncate(n);
+        self.leaf_weight.truncate(n);
+        self.leaf_count.truncate(n);
+        self.leaf_parent.truncate(n);
+        self.leaf_depth.truncate(n);
+        if n <= 1 {
+            // upstream single-leaf trees serialize without node arrays
+            self.left_child.clear();
+            self.right_child.clear();
+        }
+        self.recompute_max_depth();
     }
 
     /// upstream: `Tree::ToString`
