@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 lgbm-core.workspace = true
 pyo3 = { version = "0.25", features = ["abi3-py311"] }
+numpy = "0.25"
 
 [features]
 # maturin enables this; plain `cargo test` must not, or linking fails on macOS.

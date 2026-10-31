@@ -46,3 +46,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 python_version = "3.11"
 strict = true
 files = ["python/bankai_lightgbm", "scripts"]
+
+[[tool.mypy.overrides]]
+module = ["pandas", "pandas.*", "scipy", "scipy.*", "lightgbm", "lightgbm.*"]
+ignore_missing_imports = true

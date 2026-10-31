@@ -1,10 +1,126 @@
 //! PyO3 bindings exposed to Python as `bankai_lightgbm._lib`.
+//! The public, lightgbm-compatible API lives in `python/bankai_lightgbm`.
 
+use lgbm_core::boosting::Gbdt;
+use lgbm_core::predictor::{PredictConfig, PredictKind, Predictor};
+use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
+use pyo3::create_exception;
+use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
+
+create_exception!(_lib, LightGBMError, PyException, "Error thrown by LightGBM.");
+
+fn to_py(err: lgbm_core::Error) -> PyErr {
+    LightGBMError::new_err(err.to_string())
+}
+
+/// Native booster handle. Mirrors upstream's C API `BoosterHandle`.
+#[pyclass(module = "bankai_lightgbm._lib", frozen)]
+struct NativeBooster {
+    model: Gbdt,
+}
+
+#[pymethods]
+impl NativeBooster {
+    #[staticmethod]
+    fn from_file(py: Python<'_>, path: String) -> PyResult<Self> {
+        let model = py.allow_threads(|| Gbdt::from_model_file(&path)).map_err(to_py)?;
+        Ok(NativeBooster { model })
+    }
+
+    #[staticmethod]
+    fn from_string(py: Python<'_>, model_str: String) -> PyResult<Self> {
+        let model = py.allow_threads(|| Gbdt::from_model_string(&model_str)).map_err(to_py)?;
+        Ok(NativeBooster { model })
+    }
+
+    fn num_class(&self) -> usize {
+        self.model.num_class()
+    }
+    fn num_tree_per_iteration(&self) -> usize {
+        self.model.num_tree_per_iteration()
+    }
+    fn num_trees(&self) -> usize {
+        self.model.num_trees()
+    }
+    fn current_iteration(&self) -> usize {
+        self.model.current_iteration()
+    }
+    fn num_feature(&self) -> usize {
+        self.model.num_features()
+    }
+    fn feature_names(&self) -> Vec<String> {
+        self.model.feature_names().to_vec()
+    }
+    fn pandas_categorical(&self) -> Option<String> {
+        self.model.pandas_categorical().map(str::to_string)
+    }
+    fn objective(&self) -> Option<String> {
+        self.model.objective().map(|o| o.raw.clone())
+    }
+
+    /// Predict a C-contiguous float64 matrix. `kind`: 0 normal, 1 raw, 2 leaf, 3 contrib
+    /// (upstream `C_API_PREDICT_*`). Returns `nrow x num_pred_one_row`.
+    #[pyo3(signature = (data, kind, start_iteration, num_iteration, pred_early_stop=false,
+        pred_early_stop_freq=10, pred_early_stop_margin=10.0, num_threads=0, disable_shape_check=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn predict_dense<'py>(
+        &self,
+        py: Python<'py>,
+        data: PyReadonlyArray2<'py, f64>,
+        kind: i32,
+        start_iteration: i32,
+        num_iteration: i32,
+        pred_early_stop: bool,
+        pred_early_stop_freq: i32,
+        pred_early_stop_margin: f64,
+        num_threads: i32,
+        disable_shape_check: bool,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let shape = data.shape();
+        let (nrow, ncol) = (shape[0], shape[1]);
+        if !disable_shape_check && ncol != self.model.num_features() {
+            return Err(LightGBMError::new_err(format!(
+                "The number of features in data ({ncol}) is not the same as it was in training data ({}).\n\
+                 You can set ``predict_disable_shape_check=true`` to discard this error, but please be aware what you are doing.",
+                self.model.num_features()
+            )));
+        }
+        let kind = match kind {
+            0 => PredictKind::Normal,
+            1 => PredictKind::RawScore,
+            2 => PredictKind::LeafIndex,
+            3 => PredictKind::Contrib,
+            other => return Err(LightGBMError::new_err(format!("unknown predict type {other}"))),
+        };
+        let cfg = PredictConfig {
+            kind,
+            start_iteration,
+            num_iteration,
+            pred_early_stop,
+            pred_early_stop_freq,
+            pred_early_stop_margin,
+            num_threads: usize::try_from(num_threads).unwrap_or(0),
+        };
+        let slice = data.as_slice().map_err(|e| LightGBMError::new_err(e.to_string()))?;
+        let model = &self.model;
+        let (out, width) = py
+            .allow_threads(|| {
+                let p = Predictor::new(model, &cfg)?;
+                let w = p.num_pred_one_row();
+                p.predict_dense(slice, nrow, ncol).map(|o| (o, w))
+            })
+            .map_err(to_py)?;
+        let arr = numpy::PyArray1::from_vec(py, out);
+        arr.reshape([nrow, width])
+    }
+}
 
 #[pymodule]
 fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("UPSTREAM_VERSION", lgbm_core::UPSTREAM_VERSION)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("LightGBMError", m.py().get_type::<LightGBMError>())?;
+    m.add_class::<NativeBooster>()?;
     Ok(())
 }
