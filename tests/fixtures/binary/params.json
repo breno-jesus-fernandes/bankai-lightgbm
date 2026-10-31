@@ -1,0 +1,12 @@
+{
+ "params": {
+  "deterministic": true,
+  "num_threads": 1,
+  "seed": 42,
+  "verbose": -1,
+  "objective": "binary",
+  "num_leaves": 15
+ },
+ "dataset": {},
+ "num_boost_round": 20
+}

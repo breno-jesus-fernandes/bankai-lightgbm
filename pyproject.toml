@@ -1,0 +1,48 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "bankai-lightgbm"
+version = "0.1.0"
+description = "LightGBM rewritten in Rust, with a drop-in Python API"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.24", "scipy>=1.10"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.optional-dependencies]
+pandas = ["pandas>=2.0"]
+arrow = ["pyarrow>=14"]
+scikit-learn = ["scikit-learn>=1.3"]
+plotting = ["matplotlib>=3.7", "graphviz"]
+dev = ["maturin>=1.7,<2", "pytest>=8", "ruff", "mypy", "lightgbm==4.7.0", "pandas>=2.0", "scikit-learn>=1.3"]
+
+[tool.maturin]
+manifest-path = "crates/lgbm-python/Cargo.toml"
+python-source = "python"
+module-name = "bankai_lightgbm._lib"
+features = ["extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+xfail_strict = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["python/bankai_lightgbm", "scripts"]
