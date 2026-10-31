@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -157,3 +158,41 @@ def record_evaluation(
 ) -> _RecordEvaluationCallback:
     """Record each iteration's validation metrics in ``eval_result``."""
     return _RecordEvaluationCallback(eval_result)
+
+
+class _ResetParameterCallback:
+    order = 10
+    before_iteration = True
+
+    def __init__(self, parameters: dict[str, list[object] | Callable[[int], object]]) -> None:
+        self.parameters = parameters
+
+    def __call__(self, env: CallbackEnv) -> None:
+        new_parameters: dict[str, object] = {}
+        iteration = env.iteration - env.begin_iteration
+        for name, schedule in self.parameters.items():
+            if isinstance(schedule, list):
+                if len(schedule) != env.end_iteration - env.begin_iteration:
+                    raise ValueError(
+                        f"Length of list {name!r} has to be equal to 'num_boost_round'."
+                    )
+                value = schedule[iteration]
+            elif callable(schedule):
+                value = schedule(iteration)
+            else:
+                raise ValueError(
+                    "Only list and callable values are supported as a mapping "
+                    "from boosting round index to new parameter value."
+                )
+            if value != env.params.get(name):
+                new_parameters[name] = value
+        if new_parameters:
+            env.model.reset_parameter(new_parameters)
+            env.params.update(new_parameters)
+
+
+def reset_parameter(
+    **kwargs: list[object] | Callable[[int], object],
+) -> _ResetParameterCallback:
+    """Reset a supported parameter from a per-iteration list or callback function."""
+    return _ResetParameterCallback(kwargs)

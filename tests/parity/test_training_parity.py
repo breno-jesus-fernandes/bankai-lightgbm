@@ -213,6 +213,59 @@ def test_record_and_log_evaluation_callbacks(caplog: Any) -> None:
     assert ours.current_iteration() == 3
 
 
+def test_reset_parameter_learning_rate_matches_upstream() -> None:
+    rng = np.random.default_rng(91)
+    x = rng.normal(size=(70, 3))
+    y = 0.8 * x[:, 0] - 0.25 * x[:, 1]
+    params: dict[str, Any] = {
+        "objective": "regression",
+        "metric": "None",
+        "verbosity": -1,
+        "num_leaves": 5,
+        "min_data_in_leaf": 2,
+        "min_data_in_bin": 1,
+        "max_bin": 15,
+        "learning_rate": 0.3,
+        "boost_from_average": False,
+        "deterministic": True,
+        "force_col_wise": True,
+        "seed": 91,
+        "num_threads": 1,
+    }
+    schedule = [0.3, 0.1, 0.05]
+    ours = lgb.train(
+        dict(params),
+        lgb.Dataset(x, label=y, params=dict(params)),
+        num_boost_round=len(schedule),
+        callbacks=[lgb.reset_parameter(learning_rate=schedule)],
+    )
+    theirs = lightgbm.train(
+        dict(params),
+        lightgbm.Dataset(x, label=y, params=dict(params)),
+        num_boost_round=len(schedule),
+        callbacks=[lightgbm.reset_parameter(learning_rate=schedule)],
+    )
+
+    np.testing.assert_allclose(ours.predict(x), theirs.predict(x), rtol=1e-12, atol=1e-15)
+    ours_rate = next(
+        line for line in ours.model_to_string().splitlines() if line.startswith("[learning_rate:")
+    )
+    theirs_rate = next(
+        line for line in theirs.model_to_string().splitlines() if line.startswith("[learning_rate:")
+    )
+    assert ours_rate == theirs_rate
+
+    callable_schedule = lgb.train(
+        dict(params),
+        lgb.Dataset(x, label=y, params=dict(params)),
+        num_boost_round=len(schedule),
+        callbacks=[lgb.reset_parameter(learning_rate=lambda iteration: schedule[iteration])],
+    )
+    np.testing.assert_allclose(
+        callable_schedule.predict(x), ours.predict(x), rtol=1e-12, atol=1e-15
+    )
+
+
 def test_train_rejects_unimplemented_options() -> None:
     x = np.random.default_rng(0).normal(size=(40, 2))
     ds = lgb.Dataset(x, label=x[:, 0], params={"verbose": -1})

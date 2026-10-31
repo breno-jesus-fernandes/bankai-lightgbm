@@ -341,6 +341,26 @@ class Booster:
             results.extend(self._native().eval(native_dataset, _params_to_strings(params), name))
         return results
 
+    def reset_parameter(self, params: dict[str, Any]) -> None:
+        """Reset supported parameters while continuing training."""
+        aliases = {
+            "learning_rate": "learning_rate",
+            "eta": "learning_rate",
+            "shrinkage_rate": "learning_rate",
+        }
+        normalized: dict[str, float] = {}
+        for name, value in params.items():
+            canonical = aliases.get(name)
+            if canonical is None:
+                raise NotImplementedError(f"reset_parameter for {name!r} is not implemented yet")
+            rate = float(value)
+            if not np.isfinite(rate) or rate <= 0.0:
+                raise ValueError("learning_rate must be finite and greater than zero")
+            normalized[canonical] = rate
+        if self._handle is not None and "learning_rate" in normalized:
+            self._handle.reset_learning_rate(normalized["learning_rate"])
+        self.params.update(normalized)
+
     def __copy__(self) -> Booster:
         return self.__deepcopy__(None)
 

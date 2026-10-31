@@ -103,6 +103,18 @@ impl GbdtTrainer {
     pub fn into_model(self) -> Gbdt {
         self.trainer.into_model()
     }
+
+    /// Update the shrinkage applied to trees trained in subsequent iterations.
+    pub fn reset_learning_rate(&mut self, learning_rate: f64) -> Result<()> {
+        if !learning_rate.is_finite() || learning_rate <= 0.0 {
+            return Err(Error::InvalidParameter(
+                "learning_rate must be finite and greater than zero".into(),
+            ));
+        }
+        self.trainer.shrinkage = learning_rate;
+        self.trainer.model_learning_rate = learning_rate;
+        Ok(())
+    }
 }
 
 struct Trainer {
@@ -129,6 +141,8 @@ struct Trainer {
     dart: Option<DartState>,
     /// Shrinkage of the tree being trained (upstream `shrinkage_rate_`; DART changes it).
     shrinkage: f64,
+    /// User configured learning rate, kept separate from DART's temporary shrinkage.
+    model_learning_rate: f64,
     /// Splits of every model tree, for replays on all rows (DART only).
     tree_splits: Vec<Vec<SplitRecord>>,
 }
@@ -181,6 +195,7 @@ impl Trainer {
                 rng: Random::new(drop_seed),
             }),
             shrinkage: learning_rate,
+            model_learning_rate: learning_rate,
             tree_splits: Vec::new(),
         };
         if rf {
@@ -543,6 +558,7 @@ impl Trainer {
 
     fn into_model(self) -> Gbdt {
         let objective_str = self.objective.to_model_string();
+        let loaded_parameter = self.model_parameters();
         let ds = self.ds;
         Gbdt {
             models: self.models,
@@ -558,7 +574,7 @@ impl Trainer {
                 .ok()
                 .flatten(),
             linear_tree: self.cfg.linear_tree,
-            loaded_parameter: self.cfg.to_string(),
+            loaded_parameter,
             parser_config: String::new(),
             pandas_categorical: None,
             version: "v4".into(),
@@ -568,6 +584,7 @@ impl Trainer {
     fn build_model(&self, models: Vec<Tree>) -> Gbdt {
         let ds = &self.ds;
         let objective_str = self.objective.to_model_string();
+        let loaded_parameter = self.model_parameters();
         Gbdt {
             models,
             num_class: self.cfg.num_class as usize,
@@ -582,11 +599,24 @@ impl Trainer {
                 .ok()
                 .flatten(),
             linear_tree: self.cfg.linear_tree,
-            loaded_parameter: self.cfg.to_string(),
+            loaded_parameter,
             parser_config: String::new(),
             pandas_categorical: None,
             version: "v4".into(),
         }
+    }
+
+    fn model_parameters(&self) -> String {
+        let mut parameters = self.cfg.to_string();
+        if self.model_learning_rate != self.cfg.learning_rate {
+            let original = format!("[learning_rate: {}]\n", format_g(self.cfg.learning_rate, 6));
+            let updated = format!(
+                "[learning_rate: {}]\n",
+                format_g(self.model_learning_rate, 6)
+            );
+            parameters = parameters.replacen(&original, &updated, 1);
+        }
+        parameters
     }
 }
 

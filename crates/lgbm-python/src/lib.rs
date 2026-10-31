@@ -181,6 +181,15 @@ impl NativeBooster {
         Ok(finished)
     }
 
+    fn reset_learning_rate(&mut self, learning_rate: f64) -> PyResult<()> {
+        let Some(trainer) = self.trainer.as_mut() else {
+            return Err(LightGBMError::new_err(
+                "Cannot reset parameters on a Booster loaded from a model.",
+            ));
+        };
+        trainer.reset_learning_rate(learning_rate).map_err(to_py)
+    }
+
     fn eval(
         &self,
         py: Python<'_>,
