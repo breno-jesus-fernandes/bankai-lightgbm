@@ -10,7 +10,7 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 - [x] Fixture generator `scripts/gen_fixtures.py` (upstream 4.7.0)
 - [x] Parity harness helpers (`tests/parity/conftest.py`, `crates/lgbm-core/tests/support`), platform-aware bit-exactness
 - [x] Python benchmark vs upstream (`benches/bench_predict.py`, non-zero exit if slower)
-- [ ] criterion micro-benchmarks + regression gate in CI (histogram kernel bench in `crates/lgbm-core/benches/kernels.rs`; partition, split-finding and prediction benches and the CI gate are still missing)
+- [x] Criterion micro-benchmarks and CI regression gate (`crates/lgbm-core/benches/kernels.rs`: histogram construction, partition, split finding, prediction; CI compares shared results to the base revision and fails above 5%)
 - [ ] `cargo miri` job for the unsafe-allowlisted modules (`scripts/miri.sh` runs `histogram` clean locally; no CI job yet)
 - [x] Parameter table code generator from upstream `config.h` (`scripts/gen_config.py`)
 

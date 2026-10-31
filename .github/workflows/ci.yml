@@ -9,6 +9,28 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Benchmark base revision
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/bankai-baseline-target
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/bankai-baseline" "$BASE_SHA"
+          cargo bench --manifest-path "$RUNNER_TEMP/bankai-baseline/Cargo.toml" -p lgbm-core --bench kernels -- --save-baseline main --warm-up-time 1 --measurement-time 3 --sample-size 20
+          mkdir -p "$GITHUB_WORKSPACE/target/criterion"
+          cp -a "$CARGO_TARGET_DIR/criterion/." "$GITHUB_WORKSPACE/target/criterion/"
+      - name: Benchmark this revision and enforce the 5% limit
+        run: |
+          cargo bench -p lgbm-core --bench kernels -- --save-baseline candidate --warm-up-time 1 --measurement-time 3 --sample-size 20
+          python scripts/check_criterion_regression.py target/criterion candidate main
+
   rust:
     runs-on: ${{ matrix.os }}
     strategy:
