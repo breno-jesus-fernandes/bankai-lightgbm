@@ -10,6 +10,8 @@ use super::feature_histogram::{
 };
 use super::histogram;
 use super::split_info::{K_MIN_SCORE, SplitInfo, argmax_split};
+use std::sync::Arc;
+
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::io::bin::BinType;
@@ -111,10 +113,10 @@ pub(crate) enum SplitKind {
     Categorical(Vec<u32>),
 }
 
-pub struct SerialTreeLearner<'a> {
-    cfg: &'a Config,
+pub struct SerialTreeLearner {
+    cfg: Arc<Config>,
     params: SplitParams,
-    ds: &'a Dataset,
+    ds: Arc<Dataset>,
     num_data: usize,
     num_features: usize,
     metas: Vec<FeatureMeta>,
@@ -124,7 +126,7 @@ pub struct SerialTreeLearner<'a> {
     feature_hist_len: Vec<usize>,
     pool: HistogramPool,
     /// One verified dense column per feature group (see `histogram::CheckedBins`).
-    checked_bins: Vec<histogram::CheckedBins<'a>>,
+    checked_bins: Vec<histogram::BinsCheck>,
     col_sampler: ColSampler,
     splits: Vec<SplitRecord>,
     pub partition: DataPartition,
@@ -147,9 +149,9 @@ pub struct SerialTreeLearner<'a> {
     leaf_depth: Vec<i32>,
 }
 
-impl<'a> SerialTreeLearner<'a> {
+impl SerialTreeLearner {
     /// upstream: `SerialTreeLearner::Init` (col-wise histogram layout).
-    pub fn new(cfg: &'a Config, ds: &'a Dataset, is_constant_hessian: bool) -> Result<Self> {
+    pub fn new(cfg: Arc<Config>, ds: Arc<Dataset>, is_constant_hessian: bool) -> Result<Self> {
         let l = &ds.layout;
         if l.groups.iter().any(|g| g.is_multi_val) {
             return Err(Error::Unsupported(
@@ -167,7 +169,7 @@ impl<'a> SerialTreeLearner<'a> {
                 return Err(Error::Unsupported("sparse single-value group".into()));
             };
             let nb = *g.bin_offsets.last().unwrap_or(&0) as usize;
-            let Some(checked) = histogram::CheckedBins::new(bin, ds.num_data(), nb) else {
+            let Some(checked) = histogram::BinsCheck::new(bin, ds.num_data(), nb) else {
                 return Err(Error::Parse(format!(
                     "feature group {gi} has a bin outside its range"
                 )));
@@ -210,20 +212,26 @@ impl<'a> SerialTreeLearner<'a> {
             )));
         }
         let num_leaves = cfg.num_leaves as usize;
+        let params = SplitParams::from_config(&cfg);
+        let cat_params = CatParams::from_config(&cfg);
+        let col_sampler = ColSampler::new(&cfg, &ds)?;
+        let num_data = ds.num_data();
+        let monotone_active = !cfg.monotone_constraints.is_empty();
+        let monotone_penalization = cfg.monotone_penalty;
         Ok(SerialTreeLearner {
             cfg,
-            params: SplitParams::from_config(cfg),
+            params,
             ds,
-            num_data: ds.num_data(),
+            num_data,
             num_features,
             metas,
             feature_hist_offsets,
             feature_hist_len,
             pool: HistogramPool::new(num_leaves, hist_cur_num_bin.max(1), num_features),
             checked_bins,
-            col_sampler: ColSampler::new(cfg, ds)?,
+            col_sampler,
             splits: Vec::new(),
-            partition: DataPartition::new(ds.num_data(), num_leaves),
+            partition: DataPartition::new(num_data, num_leaves),
             best_split_per_leaf: vec![SplitInfo::default(); num_leaves],
             smaller: LeafSplits::empty(),
             larger: LeafSplits::empty(),
@@ -231,12 +239,12 @@ impl<'a> SerialTreeLearner<'a> {
             larger_slot: None,
             parent_slot: None,
             is_constant_hessian,
-            ordered_gradients: Vec::with_capacity(ds.num_data()),
-            ordered_hessians: Vec::with_capacity(ds.num_data()),
-            cat_params: CatParams::from_config(cfg),
+            ordered_gradients: Vec::with_capacity(num_data),
+            ordered_hessians: Vec::with_capacity(num_data),
+            cat_params,
             branch_features: vec![Vec::new(); num_leaves],
-            monotone_active: !cfg.monotone_constraints.is_empty(),
-            monotone_penalization: cfg.monotone_penalty,
+            monotone_active,
+            monotone_penalization,
             monotone_bounds: vec![(-f64::MAX, f64::MAX); num_leaves],
             leaf_depth: vec![0; num_leaves],
         })
@@ -326,7 +334,7 @@ impl<'a> SerialTreeLearner<'a> {
 
     /// upstream: `SerialTreeLearner::BeforeFindBestSplit`
     fn before_find_best_split(&mut self, tree: &Tree, left_leaf: i32, right_leaf: i32) -> bool {
-        let cfg = self.cfg;
+        let cfg = Arc::clone(&self.cfg);
         if cfg.max_depth > 0 && tree.leaf_depth[left_leaf as usize] >= cfg.max_depth {
             self.best_split_per_leaf[left_leaf as usize].gain = K_MIN_SCORE;
             if right_leaf >= 0 {
@@ -421,7 +429,8 @@ impl<'a> SerialTreeLearner<'a> {
         gradients: &[f32],
         hessians: &[f32],
     ) {
-        let l = &self.ds.layout;
+        let ds = Arc::clone(&self.ds);
+        let l = &ds.layout;
         let leaf_cnt = leaf
             .map(|lf| self.partition.leaf_count(lf))
             .unwrap_or(self.num_data);
@@ -466,14 +475,11 @@ impl<'a> SerialTreeLearner<'a> {
             if (fs..fs + fc).any(|f| is_feature_used[f]) {
                 let out = &mut hist[group_start * 2..(group_start + num_bin) * 2];
                 out.fill(0.0);
-                histogram::construct(
-                    &self.checked_bins[gi],
-                    rows.as_ref(),
-                    og,
-                    oh,
-                    const_hess,
-                    out,
-                );
+                let GroupData::Single(BinData::Dense(bin)) = &ds.data[gi] else {
+                    unreachable!("checked in new()")
+                };
+                let checked = histogram::CheckedBins::with(bin, self.checked_bins[gi]);
+                histogram::construct(&checked, rows.as_ref(), og, oh, const_hess, out);
                 if const_hess {
                     let h0 = f64::from(hessians[0]);
                     for i in (0..num_bin * 2).step_by(2) {
@@ -665,7 +671,7 @@ impl<'a> SerialTreeLearner<'a> {
     /// upstream: `SerialTreeLearner::SplitInner` (numerical). Returns (left, right) leaves.
     fn split(&mut self, tree: &mut Tree, best_leaf: usize) -> (usize, usize) {
         let mut info = self.best_split_per_leaf[best_leaf].clone();
-        let ds = self.ds;
+        let ds = Arc::clone(&self.ds);
         let l = &ds.layout;
         let inner = l.used_feature_map[info.feature as usize] as usize;
         let g = &l.groups[l.feature2group[inner] as usize];
@@ -688,7 +694,7 @@ impl<'a> SerialTreeLearner<'a> {
                 .collect();
             let bitset_real = construct_bitset(&real);
             let bitset_bin = construct_bitset(&bins);
-            let rule = SplitRule::categorical(ds, inner, &bitset_bin);
+            let rule = SplitRule::categorical(&ds, inner, &bitset_bin);
             self.partition.split(best_leaf, &rule, next_leaf);
             self.splits.push(SplitRecord {
                 leaf: best_leaf,
@@ -714,7 +720,7 @@ impl<'a> SerialTreeLearner<'a> {
             )
         } else {
             let threshold_double = m.bin_to_value(info.threshold);
-            let rule = SplitRule::numerical(ds, inner, info.threshold, info.default_left);
+            let rule = SplitRule::numerical(&ds, inner, info.threshold, info.default_left);
             self.partition.split(best_leaf, &rule, next_leaf);
             self.splits.push(SplitRecord {
                 leaf: best_leaf,
@@ -836,8 +842,8 @@ impl<'a> SerialTreeLearner<'a> {
                 SplitKind::Numerical {
                     threshold,
                     default_left,
-                } => SplitRule::numerical(self.ds, s.inner, *threshold, *default_left),
-                SplitKind::Categorical(bins) => SplitRule::categorical(self.ds, s.inner, bins),
+                } => SplitRule::numerical(&self.ds, s.inner, *threshold, *default_left),
+                SplitKind::Categorical(bins) => SplitRule::categorical(&self.ds, s.inner, bins),
             };
             part.split(s.leaf, &rule, s.right);
         }

@@ -2,6 +2,8 @@
 //! `BoostFromAverage`, `UpdateScore`)
 
 use super::Gbdt;
+use std::sync::Arc;
+
 use super::sample::SampleStrategy;
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -46,15 +48,17 @@ fn feature_infos(ds: &Dataset) -> Vec<String> {
 
 impl Gbdt {
     /// Train a model on `ds` with `cfg` (upstream `Booster` construction + `num_iterations`
-    /// calls to `GBDT::TrainOneIter`).
+    /// calls to `GBDT::TrainOneIter`). This convenience method clones `ds`; use
+    /// [`Gbdt::train_shared`] when the dataset is already shared or large.
     pub fn train(cfg: &Config, ds: &Dataset) -> Result<Gbdt> {
-        if !matches!(cfg.boosting.as_str(), "gbdt" | "rf" | "dart") {
-            return Err(Error::Unsupported(format!("boosting={}", cfg.boosting)));
-        }
-        let objective = create_objective(cfg, &ds.metadata)?;
-        let mut trainer = Trainer::new(cfg, ds, objective)?;
+        Self::train_shared(Arc::new(cfg.clone()), Arc::new(ds.clone()))
+    }
+
+    /// Train using shared configuration and dataset storage, without copying binned data.
+    pub fn train_shared(cfg: Arc<Config>, ds: Arc<Dataset>) -> Result<Gbdt> {
+        let mut trainer = GbdtTrainer::new(Arc::clone(&cfg), Arc::clone(&ds))?;
         for _ in 0..cfg.num_iterations {
-            if trainer.train_one_iter() {
+            if trainer.update_one_iter() {
                 break;
             }
         }
@@ -62,14 +66,53 @@ impl Gbdt {
     }
 }
 
-struct Trainer<'a> {
-    cfg: &'a Config,
-    ds: &'a Dataset,
+/// A booster that trains one iteration at a time (upstream `Booster::UpdateOneIter`).
+/// It owns its configuration and training data, so it can outlive the caller's references.
+pub struct GbdtTrainer {
+    trainer: Trainer,
+}
+
+impl GbdtTrainer {
+    /// upstream: `Booster` construction (`GBDT::Init` for the configured boosting type).
+    pub fn new(cfg: Arc<Config>, ds: Arc<Dataset>) -> Result<Self> {
+        if !matches!(cfg.boosting.as_str(), "gbdt" | "rf" | "dart") {
+            return Err(Error::Unsupported(format!("boosting={}", cfg.boosting)));
+        }
+        let objective = create_objective(&cfg, &ds.metadata)?;
+        Ok(GbdtTrainer {
+            trainer: Trainer::new(cfg, ds, objective)?,
+        })
+    }
+
+    /// One boosting iteration. Returns `true` when no tree could split any further.
+    pub fn update_one_iter(&mut self) -> bool {
+        self.trainer.train_one_iter()
+    }
+
+    /// Completed iterations.
+    pub fn iteration(&self) -> usize {
+        self.trainer.models.len() / self.trainer.num_tree_per_iteration.max(1)
+    }
+
+    /// The model trained so far (a copy; training can continue afterwards).
+    pub fn snapshot(&self) -> Gbdt {
+        self.trainer.snapshot()
+    }
+
+    /// Consume the trainer and return its model without copying the trained trees.
+    pub fn into_model(self) -> Gbdt {
+        self.trainer.into_model()
+    }
+}
+
+struct Trainer {
+    cfg: Arc<Config>,
+    ds: Arc<Dataset>,
     sampler: SampleStrategy,
     /// upstream `iter_`: completed iterations, used by the sampling schedules.
     iter: i32,
     objective: Box<dyn Objective>,
-    learner: SerialTreeLearner<'a>,
+    learner: SerialTreeLearner,
     num_tree_per_iteration: usize,
     class_need_train: Vec<bool>,
     score: Vec<f64>,
@@ -103,14 +146,16 @@ fn min_upstream(a: f64, b: f64) -> f64 {
     if b < a { b } else { a }
 }
 
-impl<'a> Trainer<'a> {
-    fn new(cfg: &'a Config, ds: &'a Dataset, objective: Box<dyn Objective>) -> Result<Self> {
+impl Trainer {
+    fn new(cfg: Arc<Config>, ds: Arc<Dataset>, objective: Box<dyn Objective>) -> Result<Self> {
         let n = ds.num_data();
         let ntpi = objective.num_model_per_iteration();
-        let sampler = SampleStrategy::new(cfg, &ds.metadata, ntpi)?;
+        let sampler = SampleStrategy::new(&cfg, &ds.metadata, ntpi)?;
+        let trainer_boosting = cfg.boosting.clone();
+        let (drop_seed, learning_rate) = (cfg.drop_seed, cfg.learning_rate);
         // upstream: `GetIsConstHessian`. GOSS rescales hessians, so they are never constant.
         let constant_hessian = objective.is_constant_hessian() && !sampler.changes_hessians();
-        let learner = SerialTreeLearner::new(cfg, ds, constant_hessian)?;
+        let learner = SerialTreeLearner::new(Arc::clone(&cfg), Arc::clone(&ds), constant_hessian)?;
         let class_need_train = (0..ntpi).map(|k| objective.class_need_train(k)).collect();
         let rf = cfg.boosting == "rf";
         let mut trainer = Trainer {
@@ -129,28 +174,29 @@ impl<'a> Trainer<'a> {
             rf,
             rf_init: Vec::new(),
             rf_pred: Vec::new(),
-            dart: (cfg.boosting == "dart").then(|| DartState {
+            dart: (trainer_boosting == "dart").then(|| DartState {
                 tree_weight: Vec::new(),
                 sum_weight: 0.0,
                 drop_index: Vec::new(),
-                rng: Random::new(cfg.drop_seed),
+                rng: Random::new(drop_seed),
             }),
-            shrinkage: cfg.learning_rate,
+            shrinkage: learning_rate,
             tree_splits: Vec::new(),
         };
         if rf {
             // upstream: RF::Init. Boosting() runs once: gradients come from the initial
             // scores and are never recomputed.
-            let bagging = cfg.data_sample_strategy == "bagging";
-            let bag_ok =
-                cfg.bagging_freq > 0 && cfg.bagging_fraction < 1.0 && cfg.bagging_fraction > 0.0;
-            let ff_ok = cfg.feature_fraction < 1.0 && cfg.feature_fraction > 0.0;
+            let bagging = trainer.cfg.data_sample_strategy == "bagging";
+            let bag_ok = trainer.cfg.bagging_freq > 0
+                && trainer.cfg.bagging_fraction < 1.0
+                && trainer.cfg.bagging_fraction > 0.0;
+            let ff_ok = trainer.cfg.feature_fraction < 1.0 && trainer.cfg.feature_fraction > 0.0;
             if bagging && !(bag_ok || ff_ok) {
                 return Err(Error::InvalidParameter(
                     "random forest needs bagging (bagging_freq > 0, 0 < bagging_fraction < 1) or feature_fraction < 1".into(),
                 ));
             }
-            if !bagging && cfg.data_sample_strategy != "goss" {
+            if !bagging && trainer.cfg.data_sample_strategy != "goss" {
                 return Err(Error::InvalidParameter(
                     "random forest needs data_sample_strategy bagging or goss".into(),
                 ));
@@ -371,7 +417,7 @@ impl<'a> Trainer<'a> {
     fn dart_drop(&mut self) {
         let ntpi = self.num_tree_per_iteration;
         let iter = self.iter.max(0) as usize;
-        let cfg = self.cfg;
+        let cfg = Arc::clone(&self.cfg);
         let Some(state) = self.dart.as_mut() else {
             return;
         };
@@ -436,7 +482,7 @@ impl<'a> Trainer<'a> {
     /// dropped trees, and updates their weights.
     fn dart_normalize(&mut self) {
         let ntpi = self.num_tree_per_iteration;
-        let cfg = self.cfg;
+        let cfg = Arc::clone(&self.cfg);
         let drop_index = match self.dart.as_ref() {
             Some(state) => state.drop_index.clone(),
             None => return,
@@ -490,11 +536,40 @@ impl<'a> Trainer<'a> {
         }
     }
 
+    /// The model so far (copies the trees).
+    fn snapshot(&self) -> Gbdt {
+        self.build_model(self.models.clone())
+    }
+
     fn into_model(self) -> Gbdt {
-        let ds = self.ds;
         let objective_str = self.objective.to_model_string();
+        let ds = self.ds;
         Gbdt {
             models: self.models,
+            num_class: self.cfg.num_class as usize,
+            num_tree_per_iteration: self.num_tree_per_iteration,
+            label_idx: ds.label_idx,
+            max_feature_idx: ds.layout.num_total_features as i32 - 1,
+            average_output: self.rf,
+            feature_names: ds.feature_names.clone(),
+            feature_infos: feature_infos(&ds),
+            monotone_constraints: self.cfg.monotone_constraints.clone(),
+            objective: LoadedObjective::from_model_str(&objective_str)
+                .ok()
+                .flatten(),
+            linear_tree: self.cfg.linear_tree,
+            loaded_parameter: self.cfg.to_string(),
+            parser_config: String::new(),
+            pandas_categorical: None,
+            version: "v4".into(),
+        }
+    }
+
+    fn build_model(&self, models: Vec<Tree>) -> Gbdt {
+        let ds = &self.ds;
+        let objective_str = self.objective.to_model_string();
+        Gbdt {
+            models,
             num_class: self.cfg.num_class as usize,
             num_tree_per_iteration: self.num_tree_per_iteration,
             label_idx: ds.label_idx,
@@ -530,5 +605,52 @@ fn out_of_bag(rows: Option<&[i32]>, n: usize) -> Option<Vec<i32>> {
 fn scale(score: &mut [f64], val: f64) {
     for s in score {
         *s *= val;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::GbdtTrainer;
+    use crate::config::Config;
+    use crate::io::dataset::Dataset;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn incremental_training_snapshots_each_completed_iteration() {
+        let params = HashMap::from([
+            ("objective".to_owned(), "regression".to_owned()),
+            ("num_leaves".to_owned(), "3".to_owned()),
+            ("min_data_in_leaf".to_owned(), "1".to_owned()),
+            ("min_data_in_bin".to_owned(), "1".to_owned()),
+            ("max_bin".to_owned(), "8".to_owned()),
+            ("boost_from_average".to_owned(), "false".to_owned()),
+            ("num_iterations".to_owned(), "2".to_owned()),
+        ]);
+        let config = Arc::new(Config::from_params(&params).unwrap());
+        let features = (0..8).map(f64::from).collect::<Vec<_>>();
+        let labels = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let dataset =
+            Arc::new(Dataset::from_dense(&features, 8, 1, &labels, &config, &[]).unwrap());
+        let mut trainer = GbdtTrainer::new(Arc::clone(&config), Arc::clone(&dataset)).unwrap();
+
+        assert_eq!(trainer.iteration(), 0);
+        assert!(!trainer.update_one_iter());
+        assert_eq!(trainer.iteration(), 1);
+        let first_snapshot = trainer.snapshot();
+        assert_eq!(first_snapshot.current_iteration(), 1);
+
+        assert!(!trainer.update_one_iter());
+        assert_eq!(trainer.iteration(), 2);
+        assert_eq!(first_snapshot.current_iteration(), 1);
+        let incremental = trainer.snapshot();
+        assert_eq!(incremental.current_iteration(), 2);
+        let batch = super::Gbdt::train_shared(config, dataset).unwrap();
+        assert_eq!(
+            incremental.save_model_to_string(0, -1, 0).unwrap(),
+            batch.save_model_to_string(0, -1, 0).unwrap()
+        );
     }
 }

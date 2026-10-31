@@ -2,6 +2,7 @@
 //! The public, lightgbm-compatible API lives in `python/bankai_lightgbm`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use lgbm_core::boosting::Gbdt;
 use lgbm_core::config::Config;
@@ -26,7 +27,7 @@ fn to_py(err: lgbm_core::Error) -> PyErr {
 /// Binned training data. Mirrors upstream's C API `DatasetHandle`.
 #[pyclass(module = "bankai_lightgbm._lib", frozen)]
 struct NativeDataset {
-    ds: Dataset,
+    ds: Arc<Dataset>,
 }
 
 #[pymethods]
@@ -63,7 +64,7 @@ impl NativeDataset {
                 Ok(ds)
             })
             .map_err(to_py)?;
-        Ok(NativeDataset { ds })
+        Ok(NativeDataset { ds: Arc::new(ds) })
     }
 
     fn num_data(&self) -> usize {
@@ -106,11 +107,11 @@ impl NativeBooster {
         params: HashMap<String, String>,
         dataset: PyRef<'_, NativeDataset>,
     ) -> PyResult<Self> {
-        let ds: &Dataset = &dataset.ds;
+        let ds = Arc::clone(&dataset.ds);
         let model = py
             .allow_threads(|| -> lgbm_core::Result<Gbdt> {
                 let cfg = Config::from_params(&params)?;
-                Gbdt::train(&cfg, ds)
+                Gbdt::train_shared(Arc::new(cfg), ds)
             })
             .map_err(to_py)?;
         Ok(NativeBooster { model })

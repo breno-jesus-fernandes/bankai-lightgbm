@@ -6,3 +6,4 @@ mod sample;
 mod train;
 
 pub use gbdt::Gbdt;
+pub use train::GbdtTrainer;

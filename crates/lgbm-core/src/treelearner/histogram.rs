@@ -47,6 +47,23 @@ impl Bins for B32<'_> {
     }
 }
 
+/// Proof that a dense column's bins are all `< num_bin`. Only [`BinsCheck::new`] creates
+/// one, after a full scan, so it can be kept beside an immutable dataset and reused.
+#[derive(Clone, Copy, Debug)]
+pub struct BinsCheck {
+    num_rows: usize,
+    num_bin: usize,
+}
+
+impl BinsCheck {
+    /// `None` when some of the first `num_rows` bins is `>= num_bin`.
+    pub fn new(bin: &DenseBin, num_rows: usize, num_bin: usize) -> Option<Self> {
+        let ok =
+            bin.num_rows() >= num_rows && (0..num_rows).all(|i| (bin.get(i) as usize) < num_bin);
+        ok.then_some(BinsCheck { num_rows, num_bin })
+    }
+}
+
 /// A dense bin column whose bins were all verified to be `< num_bin`.
 #[derive(Clone, Copy)]
 pub struct CheckedBins<'a> {
@@ -56,6 +73,15 @@ pub struct CheckedBins<'a> {
 }
 
 impl<'a> CheckedBins<'a> {
+    /// Attach a previously computed [`BinsCheck`] to the same column.
+    pub fn with(bin: &'a DenseBin, check: BinsCheck) -> Self {
+        CheckedBins {
+            bin,
+            num_rows: check.num_rows,
+            num_bin: check.num_bin,
+        }
+    }
+
     /// `None` when some of the first `num_rows` bins is `>= num_bin`.
     pub fn new(bin: &'a DenseBin, num_rows: usize, num_bin: usize) -> Option<Self> {
         let ok =
