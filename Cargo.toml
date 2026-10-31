@@ -14,6 +14,7 @@ lgbm-core = { path = "crates/lgbm-core" }
 lgbm-io = { path = "crates/lgbm-io" }
 thiserror = "2"
 rayon = "1"
+log = "0.4"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

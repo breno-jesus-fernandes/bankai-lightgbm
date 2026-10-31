@@ -12,10 +12,10 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 - [x] Python benchmark vs upstream (`benches/bench_predict.py`, non-zero exit if slower)
 - [ ] criterion micro-benchmarks + regression gate in CI
 - [ ] `cargo miri` job for the unsafe-allowlisted modules
-- [ ] Parameter table code generator from upstream `config.h`
+- [x] Parameter table code generator from upstream `config.h` (`scripts/gen_config.py`)
 
 ## P1: Config + model I/O + prediction
-- [ ] All params + aliases + validation (`Config::from_map`, `config_auto` equivalent)
+- [x] All params + aliases + validation (`Config::from_params`, `str2map`, conflicts); parameters block round-trips byte-identically
 - [x] Model text parser and writer (`gbdt_model_text.cpp`), byte-identical round-trip
 - [x] `Tree` (numerical, categorical, and linear leaves), `dump_model` JSON
 - [x] Predict: normal, `raw_score`, `pred_leaf`, `pred_contrib` (TreeSHAP), `start_iteration`/`num_iteration`

@@ -2,6 +2,7 @@
 //! objectives and metrics. Module layout mirrors upstream LightGBM's `src/`.
 
 pub mod boosting;
+pub mod config;
 pub mod error;
 pub mod meta;
 pub mod objective;

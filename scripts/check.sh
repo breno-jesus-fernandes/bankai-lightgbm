@@ -3,6 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo fmt --all --check
+python3 scripts/gen_config.py --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --quiet
 if [ -d .venv ]; then
