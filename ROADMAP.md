@@ -26,15 +26,17 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 - **Gate:** every golden model predicts bit-exactly ✅ (24 fixtures; 1.25–1.33x faster predict, 1.05x SHAP)
 
 ## P2: Dataset + binning
-- [ ] `BinMapper`: numerical/categorical, `max_bin`, `max_bin_by_feature`, `min_data_in_bin`, `bin_construct_sample_cnt`
-- [ ] Missing handling: `use_missing`, `zero_as_missing`, NaN/zero bins
-- [ ] Dense, 4-bit dense, and sparse bins; multi-val dense/sparse bins
-- [ ] Exclusive Feature Bundling (`enable_bundle`, `max_conflict_rate`)
-- [ ] Metadata: label, weight, group/query, init_score, position
+- [x] `BinMapper`: numerical/categorical, `max_bin`, `max_bin_by_feature`, `min_data_in_bin`, `bin_construct_sample_cnt`
+- [x] Missing handling: `use_missing`, `zero_as_missing`, NaN/zero bins
+- [x] Dense, 4-bit dense, and sparse bins; multi-val (per-feature) bins
+- [ ] `MultiValBin` (row-wise training layout)
+- [x] Exclusive Feature Bundling (`enable_bundle`), sampling identical to upstream
+- [ ] Metadata: label ✅, weight, group/query, init_score, position
 - [ ] Parsers: CSV/TSV/LibSVM, header, `label_column`, `weight_column`, `group_column`, `ignore_column`, `two_round`
-- [ ] Binary dataset file (`save_binary`) compatible with upstream
+- [x] Binary dataset file (`save_binary`) byte-identical to upstream (20 fixtures); reader for upstream files
+- [ ] Load a `Dataset` from an upstream `.bin` file (decode bin data)
 - [ ] `forcedbins_filename`, `linear_tree` raw-data retention, Arrow ingest
-- **Gate:** identical bin upper bounds and feature groups
+- **Gate:** identical bin upper bounds and feature groups ✅
 
 ## P3: Serial tree learner + GBDT
 - [ ] Histogram construction: col-wise and row-wise, `force_col_wise`/`force_row_wise` auto-choice, SIMD

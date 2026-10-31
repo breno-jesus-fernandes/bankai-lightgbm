@@ -635,6 +635,33 @@ impl BinMapper {
             }
     }
 
+    /// upstream: `BinMapper::SaveBinaryToFile` / `CopyTo`
+    pub fn write(&self, out: &mut Vec<u8>) {
+        let aligned_i32 = |out: &mut Vec<u8>, v: i32| {
+            out.extend_from_slice(&v.to_le_bytes());
+            out.extend_from_slice(&[0u8; 4]);
+        };
+        aligned_i32(out, self.num_bin);
+        aligned_i32(out, self.missing_type as i32);
+        out.push(u8::from(self.is_trivial));
+        out.extend_from_slice(&[0u8; 7]);
+        out.extend_from_slice(&self.sparse_rate.to_le_bytes());
+        aligned_i32(out, self.bin_type as i32);
+        out.extend_from_slice(&self.min_val.to_le_bytes());
+        out.extend_from_slice(&self.max_val.to_le_bytes());
+        aligned_i32(out, self.default_bin as i32);
+        aligned_i32(out, self.most_freq_bin as i32);
+        if self.bin_type == BinType::Numerical {
+            for b in &self.bin_upper_bound {
+                out.extend_from_slice(&b.to_le_bytes());
+            }
+        } else {
+            for c in &self.bin_2_categorical {
+                out.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+    }
+
     /// upstream: `BinMapper::CopyFrom` / `BinMapper(const void* memory)`
     pub fn from_bytes(buf: &[u8]) -> Result<(BinMapper, usize)> {
         let mut r = super::binary::Reader::new(buf);

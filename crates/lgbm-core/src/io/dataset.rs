@@ -2,10 +2,14 @@
 //! upstream: src/io/dataset.cpp (`FindGroups`, `FastFeatureBundling`, `Dataset::Construct`),
 //! include/LightGBM/feature_group.h
 
-use super::bin::{BinMapper, K_SPARSE_THRESHOLD};
+use rayon::prelude::*;
+
+use super::bin::{BinMapper, BinType, K_SPARSE_THRESHOLD};
+use super::bin_data::{BinData, DenseBin, SparseBin};
+use super::binary::{BINARY_FILE_TOKEN, aligned};
 use super::sample::SampleSet;
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::utils::random::Random;
 
 /// upstream: `MultiValBin::multi_val_bin_sparse_threshold` (`0.25f` widened to double).
@@ -58,8 +62,7 @@ impl FeatureGroupLayout {
             num_total_bin += num_bin;
             bin_offsets.push(num_total_bin);
         }
-        // force_dense = true: single-value groups start dense.
-        let _ = K_SPARSE_THRESHOLD;
+        // CreateBinData(force_dense = true): single-value groups start dense.
         FeatureGroupLayout {
             features,
             bin_mappers,
@@ -440,5 +443,297 @@ impl DatasetLayout {
             group_feature_cnt,
             groups,
         }
+    }
+}
+
+/// Bin data of one feature group. upstream: `FeatureGroup::bin_data_` / `multi_bin_data_`
+#[derive(Debug, Clone, PartialEq)]
+pub enum GroupData {
+    Single(BinData),
+    /// One column per sub-feature.
+    Multi(Vec<BinData>),
+}
+
+/// Labels, weights and query boundaries. upstream: `Metadata`
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Metadata {
+    pub label: Vec<f32>,
+    pub weights: Vec<f32>,
+    pub query_boundaries: Vec<i32>,
+    pub init_score: Vec<f64>,
+}
+
+/// A binned training dataset. upstream: `Dataset`
+#[derive(Debug, Clone)]
+pub struct Dataset {
+    pub layout: DatasetLayout,
+    pub data: Vec<GroupData>,
+    pub metadata: Metadata,
+    pub feature_names: Vec<String>,
+    pub label_idx: i32,
+    pub max_bin: i32,
+    pub bin_construct_sample_cnt: i32,
+    pub min_data_in_bin: i32,
+    pub use_missing: bool,
+    pub zero_as_missing: bool,
+    pub max_bin_by_feature: Vec<i32>,
+    pub forced_bin_bounds: Vec<Vec<f64>>,
+    /// Raw float32 values per numeric used feature (linear trees), column-major.
+    pub raw_data: Vec<Vec<f32>>,
+    pub numeric_feature_map: Vec<i32>,
+}
+
+impl FeatureGroupLayout {
+    /// Fill this group's bins from a row-major dense matrix (upstream `PushOneRow` over all
+    /// rows + `FinishLoad`). Within a bundle, later columns overwrite earlier ones.
+    fn fill_dense(&self, data: &[f64], nrow: usize, ncol: usize) -> GroupData {
+        if self.is_multi_val {
+            let cols = self
+                .features
+                .iter()
+                .zip(&self.bin_mappers)
+                .map(|(&real, m)| {
+                    let addi = u32::from(m.most_freq_bin != 0);
+                    let num_bin = m.num_bin as u32 + addi;
+                    let bin_of = |r: usize| -> Option<u32> {
+                        let mut bin = m.value_to_bin(data[r * ncol + real as usize]);
+                        if bin == m.most_freq_bin {
+                            return None;
+                        }
+                        if m.most_freq_bin == 0 {
+                            bin -= 1;
+                        }
+                        Some(bin + 1)
+                    };
+                    if m.sparse_rate >= K_SPARSE_THRESHOLD {
+                        let pairs: Vec<(usize, u32)> = (0..nrow)
+                            .filter_map(|r| bin_of(r).map(|b| (r, b)))
+                            .collect();
+                        BinData::Sparse(SparseBin::from_sorted_pairs(nrow, num_bin, &pairs))
+                    } else {
+                        let mut d = DenseBin::new(nrow, num_bin);
+                        for r in 0..nrow {
+                            if let Some(b) = bin_of(r) {
+                                d.set(r, b);
+                            }
+                        }
+                        BinData::Dense(d)
+                    }
+                })
+                .collect();
+            return GroupData::Multi(cols);
+        }
+        let mut d = DenseBin::new(nrow, self.num_total_bin);
+        // push order is by original column index
+        let mut order: Vec<usize> = (0..self.features.len()).collect();
+        order.sort_by_key(|&i| self.features[i]);
+        for r in 0..nrow {
+            let row = &data[r * ncol..(r + 1) * ncol];
+            for &sub in &order {
+                let m = &self.bin_mappers[sub];
+                let mut bin = m.value_to_bin(row[self.features[sub] as usize]);
+                if bin == m.most_freq_bin {
+                    continue;
+                }
+                if m.most_freq_bin == 0 {
+                    bin -= 1;
+                }
+                d.set(r, bin + self.bin_offsets[sub]);
+            }
+        }
+        GroupData::Single(BinData::Dense(d))
+    }
+
+    /// upstream: `FeatureGroup::SizesInByte` + `SerializeToBinary`
+    fn write(&self, data: &GroupData, out: &mut Vec<u8>) {
+        let mut body = Vec::new();
+        for flag in [self.is_multi_val, self.is_dense_multi_val, self.is_sparse] {
+            body.push(u8::from(flag));
+            body.extend_from_slice(&[0u8; 7]);
+        }
+        body.extend_from_slice(&(self.bin_mappers.len() as i32).to_le_bytes());
+        body.extend_from_slice(&[0u8; 4]);
+        for m in &self.bin_mappers {
+            m.write(&mut body);
+        }
+        match data {
+            GroupData::Single(b) => b.write(&mut body),
+            GroupData::Multi(cols) => cols.iter().for_each(|b| b.write(&mut body)),
+        }
+        out.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        out.extend_from_slice(&body);
+    }
+}
+
+fn write_aligned(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(bytes);
+    out.resize(out.len() + aligned(bytes.len()) - bytes.len(), 0);
+}
+
+fn write_aligned_i32s(out: &mut Vec<u8>, vals: &[i32]) {
+    let bytes: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+    write_aligned(out, &bytes);
+}
+
+impl Dataset {
+    /// Build a binned dataset from a row-major dense matrix and labels
+    /// (upstream `LGBM_DatasetCreateFromMat` + `LGBM_DatasetSetField("label")`).
+    pub fn from_dense(
+        data: &[f64],
+        nrow: usize,
+        ncol: usize,
+        label: &[f64],
+        cfg: &Config,
+        categorical: &[i32],
+    ) -> Result<Dataset> {
+        if label.len() != nrow {
+            return Err(Error::InvalidParameter(format!(
+                "Length of label ({}) is not same with #data ({nrow})",
+                label.len()
+            )));
+        }
+        let layout = DatasetLayout::construct_dense(data, nrow, ncol, cfg, categorical)?;
+        let group_data: Vec<GroupData> = layout
+            .groups
+            .par_iter()
+            .map(|g| g.fill_dense(data, nrow, ncol))
+            .collect();
+        let mut numeric_feature_map = vec![-1i32; layout.num_features];
+        let mut num_numeric = 0;
+        for (f, slot) in numeric_feature_map.iter_mut().enumerate() {
+            let g = &layout.groups[layout.feature2group[f] as usize];
+            if g.bin_mappers[layout.feature2subfeature[f] as usize].bin_type == BinType::Numerical {
+                *slot = num_numeric;
+                num_numeric += 1;
+            }
+        }
+        let raw_data = if cfg.linear_tree {
+            (0..layout.num_features)
+                .filter(|&f| numeric_feature_map[f] >= 0)
+                .map(|f| {
+                    let real = layout.real_feature_idx[f] as usize;
+                    (0..nrow).map(|r| data[r * ncol + real] as f32).collect()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(Dataset {
+            feature_names: (0..ncol).map(|i| format!("Column_{i}")).collect(),
+            label_idx: 0,
+            max_bin: cfg.max_bin,
+            bin_construct_sample_cnt: cfg.bin_construct_sample_cnt,
+            min_data_in_bin: cfg.min_data_in_bin,
+            use_missing: cfg.use_missing,
+            zero_as_missing: cfg.zero_as_missing,
+            max_bin_by_feature: cfg.max_bin_by_feature.clone(),
+            forced_bin_bounds: vec![Vec::new(); ncol],
+            metadata: Metadata {
+                label: label.iter().map(|&v| v as f32).collect(),
+                ..Metadata::default()
+            },
+            data: group_data,
+            layout,
+            raw_data,
+            numeric_feature_map,
+        })
+    }
+
+    pub fn num_data(&self) -> usize {
+        self.layout.num_data
+    }
+
+    /// upstream: `Dataset::SaveBinaryFile` — byte-identical to upstream's output.
+    pub fn to_binary_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_aligned(&mut out, BINARY_FILE_TOKEN);
+        // header
+        let l = &self.layout;
+        let mut h = Vec::new();
+        for v in [
+            l.num_data as i32,
+            l.num_features as i32,
+            l.num_total_features as i32,
+            self.label_idx,
+            self.max_bin,
+            self.bin_construct_sample_cnt,
+            self.min_data_in_bin,
+        ] {
+            write_aligned_i32s(&mut h, &[v]);
+        }
+        for b in [
+            self.use_missing,
+            self.zero_as_missing,
+            !self.raw_data.is_empty(),
+        ] {
+            write_aligned(&mut h, &[u8::from(b)]);
+        }
+        write_aligned_i32s(&mut h, &l.used_feature_map);
+        write_aligned_i32s(&mut h, &[l.groups.len() as i32]);
+        write_aligned_i32s(&mut h, &l.real_feature_idx);
+        write_aligned_i32s(&mut h, &l.feature2group);
+        write_aligned_i32s(&mut h, &l.feature2subfeature);
+        for b in &l.group_bin_boundaries {
+            h.extend_from_slice(&b.to_le_bytes());
+        }
+        write_aligned_i32s(&mut h, &l.group_feature_start);
+        write_aligned_i32s(&mut h, &l.group_feature_cnt);
+        if self.max_bin_by_feature.is_empty() {
+            write_aligned_i32s(&mut h, &vec![-1; l.num_total_features]);
+        } else {
+            write_aligned_i32s(&mut h, &self.max_bin_by_feature);
+        }
+        for name in &self.feature_names {
+            write_aligned_i32s(&mut h, &[name.len() as i32]);
+            write_aligned(&mut h, name.as_bytes());
+        }
+        for bounds in &self.forced_bin_bounds {
+            write_aligned_i32s(&mut h, &[bounds.len() as i32]);
+            for b in bounds {
+                h.extend_from_slice(&b.to_le_bytes());
+            }
+        }
+        out.extend_from_slice(&(h.len() as u64).to_le_bytes());
+        out.extend_from_slice(&h);
+
+        // metadata
+        let md = &self.metadata;
+        let mut m = Vec::new();
+        let num_queries = md.query_boundaries.len().saturating_sub(1);
+        for v in [
+            l.num_data as i32,
+            md.weights.len() as i32,
+            num_queries as i32,
+        ] {
+            write_aligned_i32s(&mut m, &[v]);
+        }
+        let f32s = |v: &[f32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        write_aligned(&mut m, &f32s(&md.label));
+        if !md.weights.is_empty() {
+            write_aligned(&mut m, &f32s(&md.weights));
+        }
+        if !md.query_boundaries.is_empty() {
+            write_aligned_i32s(&mut m, &md.query_boundaries);
+        }
+        out.extend_from_slice(&(m.len() as u64).to_le_bytes());
+        out.extend_from_slice(&m);
+
+        for (g, d) in l.groups.iter().zip(&self.data) {
+            g.write(d, &mut out);
+        }
+        // raw data, row-major over numeric features
+        if !self.raw_data.is_empty() {
+            for r in 0..l.num_data {
+                for col in &self.raw_data {
+                    out.extend_from_slice(&col[r].to_le_bytes());
+                }
+            }
+        }
+        out
+    }
+
+    pub fn save_binary(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        std::fs::write(path, self.to_binary_bytes())?;
+        Ok(())
     }
 }

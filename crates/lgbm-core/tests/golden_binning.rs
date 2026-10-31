@@ -120,3 +120,30 @@ fn feature_groups_match_upstream() {
         }
     }
 }
+
+#[test]
+fn binary_dataset_bytes_match_upstream() {
+    use lgbm_core::io::dataset::Dataset;
+    for case in dataset_cases() {
+        let want = std::fs::read(case.join("dataset.bin")).unwrap();
+        let (params, cats) = dataset_params(&case);
+        let cfg = Config::from_params(&params).unwrap();
+        let (x, shape) = load_npy(&case.join("x.npy"));
+        let (y, _) = load_npy(&case.join("y.npy"));
+        let ds = Dataset::from_dense(&x, shape[0], shape[1], &y, &cfg, &cats).unwrap();
+        let got = ds.to_binary_bytes();
+        if got != want {
+            let pos = got
+                .iter()
+                .zip(&want)
+                .position(|(a, b)| a != b)
+                .unwrap_or(got.len().min(want.len()));
+            panic!(
+                "{}: binary differs at byte {pos} (ours {} bytes, upstream {} bytes)",
+                case.display(),
+                got.len(),
+                want.len()
+            );
+        }
+    }
+}
