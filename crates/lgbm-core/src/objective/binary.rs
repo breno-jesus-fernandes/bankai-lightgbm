@@ -7,10 +7,11 @@ use crate::io::dataset::Metadata;
 use crate::meta::K_EPSILON;
 use crate::utils::format::format_g;
 
-/// upstream: `BinaryLogloss` (unweighted)
+/// upstream: `BinaryLogloss`
 pub struct BinaryLogloss {
     sigmoid: f64,
     is_pos: Vec<bool>,
+    weights: Vec<f32>,
     label_weights: [f64; 2],
     need_train: bool,
 }
@@ -49,6 +50,7 @@ impl BinaryLogloss {
         Ok(BinaryLogloss {
             sigmoid,
             is_pos,
+            weights: md.weights.clone(),
             label_weights,
             need_train,
         })
@@ -74,18 +76,35 @@ impl Objective for BinaryLogloss {
             let label_weight = self.label_weights[usize::from(pos)];
             let response = -label * s / (1.0 + (label * s * score[i]).exp());
             let abs_response = response.abs();
-            g[i] = (response * label_weight) as f32;
-            h[i] = (abs_response * (s - abs_response) * label_weight) as f32;
+            if self.weights.is_empty() {
+                g[i] = (response * label_weight) as f32;
+                h[i] = (abs_response * (s - abs_response) * label_weight) as f32;
+            } else {
+                let w = f64::from(self.weights[i]);
+                g[i] = (response * label_weight * w) as f32;
+                h[i] = (abs_response * (s - abs_response) * label_weight * w) as f32;
+            }
         }
     }
 
     fn boost_from_score(&self, _class_id: usize) -> f64 {
         let mut suml = 0.0f64;
-        for &p in &self.is_pos {
-            suml += f64::from(u8::from(p));
-        }
+        let sumw = if self.weights.is_empty() {
+            for &p in &self.is_pos {
+                suml += f64::from(u8::from(p));
+            }
+            self.is_pos.len() as f64
+        } else {
+            let mut sumw = 0.0f64;
+            for (&p, &w) in self.is_pos.iter().zip(&self.weights) {
+                // `is_pos * weight` is a float product, widened before the double add.
+                suml += f64::from(f32::from(u8::from(p)) * w);
+                sumw += f64::from(w);
+            }
+            sumw
+        };
         let eps = f64::from(K_EPSILON);
-        let pavg = (suml / self.is_pos.len() as f64).min(1.0 - eps).max(eps);
+        let pavg = (suml / sumw).min(1.0 - eps).max(eps);
         (pavg / (1.0 - pavg)).ln() / self.sigmoid
     }
 

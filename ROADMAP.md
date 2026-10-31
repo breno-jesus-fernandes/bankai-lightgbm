@@ -53,8 +53,8 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 - **Gate:** identical trees on fixed seeds; training as fast as upstream
 
 ## P4: Objectives + metrics
-- [x] Regression: `l2`, `l1`, `huber`, `fair`, `poisson`, `quantile`, `mape`, `gamma`, `tweedie` (byte-identical training; sample weights only for `l2` so far)
-- [x] `binary`, `multiclass`, `multiclassova`, `cross_entropy`, `cross_entropy_lambda` (unweighted)
+- [x] Regression: `l2`, `l1`, `huber`, `fair`, `poisson`, `quantile`, `mape`, `gamma`, `tweedie` (byte-identical training, weighted and unweighted)
+- [x] `binary`, `multiclass`, `multiclassova`, `cross_entropy`, `cross_entropy_lambda` (weighted and unweighted)
 - [ ] Ranking: `lambdarank` (incl. position bias), `rank_xendcg`
 - [ ] Custom objective (fobj) path
 - [ ] All metrics: l1/l2/rmse/quantile/huber/fair/poisson/mape/gamma/gamma_deviance/tweedie, ndcg@k, map@k, auc, average_precision, binary_logloss/error, auc_mu, multi_logloss/error (`multi_error_top_k`), cross_entropy, cross_entropy_lambda, kullback_leibler

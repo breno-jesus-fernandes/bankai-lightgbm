@@ -2,6 +2,7 @@
 
 Each case writes ``tests/fixtures/train/<case>/``:
   - ``x.npy`` / ``y.npy`` (float64), ``params.json`` (``params`` + ``num_boost_round``)
+  - ``w.npy`` (float32 sample weights, only for ``*_weighted`` cases)
   - ``model.txt`` (upstream ``model_to_string()`` after ``lgb.train``)
 
 bankai must reproduce ``model.txt`` byte-for-byte (see AGENTS.md, parity tolerances).
@@ -145,6 +146,46 @@ CASES: dict[str, tuple[Callable[[np.random.Generator], Data], dict[str, Any], in
     "xentlambda": (probability, {"objective": "cross_entropy_lambda", "num_leaves": 15}, 15),
 }
 
+# Same data and params as the named case, trained with random sample weights.
+WEIGHTED = [
+    "l2_default",
+    "l1",
+    "quantile",
+    "mape",
+    "huber",
+    "fair",
+    "poisson",
+    "gamma",
+    "tweedie",
+    "binary",
+    "multiclass",
+    "multiclassova",
+    "xentropy",
+    "xentlambda",
+]
+
+
+def write_case(
+    case: str,
+    x: np.ndarray,
+    y: np.ndarray,
+    w: np.ndarray | None,
+    params: dict[str, Any],
+    rounds: int,
+) -> None:
+    booster = lgb.train(params, lgb.Dataset(x, y, weight=w), num_boost_round=rounds)
+    out = OUT / case
+    out.mkdir(parents=True, exist_ok=True)
+    np.save(out / "x.npy", x)
+    np.save(out / "y.npy", y)
+    if w is not None:
+        np.save(out / "w.npy", w)
+    (out / "params.json").write_text(
+        json.dumps({"params": params, "num_boost_round": rounds}, indent=1)
+    )
+    (out / "model.txt").write_text(booster.model_to_string())
+    print(f"wrote {out} ({booster.num_trees()} trees)")
+
 
 def main() -> None:
     expected = UPSTREAM_VERSION.lstrip("v")
@@ -154,16 +195,10 @@ def main() -> None:
         rng = np.random.default_rng(0)
         x, y = make(rng)
         params = {**BASE, **extra}
-        booster = lgb.train(params, lgb.Dataset(x, y), num_boost_round=rounds)
-        out = OUT / case
-        out.mkdir(parents=True, exist_ok=True)
-        np.save(out / "x.npy", x)
-        np.save(out / "y.npy", y)
-        (out / "params.json").write_text(
-            json.dumps({"params": params, "num_boost_round": rounds}, indent=1)
-        )
-        (out / "model.txt").write_text(booster.model_to_string())
-        print(f"wrote {out} ({booster.num_trees()} trees)")
+        write_case(case, x, y, None, params, rounds)
+        if case in WEIGHTED:
+            w = np.random.default_rng(1).uniform(0.2, 2.0, size=len(y)).astype(np.float32)
+            write_case(f"{case}_weighted", x, y, w, params, rounds)
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ fn train_cases() -> Vec<PathBuf> {
         .collect();
     out.sort();
     assert!(
-        out.len() >= 9,
+        out.len() >= 41,
         "expected training fixtures; run scripts/gen_train_fixtures.py"
     );
     out
@@ -40,7 +40,12 @@ fn trained_models_match_upstream() {
         let cfg = Config::from_params(&params).unwrap();
         let (x, shape) = load_npy(&case.join("x.npy"));
         let (y, _) = load_npy(&case.join("y.npy"));
-        let ds = Dataset::from_dense(&x, shape[0], shape[1], &y, &cfg, &[]).unwrap();
+        let mut ds = Dataset::from_dense(&x, shape[0], shape[1], &y, &cfg, &[]).unwrap();
+        if case.join("w.npy").exists() {
+            let (w, _) = load_npy(&case.join("w.npy"));
+            let w: Vec<f32> = w.iter().map(|&v| v as f32).collect();
+            ds.set_weights(&w).unwrap();
+        }
         let model = match Gbdt::train(&cfg, &ds) {
             Ok(m) => m,
             Err(e) => {

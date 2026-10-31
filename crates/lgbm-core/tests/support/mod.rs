@@ -79,7 +79,7 @@ pub fn load_test_features(case: &Path) -> (Vec<f64>, usize) {
     (data, ncol - 1)
 }
 
-/// Minimal `.npy` reader for little-endian `<f8`, `<i4`, `<i8`; returns values as f64 and shape.
+/// Minimal `.npy` reader for little-endian `<f8`, `<f4`, `<i4`, `<i8`; returns values as f64 and shape.
 pub fn load_npy(path: &Path) -> (Vec<f64>, Vec<usize>) {
     let bytes = std::fs::read(path).unwrap();
     assert_eq!(&bytes[..6], b"\x93NUMPY");
@@ -119,6 +119,10 @@ pub fn load_npy(path: &Path) -> (Vec<f64>, Vec<usize>) {
         "<f8" => body
             .chunks_exact(8)
             .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect(),
+        "<f4" => body
+            .chunks_exact(4)
+            .map(|c| f64::from(f32::from_le_bytes(c.try_into().unwrap())))
             .collect(),
         "<i4" => body
             .chunks_exact(4)

@@ -576,6 +576,24 @@ fn write_aligned_i32s(out: &mut Vec<u8>, vals: &[i32]) {
 }
 
 impl Dataset {
+    /// upstream: `Metadata::SetWeights` (an empty slice clears the weights).
+    pub fn set_weights(&mut self, weights: &[f32]) -> Result<()> {
+        if weights.is_empty() {
+            self.metadata.weights.clear();
+            return Ok(());
+        }
+        if weights.len() != self.num_data() {
+            return Err(Error::InvalidParameter(
+                "Length of weights differs from the length of #data".into(),
+            ));
+        }
+        self.metadata.weights = weights
+            .iter()
+            .map(|&w| crate::tree::avoid_inf_f32(w))
+            .collect();
+        Ok(())
+    }
+
     /// Build a binned dataset from a row-major dense matrix and labels
     /// (upstream `LGBM_DatasetCreateFromMat` + `LGBM_DatasetSetField("label")`).
     pub fn from_dense(

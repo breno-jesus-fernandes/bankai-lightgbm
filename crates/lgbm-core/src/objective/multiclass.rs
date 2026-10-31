@@ -9,11 +9,12 @@ use crate::meta::K_EPSILON;
 use crate::utils::common::softmax;
 use crate::utils::format::format_g;
 
-/// upstream: `MulticlassSoftmax` (unweighted)
+/// upstream: `MulticlassSoftmax`
 pub struct MulticlassSoftmax {
     num_class: usize,
     factor: f64,
     label_int: Vec<usize>,
+    weights: Vec<f32>,
     class_init_probs: Vec<f64>,
 }
 
@@ -23,7 +24,8 @@ impl MulticlassSoftmax {
         let factor = f64::from(cfg.num_class) / (f64::from(cfg.num_class) - 1.0);
         let mut label_int = Vec::with_capacity(md.label.len());
         let mut class_init_probs = vec![0.0f64; num_class];
-        for &l in &md.label {
+        let mut sum_weight = 0.0f64;
+        for (i, &l) in md.label.iter().enumerate() {
             let li = l as i32;
             if li < 0 || li >= cfg.num_class {
                 return Err(Error::InvalidParameter(format!(
@@ -31,9 +33,16 @@ impl MulticlassSoftmax {
                 )));
             }
             label_int.push(li as usize);
-            class_init_probs[li as usize] += 1.0;
+            if md.weights.is_empty() {
+                class_init_probs[li as usize] += 1.0;
+            } else {
+                class_init_probs[li as usize] += f64::from(md.weights[i]);
+                sum_weight += f64::from(md.weights[i]);
+            }
         }
-        let sum_weight = md.label.len() as f64;
+        if md.weights.is_empty() {
+            sum_weight = md.label.len() as f64;
+        }
         for p in &mut class_init_probs {
             *p /= sum_weight;
         }
@@ -41,6 +50,7 @@ impl MulticlassSoftmax {
             num_class,
             factor,
             label_int,
+            weights: md.weights.clone(),
             class_init_probs,
         })
     }
@@ -65,12 +75,16 @@ impl Objective for MulticlassSoftmax {
             softmax(&mut rec);
             for (k, &p) in rec.iter().enumerate() {
                 let idx = n * k + i;
-                g[idx] = if self.label_int[i] == k {
-                    (p - 1.0) as f32
+                let gi = if self.label_int[i] == k { p - 1.0 } else { p };
+                let hi = self.factor * p * (1.0 - p);
+                if self.weights.is_empty() {
+                    g[idx] = gi as f32;
+                    h[idx] = hi as f32;
                 } else {
-                    p as f32
-                };
-                h[idx] = (self.factor * p * (1.0 - p)) as f32;
+                    let w = f64::from(self.weights[i]);
+                    g[idx] = (gi * w) as f32;
+                    h[idx] = (hi * w) as f32;
+                }
             }
         }
     }

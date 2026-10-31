@@ -98,7 +98,15 @@ impl Regression {
                      values, so LightGBM rounds them to 1.0 when calculating MAPE."
                 );
             }
-            label_weight = label.iter().map(|l| 1.0f32 / l.abs().max(1.0)).collect();
+            label_weight = if md.weights.is_empty() {
+                label.iter().map(|l| 1.0f32 / l.abs().max(1.0)).collect()
+            } else {
+                label
+                    .iter()
+                    .zip(&md.weights)
+                    .map(|(l, &w)| 1.0f32 / l.abs().max(1.0) * w)
+                    .collect()
+            };
         }
         Ok(Regression {
             kind,
@@ -157,19 +165,85 @@ impl Objective for Regression {
     }
 
     fn get_gradients(&self, score: &[f64], g: &mut [f32], h: &mut [f32]) {
+        if self.weights.is_empty() {
+            self.gradients_unweighted(score, g, h);
+        } else {
+            self.gradients_weighted(score, g, h);
+        }
+    }
+
+    fn boost_from_score(&self, _class_id: usize) -> f64 {
+        let n = self.label.len();
+        let label = |i: usize| self.label[i];
+        let weight = |i: usize| self.weights[i];
+        let weighted = !self.weights.is_empty();
+        match self.kind {
+            Kind::L2 | Kind::Huber | Kind::Fair => self.l2_boost_from_score(),
+            Kind::Poisson | Kind::Gamma | Kind::Tweedie => safe_log(self.l2_boost_from_score()),
+            Kind::L1 | Kind::Quantile => {
+                let alpha = if self.kind == Kind::L1 {
+                    0.5
+                } else {
+                    f64::from(self.alpha_f32)
+                };
+                f64::from(if weighted {
+                    weighted_percentile(n, label, weight, alpha)
+                } else {
+                    percentile(n, label, alpha)
+                })
+            }
+            Kind::Mape => f64::from(weighted_percentile(n, label, |i| self.label_weight[i], 0.5)),
+        }
+    }
+
+    fn is_constant_hessian(&self) -> bool {
+        match self.kind {
+            Kind::Fair | Kind::Poisson | Kind::Gamma | Kind::Tweedie => false,
+            // upstream returns true even with weights (hessians are then the weights).
+            Kind::Mape => true,
+            _ => self.weights.is_empty(),
+        }
+    }
+
+    fn is_renew_tree_output(&self) -> bool {
+        matches!(self.kind, Kind::L1 | Kind::Quantile | Kind::Mape)
+    }
+
+    fn renew_tree_output(&self, output: f64, score: &[f64], indices: &[i32]) -> f64 {
+        let residual = |i: usize| {
+            let r = indices[i] as usize;
+            f64::from(self.label[r]) - score[r]
+        };
+        let n = indices.len();
+        let alpha = match self.kind {
+            Kind::L1 | Kind::Mape => 0.5,
+            Kind::Quantile => f64::from(self.alpha_f32),
+            _ => return output,
+        };
+        if self.kind == Kind::Mape {
+            weighted_percentile(
+                n,
+                residual,
+                |i| self.label_weight[indices[i] as usize],
+                alpha,
+            )
+        } else if self.weights.is_empty() {
+            percentile(n, residual, alpha)
+        } else {
+            weighted_percentile(n, residual, |i| self.weights[indices[i] as usize], alpha)
+        }
+    }
+}
+
+impl Regression {
+    fn gradients_unweighted(&self, score: &[f64], g: &mut [f32], h: &mut [f32]) {
         let n = self.label.len();
         let label = &self.label;
         match self.kind {
-            Kind::L2 if self.weights.is_empty() => {
+            Kind::L2 => {
                 for i in 0..n {
                     g[i] = (score[i] - f64::from(label[i])) as f32;
                     h[i] = 1.0;
-                }
-            }
-            Kind::L2 => {
-                for i in 0..n {
-                    g[i] = ((score[i] - f64::from(label[i])) as f32) * self.weights[i];
-                    h[i] = self.weights[i];
                 }
             }
             Kind::L1 => {
@@ -242,43 +316,91 @@ impl Objective for Regression {
         }
     }
 
-    fn boost_from_score(&self, _class_id: usize) -> f64 {
+    /// The `weights_ != nullptr` branches of upstream's `GetGradients`.
+    fn gradients_weighted(&self, score: &[f64], g: &mut [f32], h: &mut [f32]) {
         let n = self.label.len();
-        let label = |i: usize| self.label[i];
+        let (label, w) = (&self.label, &self.weights);
         match self.kind {
-            Kind::L2 | Kind::Huber | Kind::Fair => self.l2_boost_from_score(),
-            Kind::Poisson | Kind::Gamma | Kind::Tweedie => safe_log(self.l2_boost_from_score()),
-            Kind::L1 => f64::from(percentile(n, label, 0.5)),
-            Kind::Quantile => f64::from(percentile(n, label, f64::from(self.alpha_f32))),
-            Kind::Mape => f64::from(weighted_percentile(n, label, |i| self.label_weight[i], 0.5)),
-        }
-    }
-
-    fn is_constant_hessian(&self) -> bool {
-        match self.kind {
-            Kind::Fair | Kind::Poisson | Kind::Gamma | Kind::Tweedie => false,
-            Kind::Mape => true,
-            _ => self.weights.is_empty(),
-        }
-    }
-
-    fn is_renew_tree_output(&self) -> bool {
-        matches!(self.kind, Kind::L1 | Kind::Quantile | Kind::Mape)
-    }
-
-    fn renew_tree_output(&self, output: f64, score: &[f64], indices: &[i32]) -> f64 {
-        let residual = |i: usize| {
-            let r = indices[i] as usize;
-            f64::from(self.label[r]) - score[r]
-        };
-        let n = indices.len();
-        match self.kind {
-            Kind::L1 => percentile(n, residual, 0.5),
-            Kind::Quantile => percentile(n, residual, f64::from(self.alpha_f32)),
-            Kind::Mape => {
-                weighted_percentile(n, residual, |i| self.label_weight[indices[i] as usize], 0.5)
+            Kind::L2 => {
+                for i in 0..n {
+                    g[i] = ((score[i] - f64::from(label[i])) as f32) * w[i];
+                    h[i] = w[i];
+                }
             }
-            _ => output,
+            Kind::L1 => {
+                for i in 0..n {
+                    g[i] = sign(score[i] - f64::from(label[i])) as f32 * w[i];
+                    h[i] = w[i];
+                }
+            }
+            Kind::Quantile => {
+                let a = self.alpha_f32;
+                for i in 0..n {
+                    let delta = (score[i] - f64::from(label[i])) as f32;
+                    g[i] = if delta >= 0.0 {
+                        (1.0f32 - a) * w[i]
+                    } else {
+                        -a * w[i]
+                    };
+                    h[i] = w[i];
+                }
+            }
+            Kind::Huber => {
+                for i in 0..n {
+                    let diff = score[i] - f64::from(label[i]);
+                    g[i] = if diff.abs() <= self.alpha {
+                        (diff * f64::from(w[i])) as f32
+                    } else {
+                        (f64::from(sign(diff) as f32 * w[i]) * self.alpha) as f32
+                    };
+                    h[i] = w[i];
+                }
+            }
+            Kind::Fair => {
+                let c = self.fair_c;
+                for i in 0..n {
+                    let x = score[i] - f64::from(label[i]);
+                    let wi = f64::from(w[i]);
+                    g[i] = (c * x / (x.abs() + c) * wi) as f32;
+                    h[i] = (c * c / ((x.abs() + c) * (x.abs() + c)) * wi) as f32;
+                }
+            }
+            Kind::Poisson => {
+                let emds = self.max_delta_step.exp();
+                for i in 0..n {
+                    let e = score[i].exp();
+                    let wi = f64::from(w[i]);
+                    g[i] = ((e - f64::from(label[i])) * wi) as f32;
+                    h[i] = (e * emds * wi) as f32;
+                }
+            }
+            Kind::Mape => {
+                for i in 0..n {
+                    let diff = score[i] - f64::from(label[i]);
+                    g[i] = sign(diff) as f32 * self.label_weight[i];
+                    h[i] = w[i];
+                }
+            }
+            Kind::Gamma => {
+                for i in 0..n {
+                    let e = (-score[i]).exp();
+                    let l = f64::from(label[i]);
+                    let wi = f64::from(w[i]);
+                    g[i] = (madd(-l, e, 1.0) * wi) as f32;
+                    h[i] = (l * e * wi) as f32;
+                }
+            }
+            Kind::Tweedie => {
+                let rho = self.rho;
+                for i in 0..n {
+                    let e1 = ((1.0 - rho) * score[i]).exp();
+                    let e2 = ((2.0 - rho) * score[i]).exp();
+                    let nl = f64::from(-label[i]);
+                    let wi = f64::from(w[i]);
+                    g[i] = (madd(nl, e1, e2) * wi) as f32;
+                    h[i] = (madd(nl * (1.0 - rho), e1, (2.0 - rho) * e2) * wi) as f32;
+                }
+            }
         }
     }
 }

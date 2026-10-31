@@ -38,11 +38,6 @@ pub trait Objective: Send + Sync {
 /// followed by `Init(metadata, num_data)`.
 pub fn create_objective(cfg: &Config, md: &Metadata) -> Result<Box<dyn Objective>> {
     let name = cfg.objective.as_str();
-    if !md.weights.is_empty() && name != "regression" {
-        return Err(Error::Unsupported(format!(
-            "training objective={name} with sample weights"
-        )));
-    }
     Ok(match name {
         "regression" | "regression_l1" | "quantile" | "huber" | "fair" | "poisson" | "mape"
         | "gamma" | "tweedie" => Box::new(Regression::new(name, cfg, md)?),
