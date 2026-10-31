@@ -56,11 +56,32 @@ impl DataPartition {
         let cnt = self.leaf_count[leaf];
         self.left_buf.clear();
         self.right_buf.clear();
-        for &idx in &self.indices[begin..begin + cnt] {
-            if rule.goes_left(idx as usize) {
-                self.left_buf.push(idx);
-            } else {
-                self.right_buf.push(idx);
+        let idx = &self.indices[begin..begin + cnt];
+        // Monomorphize the routing loop per bin width (upstream: templated DenseBin).
+        match rule.bin {
+            DenseBin::U4(d) => partition(
+                idx,
+                |i| u32::from((d[i >> 1] >> ((i & 1) << 2)) & 0xf),
+                rule,
+                &mut self.left_buf,
+                &mut self.right_buf,
+            ),
+            DenseBin::U8(d) => partition(
+                idx,
+                |i| u32::from(d[i]),
+                rule,
+                &mut self.left_buf,
+                &mut self.right_buf,
+            ),
+            DenseBin::U16(d) => partition(
+                idx,
+                |i| u32::from(d[i]),
+                rule,
+                &mut self.left_buf,
+                &mut self.right_buf,
+            ),
+            DenseBin::U32(d) => {
+                partition(idx, |i| d[i], rule, &mut self.left_buf, &mut self.right_buf)
             }
         }
         let left_cnt = self.left_buf.len();
@@ -69,6 +90,23 @@ impl DataPartition {
         self.leaf_count[leaf] = left_cnt;
         self.leaf_begin[right_leaf] = begin + left_cnt;
         self.leaf_count[right_leaf] = cnt - left_cnt;
+    }
+}
+
+#[inline(always)]
+fn partition(
+    idx: &[i32],
+    get: impl Fn(usize) -> u32,
+    rule: &SplitRule<'_>,
+    left: &mut Vec<i32>,
+    right: &mut Vec<i32>,
+) {
+    for &i in idx {
+        if matches!(rule.route_bin(get(i as usize)), Route::Left) {
+            left.push(i);
+        } else {
+            right.push(i);
+        }
     }
 }
 
@@ -188,9 +226,8 @@ impl<'a> SplitRule<'a> {
         }
     }
 
-    #[inline]
-    fn route(&self, idx: usize) -> Route {
-        let bin = self.bin.get(idx);
+    #[inline(always)]
+    fn route_bin(&self, bin: u32) -> Route {
         if let Some((bits, min_bin, offset)) = self.cat_bitset {
             if (self.use_min_bin && (bin < min_bin || bin > self.maxb))
                 || (!self.use_min_bin && bin == 0)
@@ -238,7 +275,7 @@ impl<'a> SplitRule<'a> {
 
     #[inline]
     pub fn goes_left(&self, idx: usize) -> bool {
-        matches!(self.route(idx), Route::Left)
+        matches!(self.route_bin(self.bin.get(idx)), Route::Left)
     }
 
     /// Only numerical bins are handled by this rule constructor.

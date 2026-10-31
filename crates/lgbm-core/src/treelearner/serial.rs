@@ -6,6 +6,7 @@ use super::data_partition::{DataPartition, SplitRule};
 use super::feature_histogram::{
     FeatureMeta, SplitParams, find_best_threshold_numerical, leaf_output_root,
 };
+use super::histogram;
 use super::split_info::{K_MIN_SCORE, SplitInfo, argmax_split};
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -108,6 +109,8 @@ pub struct SerialTreeLearner<'a> {
     larger_slot: Option<usize>,
     parent_slot: Option<usize>,
     is_constant_hessian: bool,
+    ordered_gradients: Vec<f32>,
+    ordered_hessians: Vec<f32>,
 }
 
 impl<'a> SerialTreeLearner<'a> {
@@ -123,6 +126,17 @@ impl<'a> SerialTreeLearner<'a> {
             return Err(Error::Unsupported(
                 "histogram_pool_size > 0 (LRU histogram cache)".into(),
             ));
+        }
+        for (gi, g) in l.groups.iter().enumerate() {
+            let GroupData::Single(BinData::Dense(bin)) = &ds.data[gi] else {
+                return Err(Error::Unsupported("sparse single-value group".into()));
+            };
+            let nb = *g.bin_offsets.last().unwrap_or(&0) as usize;
+            if !histogram::validate_bins(bin, ds.num_data(), nb) {
+                return Err(Error::Parse(format!(
+                    "feature group {gi} has a bin outside its range"
+                )));
+            }
         }
         let num_features = l.num_features;
         let mut metas = Vec::with_capacity(num_features);
@@ -180,6 +194,8 @@ impl<'a> SerialTreeLearner<'a> {
             larger_slot: None,
             parent_slot: None,
             is_constant_hessian,
+            ordered_gradients: Vec::with_capacity(ds.num_data()),
+            ordered_hessians: Vec::with_capacity(ds.num_data()),
         })
     }
 
@@ -334,7 +350,6 @@ impl<'a> SerialTreeLearner<'a> {
         hessians: &[f32],
     ) {
         let l = &self.ds.layout;
-        let hist = &mut self.pool.slots[slot];
         let leaf_cnt = leaf
             .map(|lf| self.partition.leaf_count(lf))
             .unwrap_or(self.num_data);
@@ -343,35 +358,41 @@ impl<'a> SerialTreeLearner<'a> {
             _ => None,
         };
         let const_hess = self.is_constant_hessian;
+        // upstream gathers gradients into leaf order once, then streams them per group.
+        let (og, oh): (&[f32], &[f32]) = match indices {
+            Some(ix) => {
+                self.ordered_gradients.clear();
+                self.ordered_gradients
+                    .extend(ix.iter().map(|&i| gradients[i as usize]));
+                if !const_hess {
+                    self.ordered_hessians.clear();
+                    self.ordered_hessians
+                        .extend(ix.iter().map(|&i| hessians[i as usize]));
+                }
+                (
+                    &self.ordered_gradients,
+                    if const_hess {
+                        hessians
+                    } else {
+                        &self.ordered_hessians
+                    },
+                )
+            }
+            None => (&gradients[..leaf_cnt], &hessians[..leaf_cnt]),
+        };
+        let hist = &mut self.pool.slots[slot];
         let mut group_start = 0usize;
         for (gi, g) in l.groups.iter().enumerate() {
             let num_bin = *g.bin_offsets.last().unwrap_or(&0) as usize;
             let fs = l.group_feature_start[gi] as usize;
             let fc = l.group_feature_cnt[gi] as usize;
-            let used = (fs..fs + fc).any(|f| is_feature_used[f]);
-            if used {
+            if (fs..fs + fc).any(|f| is_feature_used[f]) {
                 let out = &mut hist[group_start * 2..(group_start + num_bin) * 2];
                 out.fill(0.0);
                 let GroupData::Single(BinData::Dense(bin)) = &self.ds.data[gi] else {
                     unreachable!("checked in new()")
                 };
-                macro_rules! accumulate {
-                    ($iter:expr) => {
-                        for idx in $iter {
-                            let ti = (bin.get(idx) as usize) << 1;
-                            out[ti] += f64::from(gradients[idx]);
-                            if const_hess {
-                                out[ti + 1] += 1.0;
-                            } else {
-                                out[ti + 1] += f64::from(hessians[idx]);
-                            }
-                        }
-                    };
-                }
-                match indices {
-                    Some(ix) => accumulate!(ix.iter().map(|&i| i as usize)),
-                    None => accumulate!(0..leaf_cnt),
-                }
+                histogram::construct(bin, indices, og, oh, const_hess, out);
                 if const_hess {
                     let h0 = f64::from(hessians[0]);
                     for i in (0..num_bin * 2).step_by(2) {

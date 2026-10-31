@@ -17,7 +17,9 @@ rayon = "1"
 log = "0.4"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny`, not `forbid`: allow-listed hot modules opt in with `#[allow(unsafe_code)]`
+# and a SAFETY comment per block (see AGENTS.md).
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
