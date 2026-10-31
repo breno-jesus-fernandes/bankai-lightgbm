@@ -370,6 +370,33 @@ CASES: dict[str, tuple[Callable[[np.random.Generator], Data], dict[str, Any], in
         {"objective": "regression", "num_leaves": 15, "monotone_constraints": "0,0,0,0,0,0"},
         12,
     ),
+    "rf": (
+        reg,
+        {
+            "objective": "regression",
+            "boosting": "rf",
+            "num_leaves": 15,
+            "bagging_freq": 1,
+            "bagging_fraction": 0.6,
+        },
+        12,
+    ),
+    "rf_feature_fraction": (
+        reg,
+        {"objective": "regression", "boosting": "rf", "num_leaves": 15, "feature_fraction": 0.5},
+        10,
+    ),
+    "rf_binary": (
+        binary,
+        {
+            "objective": "binary",
+            "boosting": "rf",
+            "num_leaves": 15,
+            "bagging_freq": 2,
+            "bagging_fraction": 0.7,
+        },
+        10,
+    ),
     "cat_bagging": (
         categorical,
         {

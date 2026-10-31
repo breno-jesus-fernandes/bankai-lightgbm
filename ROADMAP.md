@@ -63,7 +63,7 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 
 ## P5: Boosting variants + training loop
 - [ ] DART (`drop_rate`, `max_drop`, `skip_drop`, `xgboost_dart_mode`, `uniform_drop`)
-- [ ] RF
+- [x] RF (`boosting=rf`, byte-identical; known gap: a first tree with no split is scored on out-of-bag rows only, matching upstream's non-subset path, the subset path is not modelled)
 - [x] GOSS (`data_sample_strategy=goss`, byte-identical; both the subset and dense regimes)
 - [ ] Early stopping (`early_stopping_round`, `first_metric_only`, `early_stopping_min_delta`)
 - [ ] Continued training (`init_model`), `init_score`
