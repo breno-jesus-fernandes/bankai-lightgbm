@@ -103,9 +103,9 @@ def train(
         for callback in before_callbacks:
             callback(before_env)
         finished = booster.update()
-        evaluation_result_list = booster.eval_valid()
+        evaluation_result_list = booster.eval_valid() or None
         booster.best_score = {}
-        for data_name, metric_name, value, _ in evaluation_result_list:
+        for data_name, metric_name, value, _ in evaluation_result_list or []:
             booster.best_score.setdefault(data_name, {})[metric_name] = value
         after_env = CallbackEnv(
             booster, params, iteration, 0, num_boost_round, evaluation_result_list

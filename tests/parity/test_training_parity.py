@@ -7,6 +7,7 @@ and with ``lightgbm.train`` (same data, params, weights, groups and categoricals
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -164,6 +165,52 @@ def test_early_stopping_callback_matches_upstream() -> None:
     )
     assert automatic.best_iteration == theirs.best_iteration
     assert automatic.current_iteration() == theirs.current_iteration()
+
+
+def test_record_and_log_evaluation_callbacks(caplog: Any) -> None:
+    rng = np.random.default_rng(32)
+    x_train = rng.normal(size=(50, 2))
+    y_train = x_train[:, 0] - x_train[:, 1]
+    x_valid = rng.normal(size=(30, 2))
+    y_valid = x_valid[:, 0] - x_valid[:, 1]
+    params: dict[str, Any] = {
+        "objective": "regression",
+        "metric": "l2",
+        "verbosity": -1,
+        "num_leaves": 5,
+        "min_data_in_leaf": 2,
+        "min_data_in_bin": 1,
+        "max_bin": 15,
+        "seed": 32,
+        "num_threads": 1,
+    }
+    recorded: dict[str, dict[str, list[float]]] = {}
+    caplog.set_level(logging.INFO, logger="bankai_lightgbm")
+    ours = lgb.train(
+        dict(params),
+        lgb.Dataset(x_train, label=y_train, params=dict(params)),
+        num_boost_round=3,
+        valid_sets=[lgb.Dataset(x_valid, label=y_valid, params=dict(params))],
+        valid_names=["valid"],
+        callbacks=[lgb.record_evaluation(recorded), lgb.log_evaluation(period=1)],
+    )
+    expected_results: dict[str, dict[str, list[float]]] = {}
+    lightgbm.train(
+        dict(params),
+        lightgbm.Dataset(x_train, label=y_train, params=dict(params)),
+        num_boost_round=3,
+        valid_sets=[lightgbm.Dataset(x_valid, label=y_valid, params=dict(params))],
+        valid_names=["valid"],
+        callbacks=[
+            lightgbm.record_evaluation(expected_results),
+            lightgbm.log_evaluation(period=1),
+        ],
+    )
+
+    assert recorded.keys() == expected_results.keys()
+    np.testing.assert_allclose(recorded["valid"]["l2"], expected_results["valid"]["l2"])
+    assert "[1]\tvalid's l2:" in caplog.text
+    assert ours.current_iteration() == 3
 
 
 def test_train_rejects_unimplemented_options() -> None:

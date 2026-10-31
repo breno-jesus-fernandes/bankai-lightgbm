@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -102,3 +103,57 @@ def early_stopping(
     if min_delta < 0.0:
         raise ValueError("min_delta should be non-negative")
     return _EarlyStoppingCallback(stopping_rounds, first_metric_only, verbose, min_delta)
+
+
+class _LogEvaluationCallback:
+    order = 10
+    before_iteration = False
+
+    def __init__(self, period: int, show_stdv: bool) -> None:
+        self.period = period
+        self.show_stdv = show_stdv
+
+    def __call__(self, env: CallbackEnv) -> None:
+        results = env.evaluation_result_list
+        if self.period <= 0 or not results or (env.iteration + 1) % self.period != 0:
+            return
+        formatted = "\t".join(
+            f"{data_name}'s {metric_name}: {value:g}"
+            for data_name, metric_name, value, _ in results
+        )
+        logging.getLogger("bankai_lightgbm").info("[%d]\t%s", env.iteration + 1, formatted)
+
+
+def log_evaluation(period: int = 1, show_stdv: bool = True) -> _LogEvaluationCallback:
+    """Log validation metrics every ``period`` iterations (zero disables logging)."""
+    return _LogEvaluationCallback(period, show_stdv)
+
+
+class _RecordEvaluationCallback:
+    order = 20
+    before_iteration = False
+
+    def __init__(self, eval_result: dict[str, dict[str, list[float]]]) -> None:
+        if not isinstance(eval_result, dict):
+            raise TypeError("eval_result should be a dictionary")
+        self.eval_result = eval_result
+
+    def before_training(self, model: Booster) -> Booster:
+        self.eval_result.clear()
+        return model
+
+    def __call__(self, env: CallbackEnv) -> None:
+        if not env.evaluation_result_list:
+            raise RuntimeError(
+                "record_evaluation() callback enabled but no evaluation results were found"
+            )
+        for data_name, metric_name, value, _ in env.evaluation_result_list:
+            metrics = self.eval_result.setdefault(data_name, {})
+            metrics.setdefault(metric_name, []).append(value)
+
+
+def record_evaluation(
+    eval_result: dict[str, dict[str, list[float]]],
+) -> _RecordEvaluationCallback:
+    """Record each iteration's validation metrics in ``eval_result``."""
+    return _RecordEvaluationCallback(eval_result)
