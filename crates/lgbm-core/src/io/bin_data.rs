@@ -29,6 +29,16 @@ impl DenseBin {
         }
     }
 
+    /// Number of addressable rows (a 4-bit column may include one padding row).
+    pub fn num_rows(&self) -> usize {
+        match self {
+            DenseBin::U4(d) => d.len() * 2,
+            DenseBin::U8(d) => d.len(),
+            DenseBin::U16(d) => d.len(),
+            DenseBin::U32(d) => d.len(),
+        }
+    }
+
     #[inline]
     pub fn get(&self, idx: usize) -> u32 {
         match self {

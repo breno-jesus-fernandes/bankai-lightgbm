@@ -101,6 +101,8 @@ pub struct SerialTreeLearner<'a> {
     /// Length in bins of each feature's histogram slice (`num_bin - offset`).
     feature_hist_len: Vec<usize>,
     pool: HistogramPool,
+    /// One verified dense column per feature group (see `histogram::CheckedBins`).
+    checked_bins: Vec<histogram::CheckedBins<'a>>,
     pub partition: DataPartition,
     best_split_per_leaf: Vec<SplitInfo>,
     smaller: LeafSplits,
@@ -127,16 +129,18 @@ impl<'a> SerialTreeLearner<'a> {
                 "histogram_pool_size > 0 (LRU histogram cache)".into(),
             ));
         }
+        let mut checked_bins = Vec::with_capacity(l.groups.len());
         for (gi, g) in l.groups.iter().enumerate() {
             let GroupData::Single(BinData::Dense(bin)) = &ds.data[gi] else {
                 return Err(Error::Unsupported("sparse single-value group".into()));
             };
             let nb = *g.bin_offsets.last().unwrap_or(&0) as usize;
-            if !histogram::validate_bins(bin, ds.num_data(), nb) {
+            let Some(checked) = histogram::CheckedBins::new(bin, ds.num_data(), nb) else {
                 return Err(Error::Parse(format!(
                     "feature group {gi} has a bin outside its range"
                 )));
-            }
+            };
+            checked_bins.push(checked);
         }
         let num_features = l.num_features;
         let mut metas = Vec::with_capacity(num_features);
@@ -186,6 +190,7 @@ impl<'a> SerialTreeLearner<'a> {
             feature_hist_offsets,
             feature_hist_len,
             pool: HistogramPool::new(num_leaves, hist_cur_num_bin.max(1), num_features),
+            checked_bins,
             partition: DataPartition::new(ds.num_data(), num_leaves),
             best_split_per_leaf: vec![SplitInfo::default(); num_leaves],
             smaller: LeafSplits::empty(),
@@ -380,6 +385,11 @@ impl<'a> SerialTreeLearner<'a> {
             }
             None => (&gradients[..leaf_cnt], &hessians[..leaf_cnt]),
         };
+        let rows = indices.and_then(|ix| histogram::CheckedRows::new(ix, self.num_data));
+        assert!(
+            indices.is_none() || rows.is_some(),
+            "partition produced an invalid row index"
+        );
         let hist = &mut self.pool.slots[slot];
         let mut group_start = 0usize;
         for (gi, g) in l.groups.iter().enumerate() {
@@ -389,10 +399,14 @@ impl<'a> SerialTreeLearner<'a> {
             if (fs..fs + fc).any(|f| is_feature_used[f]) {
                 let out = &mut hist[group_start * 2..(group_start + num_bin) * 2];
                 out.fill(0.0);
-                let GroupData::Single(BinData::Dense(bin)) = &self.ds.data[gi] else {
-                    unreachable!("checked in new()")
-                };
-                histogram::construct(bin, indices, og, oh, const_hess, out);
+                histogram::construct(
+                    &self.checked_bins[gi],
+                    rows.as_ref(),
+                    og,
+                    oh,
+                    const_hess,
+                    out,
+                );
                 if const_hess {
                     let h0 = f64::from(hessians[0]);
                     for i in (0..num_bin * 2).step_by(2) {
