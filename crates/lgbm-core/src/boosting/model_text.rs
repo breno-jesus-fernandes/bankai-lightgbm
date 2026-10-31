@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 use crate::objective::LoadedObjective;
 use crate::tree::Tree;
 use crate::utils::common::{parse_array_any, parse_scalar};
+use crate::utils::format::join_display;
 
 /// Cursor over model text that mimics upstream's `GetLine`/`SkipNewLine`.
 struct Cursor<'a> {
@@ -51,6 +52,111 @@ impl<'a> Cursor<'a> {
 }
 
 impl Gbdt {
+    /// upstream: `GBDT::FeatureImportance`. Note upstream ignores `start_iteration` here
+    /// and counts trees from the first one up to `num_iteration`.
+    pub fn feature_importance(&self, num_iteration: i32, importance_type: i32) -> Result<Vec<f64>> {
+        let mut num_used_model = self.models.len();
+        if num_iteration > 0 {
+            num_used_model = num_used_model.min(num_iteration as usize * self.num_tree_per_iteration);
+        }
+        let mut imp = vec![0.0; self.num_features()];
+        for t in &self.models[..num_used_model] {
+            for i in 0..t.num_leaves.saturating_sub(1) {
+                if t.split_gain[i] > 0.0 {
+                    let f = t.split_feature[i] as usize;
+                    match importance_type {
+                        0 => imp[f] += 1.0,
+                        1 => imp[f] += f64::from(t.split_gain[i]),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if !(0..=1).contains(&importance_type) {
+            return Err(Error::InvalidParameter(
+                "Unknown importance type: only support split=0 and gain=1".into(),
+            ));
+        }
+        Ok(imp)
+    }
+
+    /// upstream: `GBDT::SaveModelToString`. The Python layer appends the
+    /// `pandas_categorical` trailer, as upstream's Python package does.
+    pub fn save_model_to_string(
+        &self,
+        start_iteration: i32,
+        num_iteration: i32,
+        importance_type: i32,
+    ) -> Result<String> {
+        use std::fmt::Write;
+        let ntpi = self.num_tree_per_iteration;
+        let mut s = String::with_capacity(4096 + self.models.len() * 2048);
+        let _ = writeln!(s, "tree");
+        let _ = writeln!(s, "version=v4");
+        let _ = writeln!(s, "num_class={}", self.num_class);
+        let _ = writeln!(s, "num_tree_per_iteration={ntpi}");
+        let _ = writeln!(s, "label_index={}", self.label_idx);
+        let _ = writeln!(s, "max_feature_idx={}", self.max_feature_idx);
+        if let Some(o) = &self.objective {
+            let _ = writeln!(s, "objective={}", o.to_model_string());
+        }
+        if self.average_output {
+            let _ = writeln!(s, "average_output");
+        }
+        let _ = writeln!(s, "feature_names={}", self.feature_names.join(" "));
+        if !self.monotone_constraints.is_empty() {
+            let _ = writeln!(s, "monotone_constraints={}", join_display(&self.monotone_constraints));
+        }
+        let _ = writeln!(s, "feature_infos={}", self.feature_infos.join(" "));
+
+        let total_iteration = (self.models.len() / ntpi) as i64;
+        let start = i64::from(start_iteration).clamp(0, total_iteration) as usize;
+        let mut num_used_model = self.models.len();
+        if num_iteration > 0 {
+            let end = start + num_iteration as usize;
+            num_used_model = num_used_model.min(end * ntpi);
+        }
+        let start_model = (start * ntpi).min(num_used_model);
+        let tree_strs: Vec<String> = self.models[start_model..num_used_model]
+            .par_iter()
+            .enumerate()
+            .map(|(idx, t)| format!("Tree={idx}\n{}\n", t.to_model_string()))
+            .collect();
+        let sizes: Vec<usize> = tree_strs.iter().map(String::len).collect();
+        let _ = writeln!(s, "tree_sizes={}", join_display(&sizes));
+        s.push('\n');
+        for t in &tree_strs {
+            s.push_str(t);
+        }
+        s.push_str("end of trees\n");
+
+        let imp = self.feature_importance(num_iteration, importance_type)?;
+        let mut pairs: Vec<(usize, &str)> = imp
+            .iter()
+            .zip(&self.feature_names)
+            .filter_map(|(v, n)| {
+                let iv = *v as usize;
+                (iv > 0).then_some((iv, n.as_str()))
+            })
+            .collect();
+        pairs.sort_by(|a, b| b.0.cmp(&a.0)); // stable, descending
+        s.push_str("\nfeature_importances:\n");
+        for (v, n) in pairs {
+            let _ = writeln!(s, "{n}={v}");
+        }
+        if !self.loaded_parameter.is_empty() {
+            s.push_str("\nparameters:\n");
+            s.push_str(&self.loaded_parameter);
+            s.push_str("\nend of parameters\n");
+        }
+        if !self.parser_config.is_empty() {
+            s.push_str("\nparser:\n");
+            s.push_str(&self.parser_config);
+            s.push_str("\nend of parser\n");
+        }
+        Ok(s)
+    }
+
     pub fn from_model_file(path: impl AsRef<Path>) -> Result<Gbdt> {
         let text = std::fs::read_to_string(path.as_ref())?;
         Gbdt::from_model_string(&text)
@@ -229,7 +335,7 @@ impl Gbdt {
                 in_params = true;
             } else if line == "end of parameters" {
                 break;
-            } else if in_params {
+            } else if in_params && !line.is_empty() {
                 loaded_parameter.push_str(line);
                 loaded_parameter.push('\n');
                 if let Some(rest) = line.strip_prefix("[linear_tree: ") {
@@ -247,7 +353,7 @@ impl Gbdt {
                 in_parser = true;
             } else if line == "end of parser" {
                 in_parser = false;
-            } else if in_parser {
+            } else if in_parser && !line.is_empty() {
                 parser_config.push_str(line);
                 parser_config.push('\n');
             } else if let Some(v) = line.strip_prefix("pandas_categorical:") {

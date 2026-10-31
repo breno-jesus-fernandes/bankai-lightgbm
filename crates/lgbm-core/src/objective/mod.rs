@@ -54,8 +54,10 @@ pub struct LoadedObjective {
     pub name: String,
     pub transform: OutputTransform,
     pub need_accurate_prediction: bool,
-    /// The full serialized string (`ToString()`), kept for round-tripping.
+    /// The full serialized string as loaded.
     pub raw: String,
+    pub sqrt: bool,
+    pub num_class: i32,
 }
 
 impl LoadedObjective {
@@ -80,6 +82,10 @@ impl LoadedObjective {
                 )));
             }
             Ok(v)
+        };
+        let num_class: i32 = match kv("num_class") {
+            Some(v) => parse_scalar(v)?,
+            None => 0,
         };
         let transform = match ty.as_str() {
             "regression" | "regression_l1" | "quantile" | "fair" | "mape" => {
@@ -119,12 +125,34 @@ impl LoadedObjective {
             ty.as_str(),
             "binary" | "multiclass" | "multiclassova" | "lambdarank" | "rank_xendcg"
         );
+        // Huber disables `sqrt` in its constructor, so it never round-trips.
+        let sqrt = sqrt && ty != "huber";
         Ok(Some(LoadedObjective {
             name: ty,
             transform,
             need_accurate_prediction,
             raw: s.to_string(),
+            sqrt,
+            num_class,
         }))
+    }
+
+    /// upstream: `ObjectiveFunction::ToString` for each objective.
+    pub fn to_model_string(&self) -> String {
+        use crate::utils::format::format_g;
+        match (&self.transform, self.name.as_str()) {
+            (OutputTransform::Sigmoid(s), "binary") => {
+                format!("binary sigmoid:{}", format_g(*s, 6))
+            }
+            (_, "multiclass") => format!("multiclass num_class:{}", self.num_class),
+            (OutputTransform::SigmoidEach(s), "multiclassova") => format!(
+                "multiclassova num_class:{} sigmoid:{}",
+                self.num_class,
+                format_g(*s, 6)
+            ),
+            (_, name) if self.sqrt => format!("{name} sqrt"),
+            (_, name) => name.to_string(),
+        }
     }
 
     /// upstream: `ObjectiveFunction::ConvertOutput`, applied in place.
@@ -182,6 +210,26 @@ mod tests {
     #[test]
     fn custom_has_no_transform() {
         assert!(LoadedObjective::from_model_str("custom").unwrap().is_none());
+    }
+
+    #[test]
+    fn to_model_string_matches_upstream_tostring() {
+        for s in [
+            "binary sigmoid:1",
+            "binary sigmoid:0.5",
+            "multiclass num_class:3",
+            "multiclassova num_class:3 sigmoid:1",
+            "regression sqrt",
+            "regression",
+            "lambdarank",
+            "cross_entropy",
+            "tweedie",
+        ] {
+            let o = LoadedObjective::from_model_str(s).unwrap().unwrap();
+            assert_eq!(o.to_model_string(), s);
+        }
+        let o = LoadedObjective::from_model_str("huber sqrt").unwrap().unwrap();
+        assert_eq!(o.to_model_string(), "huber");
     }
 
     #[test]

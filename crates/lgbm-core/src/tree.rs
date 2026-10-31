@@ -6,7 +6,10 @@ use std::collections::HashMap;
 
 use crate::error::{Error, Result};
 use crate::meta::{K_ZERO_THRESHOLD, MissingType};
-use crate::utils::common::{ParseNum, find_in_bitset, madd, parse_array, parse_scalar};
+use crate::utils::common::{
+    ParseNum, atof_legacy, find_in_bitset, madd, parse_array, parse_array_fast_f64, parse_scalar,
+};
+use crate::utils::format::{format_g, join_display, join_g, join_g17};
 
 pub const K_CATEGORICAL_MASK: i8 = 1;
 pub const K_DEFAULT_LEFT_MASK: i8 = 2;
@@ -106,7 +109,8 @@ impl Tree {
         let num_cat: usize = parse_scalar(req("num_cat")?)?;
         let leaf_value: Vec<f64> = parse_array(req("leaf_value")?, num_leaves)?;
         let shrinkage = match kv.get("shrinkage") {
-            Some(v) => parse_scalar(v)?,
+            Some(v) => atof_legacy(v)
+                .ok_or_else(|| Error::Parse(format!("cannot parse shrinkage {v:?}")))?,
             None => 1.0,
         };
         let is_linear = match kv.get("is_linear") {
@@ -148,10 +152,13 @@ impl Tree {
         tree.right_child = parse_array(req("right_child")?, n_int)?;
         tree.split_feature = parse_array(req("split_feature")?, n_int)?;
         tree.threshold = parse_array(req("threshold")?, n_int)?;
-        tree.split_gain = opt_array(&kv, "split_gain", n_int)?;
+        tree.split_gain = match kv.get("split_gain") {
+            Some(v) => parse_array_fast_f64(v, n_int)?.into_iter().map(|x| x as f32).collect(),
+            None => vec![0.0; n_int],
+        };
         tree.internal_count = opt_array(&kv, "internal_count", n_int)?;
-        tree.internal_value = opt_array(&kv, "internal_value", n_int)?;
-        tree.internal_weight = opt_array(&kv, "internal_weight", n_int)?;
+        tree.internal_value = opt_fast_f64(&kv, "internal_value", n_int)?;
+        tree.internal_weight = opt_fast_f64(&kv, "internal_weight", n_int)?;
         tree.leaf_weight = opt_array(&kv, "leaf_weight", num_leaves)?;
         tree.decision_type = opt_array(&kv, "decision_type", n_int)?;
 
@@ -228,6 +235,60 @@ impl Tree {
             }
         }
         Ok(())
+    }
+
+    /// upstream: `Tree::ToString`
+    pub fn to_model_string(&self) -> String {
+        use std::fmt::Write;
+        let n_int = self.num_leaves.saturating_sub(1);
+        let gains: Vec<String> =
+            self.split_gain[..n_int.min(self.split_gain.len())].iter().map(|g| format_g(f64::from(*g), 6)).collect();
+        let mut s = String::with_capacity(64 * self.num_leaves + 512);
+        let _ = writeln!(s, "num_leaves={}", self.num_leaves);
+        let _ = writeln!(s, "num_cat={}", self.num_cat);
+        let _ = writeln!(s, "split_feature={}", join_display(head(&self.split_feature, n_int)));
+        let _ = writeln!(s, "split_gain={}", gains.join(" "));
+        let _ = writeln!(s, "threshold={}", join_g17(head(&self.threshold, n_int)));
+        let _ = writeln!(s, "decision_type={}", join_display(head(&self.decision_type, n_int)));
+        let _ = writeln!(s, "left_child={}", join_display(head(&self.left_child, n_int)));
+        let _ = writeln!(s, "right_child={}", join_display(head(&self.right_child, n_int)));
+        let _ = writeln!(s, "leaf_value={}", join_g17(&self.leaf_value));
+        let _ = writeln!(s, "leaf_weight={}", join_g17(&self.leaf_weight));
+        let _ = writeln!(s, "leaf_count={}", join_display(&self.leaf_count));
+        let _ = writeln!(s, "internal_value={}", join_g(head(&self.internal_value, n_int)));
+        let _ = writeln!(s, "internal_weight={}", join_g(head(&self.internal_weight, n_int)));
+        let _ = writeln!(s, "internal_count={}", join_display(head(&self.internal_count, n_int)));
+        if self.num_cat > 0 {
+            let _ = writeln!(s, "cat_boundaries={}", join_display(&self.cat_boundaries));
+            let _ = writeln!(s, "cat_threshold={}", join_display(&self.cat_threshold));
+        }
+        let _ = writeln!(s, "is_linear={}", i32::from(self.is_linear));
+        if self.is_linear {
+            let _ = writeln!(s, "leaf_const={}", join_g17(&self.leaf_const));
+            let num_feat: Vec<usize> = self.leaf_coeff.iter().map(Vec::len).collect();
+            let _ = writeln!(s, "num_features={}", join_display(&num_feat));
+            s.push_str("leaf_features=");
+            for (i, f) in self.leaf_features.iter().enumerate() {
+                if num_feat[i] > 0 {
+                    s.push_str(&join_display(f));
+                    s.push(' ');
+                }
+                s.push(' ');
+            }
+            s.push('\n');
+            s.push_str("leaf_coeff=");
+            for (i, c) in self.leaf_coeff.iter().enumerate() {
+                if num_feat[i] > 0 {
+                    s.push_str(&join_g17(c));
+                    s.push(' ');
+                }
+                s.push(' ');
+            }
+            s.push('\n');
+        }
+        let _ = writeln!(s, "shrinkage={}", format_g(self.shrinkage, 6));
+        s.push('\n');
+        s
     }
 
     #[inline]
@@ -513,6 +574,17 @@ fn opt_array<T: ParseNum + Default + Clone>(
     match kv.get(key) {
         Some(v) => parse_array(v, n),
         None => Ok(vec![T::default(); n]),
+    }
+}
+
+fn head<T>(v: &[T], n: usize) -> &[T] {
+    &v[..n.min(v.len())]
+}
+
+fn opt_fast_f64(kv: &HashMap<&str, &str>, key: &str, n: usize) -> Result<Vec<f64>> {
+    match kv.get(key) {
+        Some(v) => parse_array_fast_f64(v, n),
+        None => Ok(vec![0.0; n]),
     }
 }
 
