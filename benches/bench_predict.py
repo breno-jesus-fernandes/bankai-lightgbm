@@ -14,6 +14,7 @@ from typing import Any
 
 import lightgbm
 import numpy as np
+import scipy.sparse
 
 import bankai_lightgbm as bk
 
@@ -44,6 +45,10 @@ def main() -> int:
     model_str = upstream.model_to_string()
     ours = bk.Booster(model_str=model_str)
     xt = rng.normal(size=(args.rows, 20))
+    xs = xt.copy()
+    xs[rng.random(xs.shape) < 0.8] = 0.0
+    csr = scipy.sparse.csr_matrix(xs)
+    csc = csr.tocsc()
 
     cases: list[tuple[str, Callable[[], Any], Callable[[], Any]]] = [
         ("predict", lambda: upstream.predict(xt), lambda: ours.predict(xt)),
@@ -61,6 +66,18 @@ def main() -> int:
             "pred_contrib 5k",
             lambda: upstream.predict(xt[:5000], pred_contrib=True),
             lambda: ours.predict(xt[:5000], pred_contrib=True),
+        ),
+        ("predict csr", lambda: upstream.predict(csr), lambda: ours.predict(csr)),
+        (
+            "predict csr 1 thr",
+            lambda: upstream.predict(csr, num_threads=1),
+            lambda: ours.predict(csr, num_threads=1),
+        ),
+        ("predict csc", lambda: upstream.predict(csc), lambda: ours.predict(csc)),
+        (
+            "contrib csr 5k",
+            lambda: upstream.predict(csr[:5000], pred_contrib=True),
+            lambda: ours.predict(csr[:5000], pred_contrib=True),
         ),
         (
             "load model",

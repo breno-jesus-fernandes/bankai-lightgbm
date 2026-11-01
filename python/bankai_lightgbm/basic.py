@@ -171,6 +171,40 @@ def _is_scipy_sparse(data: Any) -> bool:
     return bool(scipy.sparse.issparse(data))
 
 
+# numpy array, or a scipy.sparse matrix / list of them for pred_contrib on sparse input
+# (upstream: ``_LGBM_PredictReturnType``; scipy is untyped here, hence ``Any``).
+_PredictReturnType = npt.NDArray[Any] | Any
+
+
+class _DummyLogger:
+    """upstream's default logger: ``info`` prints, ``warning`` emits a ``UserWarning``."""
+
+    def info(self, msg: str) -> None:
+        print(msg)
+
+    def warning(self, msg: str) -> None:
+        warnings.warn(msg, stacklevel=3)
+
+
+_LOGGER: Any = _DummyLogger()
+
+
+def _log_warning(msg: str) -> None:
+    _LOGGER.warning(msg)
+
+
+def _c_float_dtype_check(data: npt.NDArray[Any]) -> None:
+    """Accept float32/float64 values like upstream's ``_c_float_array``."""
+    if data.dtype not in (np.float32, np.float64):
+        raise TypeError(f"Expected np.float32 or np.float64, met type({data.dtype})")
+
+
+def _c_int_dtype_check(data: npt.NDArray[Any]) -> None:
+    """Accept int32/int64 offsets like upstream's ``_c_int_array``."""
+    if data.dtype not in (np.int32, np.int64):
+        raise TypeError(f"Expected np.int32 or np.int64, met type({data.dtype})")
+
+
 class Dataset:
     """Training data. API-compatible with ``lightgbm.Dataset`` for dense inputs.
 
@@ -779,12 +813,36 @@ class Booster:
         data_has_header: bool = False,
         validate_features: bool = False,
         **kwargs: Any,
-    ) -> npt.NDArray[Any]:
-        """Make a prediction. Same semantics and output shapes as ``lightgbm.Booster.predict``."""
+    ) -> _PredictReturnType:
+        """Make a prediction. Same semantics and output shapes as ``lightgbm.Booster.predict``.
+
+        ``pred_contrib`` on a ``scipy.sparse`` CSR/CSC input returns a sparse matrix of the
+        same format (a list of them for multiclass), like upstream.
+        """
         if num_iteration is None:
             num_iteration = self.best_iteration if start_iteration <= 0 else -1
         if isinstance(data, (str, Path)):
             raise NotImplementedError("Predicting from a file is not implemented yet (roadmap P2)")
+        p = _resolve_predict_params({**self.params, **kwargs})
+        predict_type = _C_API_PREDICT_NORMAL
+        if raw_score:
+            predict_type = _C_API_PREDICT_RAW_SCORE
+        if pred_leaf:
+            predict_type = _C_API_PREDICT_LEAF_INDEX
+        if pred_contrib:
+            predict_type = _C_API_PREDICT_CONTRIB
+        native_kwargs: dict[str, Any] = {
+            "pred_early_stop": _to_bool(p.get("pred_early_stop", False)),
+            "pred_early_stop_freq": int(p.get("pred_early_stop_freq", 10)),
+            "pred_early_stop_margin": float(p.get("pred_early_stop_margin", 10.0)),
+            "num_threads": int(p.get("num_threads", 0)),
+            "disable_shape_check": _to_bool(p.get("predict_disable_shape_check", False)),
+        }
+        sparse = self._as_sparse(data)
+        if sparse is not None:
+            return self._predict_sparse(
+                sparse, predict_type, int(start_iteration), int(num_iteration), native_kwargs
+            )
         if _is_pandas_df(data):
             if validate_features:
                 names = [str(c) for c in data.columns]
@@ -798,26 +856,8 @@ class Booster:
         if mat.ndim != 2:
             raise ValueError("Input numpy.ndarray or list must be 2 dimensional")
         mat = np.ascontiguousarray(mat, dtype=np.float64)
-
-        predict_type = _C_API_PREDICT_NORMAL
-        if raw_score:
-            predict_type = _C_API_PREDICT_RAW_SCORE
-        if pred_leaf:
-            predict_type = _C_API_PREDICT_LEAF_INDEX
-        if pred_contrib:
-            predict_type = _C_API_PREDICT_CONTRIB
-
-        p = _resolve_predict_params({**self.params, **kwargs})
         preds = self._native().predict_dense(
-            mat,
-            predict_type,
-            int(start_iteration),
-            int(num_iteration),
-            pred_early_stop=_to_bool(p.get("pred_early_stop", False)),
-            pred_early_stop_freq=int(p.get("pred_early_stop_freq", 10)),
-            pred_early_stop_margin=float(p.get("pred_early_stop_margin", 10.0)),
-            num_threads=int(p.get("num_threads", 0)),
-            disable_shape_check=_to_bool(p.get("predict_disable_shape_check", False)),
+            mat, predict_type, int(start_iteration), int(num_iteration), **native_kwargs
         )
         nrow = mat.shape[0]
         if pred_leaf:
@@ -827,11 +867,82 @@ class Booster:
         return preds.reshape(nrow)
 
     @staticmethod
+    def _as_sparse(data: Any) -> Any:
+        """The CSR/CSC matrix to predict, or ``None`` for dense inputs.
+
+        Mirrors upstream's ``_InnerPredictor.predict`` dispatch: ``csr_matrix`` and
+        ``csc_matrix`` are used as-is; any other input that is not a numpy array, pandas
+        DataFrame or list (other scipy formats, ``sparray`` types, ...) is converted with
+        ``scipy.sparse.csr_matrix`` after logging a warning.
+        """
+        if isinstance(data, (np.ndarray, list)) or _is_pandas_df(data):
+            return None
+        try:
+            import scipy.sparse
+        except ImportError:  # pragma: no cover
+            return None
+        if isinstance(data, (scipy.sparse.csr_matrix, scipy.sparse.csc_matrix)):
+            return data
+        try:
+            _log_warning("Converting data to scipy sparse matrix.")
+            return scipy.sparse.csr_matrix(data)
+        except BaseException as err:
+            raise TypeError(f"Cannot predict data for type {type(data).__name__}") from err
+
+    def _predict_sparse(
+        self,
+        cs: Any,
+        predict_type: int,
+        start_iteration: int,
+        num_iteration: int,
+        native_kwargs: dict[str, Any],
+    ) -> Any:
+        """Predict a ``csr_matrix``/``csc_matrix`` natively, row by row.
+
+        ``pred_contrib`` returns a sparse matrix of the input's format with one extra
+        (bias) column, or a list of them for multiclass, with the input's float dtype,
+        like upstream's ``LGBM_BoosterPredictSparseOutput``.
+        """
+        import scipy.sparse
+
+        is_csc = isinstance(cs, scipy.sparse.csc_matrix)
+        _c_int_dtype_check(cs.indptr)
+        _c_float_dtype_check(cs.data)
+        nrow, ncol = cs.shape
+        out = self._native().predict_sparse(
+            np.ascontiguousarray(cs.indptr, dtype=np.int64),
+            np.ascontiguousarray(cs.indices, dtype=np.int32),
+            np.ascontiguousarray(cs.data, dtype=np.float64),
+            int(nrow),
+            int(ncol),
+            is_csc,
+            predict_type,
+            start_iteration,
+            num_iteration,
+            **native_kwargs,
+        )
+        if predict_type == _C_API_PREDICT_LEAF_INDEX:
+            return out.astype(np.int32)
+        if predict_type != _C_API_PREDICT_CONTRIB:
+            return out if out.shape[1] != 1 else out.reshape(nrow)
+        make = scipy.sparse.csc_matrix if is_csc else scipy.sparse.csr_matrix
+        mats = [
+            make(
+                (
+                    data.astype(cs.data.dtype, copy=False),
+                    indices,
+                    indptr.astype(cs.indptr.dtype, copy=False),
+                ),
+                shape=(nrow, ncol + 1),
+            )
+            for indptr, indices, data in out
+        ]
+        return mats[0] if len(mats) == 1 else mats
+
+    @staticmethod
     def _to_dense(data: Any) -> npt.NDArray[Any]:
         if isinstance(data, np.ndarray):
             return data
-        if _is_scipy_sparse(data):
-            raise NotImplementedError("Sparse input is not implemented yet (roadmap P6)")
         if isinstance(data, list):
             try:
                 return np.array(data)

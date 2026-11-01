@@ -9,7 +9,7 @@ use lgbm_core::config::Config;
 use lgbm_core::io::dataset::Dataset;
 use lgbm_core::metric::create_metric;
 use lgbm_core::predictor::{PredictConfig, PredictKind, Predictor};
-use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
+use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
@@ -497,33 +497,16 @@ impl NativeBooster {
     ) -> PyResult<Bound<'py, PyArray2<f64>>> {
         let shape = data.shape();
         let (nrow, ncol) = (shape[0], shape[1]);
-        if !disable_shape_check && ncol != self.model.num_features() {
-            return Err(LightGBMError::new_err(format!(
-                "The number of features in data ({ncol}) is not the same as it was in training data ({}).\n\
-                 You can set ``predict_disable_shape_check=true`` to discard this error, but please be aware what you are doing.",
-                self.model.num_features()
-            )));
-        }
-        let kind = match kind {
-            0 => PredictKind::Normal,
-            1 => PredictKind::RawScore,
-            2 => PredictKind::LeafIndex,
-            3 => PredictKind::Contrib,
-            other => {
-                return Err(LightGBMError::new_err(format!(
-                    "unknown predict type {other}"
-                )));
-            }
-        };
-        let cfg = PredictConfig {
+        self.check_num_features(ncol, disable_shape_check)?;
+        let cfg = predict_config(
             kind,
             start_iteration,
             num_iteration,
             pred_early_stop,
             pred_early_stop_freq,
             pred_early_stop_margin,
-            num_threads: usize::try_from(num_threads).unwrap_or(0),
-        };
+            num_threads,
+        )?;
         let slice = data
             .as_slice()
             .map_err(|e| LightGBMError::new_err(e.to_string()))?;
@@ -538,6 +521,138 @@ impl NativeBooster {
         let arr = numpy::PyArray1::from_vec(py, out);
         arr.reshape([nrow, width])
     }
+
+    /// Predict a scipy CSR (`is_csc=false`) or CSC (`is_csc=true`) matrix of shape
+    /// `nrow x ncol` given its `indptr` (int64), `indices` (int32) and `data` (float64).
+    ///
+    /// Returns a `nrow x num_pred_one_row` float64 array, except for `kind == 3` (contrib),
+    /// which returns one `(indptr, indices, data)` triple per class in the input's format
+    /// with `ncol + 1` columns, like upstream's `LGBM_BoosterPredictSparseOutput`.
+    #[pyo3(signature = (indptr, indices, data, nrow, ncol, is_csc, kind, start_iteration,
+        num_iteration, pred_early_stop=false, pred_early_stop_freq=10,
+        pred_early_stop_margin=10.0, num_threads=0, disable_shape_check=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn predict_sparse<'py>(
+        &self,
+        py: Python<'py>,
+        indptr: PyReadonlyArray1<'py, i64>,
+        indices: PyReadonlyArray1<'py, i32>,
+        data: PyReadonlyArray1<'py, f64>,
+        nrow: usize,
+        ncol: usize,
+        is_csc: bool,
+        kind: i32,
+        start_iteration: i32,
+        num_iteration: i32,
+        pred_early_stop: bool,
+        pred_early_stop_freq: i32,
+        pred_early_stop_margin: f64,
+        num_threads: i32,
+        disable_shape_check: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.check_num_features(ncol, disable_shape_check)?;
+        let cfg = predict_config(
+            kind,
+            start_iteration,
+            num_iteration,
+            pred_early_stop,
+            pred_early_stop_freq,
+            pred_early_stop_margin,
+            num_threads,
+        )?;
+        let as_slice = |e: numpy::NotContiguousError| LightGBMError::new_err(e.to_string());
+        let (indptr, indices, data) = (
+            indptr.as_slice().map_err(as_slice)?,
+            indices.as_slice().map_err(as_slice)?,
+            data.as_slice().map_err(as_slice)?,
+        );
+        let model = &self.model;
+        if cfg.kind == PredictKind::Contrib {
+            let mats = py
+                .allow_threads(|| {
+                    let p = Predictor::new(model, &cfg)?;
+                    if is_csc {
+                        p.predict_contrib_csc(indptr, indices, data, nrow)
+                    } else {
+                        p.predict_contrib_csr(indptr, indices, data)
+                    }
+                })
+                .map_err(to_py)?;
+            let out: Vec<Py<PyAny>> = mats
+                .into_iter()
+                .map(|m| {
+                    let t = (
+                        numpy::PyArray1::from_vec(py, m.indptr),
+                        numpy::PyArray1::from_vec(py, m.indices),
+                        numpy::PyArray1::from_vec(py, m.data),
+                    );
+                    Ok(t.into_pyobject(py)?.into_any().unbind())
+                })
+                .collect::<PyResult<_>>()?;
+            return Ok(pyo3::types::PyList::new(py, out)?.into_any().unbind());
+        }
+        let (out, width) = py
+            .allow_threads(|| {
+                let p = Predictor::new(model, &cfg)?;
+                let w = p.num_pred_one_row();
+                let out = if is_csc {
+                    p.predict_csc(indptr, indices, data, nrow)?
+                } else {
+                    p.predict_csr(indptr, indices, data)?
+                };
+                Ok::<_, lgbm_core::Error>((out, w))
+            })
+            .map_err(to_py)?;
+        let rows = out.len().checked_div(width).unwrap_or(nrow);
+        Ok(numpy::PyArray1::from_vec(py, out)
+            .reshape([rows, width])?
+            .into_any()
+            .unbind())
+    }
+
+    /// upstream: src/c_api.cpp (v4.7.0) Booster::CreatePredictor shape check.
+    fn check_num_features(&self, ncol: usize, disable_shape_check: bool) -> PyResult<()> {
+        if !disable_shape_check && ncol != self.model.num_features() {
+            return Err(LightGBMError::new_err(format!(
+                "The number of features in data ({ncol}) is not the same as it was in training data ({}).\n\
+                 You can set ``predict_disable_shape_check=true`` to discard this error, but please be aware what you are doing.",
+                self.model.num_features()
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Build a [`PredictConfig`] from the `C_API_PREDICT_*` code and prediction parameters.
+fn predict_config(
+    kind: i32,
+    start_iteration: i32,
+    num_iteration: i32,
+    pred_early_stop: bool,
+    pred_early_stop_freq: i32,
+    pred_early_stop_margin: f64,
+    num_threads: i32,
+) -> PyResult<PredictConfig> {
+    let kind = match kind {
+        0 => PredictKind::Normal,
+        1 => PredictKind::RawScore,
+        2 => PredictKind::LeafIndex,
+        3 => PredictKind::Contrib,
+        other => {
+            return Err(LightGBMError::new_err(format!(
+                "unknown predict type {other}"
+            )));
+        }
+    };
+    Ok(PredictConfig {
+        kind,
+        start_iteration,
+        num_iteration,
+        pred_early_stop,
+        pred_early_stop_freq,
+        pred_early_stop_margin,
+        num_threads: usize::try_from(num_threads).unwrap_or(0),
+    })
 }
 
 #[pymodule]

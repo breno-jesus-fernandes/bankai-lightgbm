@@ -51,9 +51,10 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] Predict: normal, `raw_score`, `pred_leaf`, `pred_contrib` (TreeSHAP), `start_iteration`/`num_iteration`
 - [x] Prediction early stopping (`pred_early_stop*`)
 - [x] Python `Booster`: load/predict/save/dump/importance/pickle (dense numpy, lists, pandas)
-- [ ] Sparse (CSR/CSC) prediction input, sparse `pred_contrib` output
+- [x] Sparse (CSR/CSC) prediction input, sparse `pred_contrib` output (bit-exact vs upstream: per-row buffer like `CopyToPredictBuffer`, duplicates last-wins, other scipy formats converted with upstream's warning; float32 input gives float32 SHAP output; sparse path matches dense-path speed, see P3 bench note)
 - [ ] Predict from file (`data` as path) — needs P2 parsers
 - **Gate:** every golden model predicts bit-exactly ✅ (24 fixtures; 1.25–1.33x faster predict, 1.05x SHAP)
+- Bench note: on linux/x86_64 (2-vCPU VM) dense predict measured 0.90–0.99x of upstream (both libraries' sparse/dense ratios match); profile the tree traversal on x86 before claiming the gate there.
 
 ## P2: Dataset + binning
 - [x] `BinMapper`: numerical/categorical, `max_bin`, `max_bin_by_feature`, `min_data_in_bin`, `bin_construct_sample_cnt`

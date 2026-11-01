@@ -82,3 +82,20 @@ class NativeBooster:
         num_threads: int = ...,
         disable_shape_check: bool = ...,
     ) -> npt.NDArray[Any]: ...
+    def predict_sparse(
+        self,
+        indptr: npt.NDArray[np.int64],
+        indices: npt.NDArray[np.int32],
+        data: npt.NDArray[np.float64],
+        nrow: int,
+        ncol: int,
+        is_csc: bool,
+        kind: int,
+        start_iteration: int,
+        num_iteration: int,
+        pred_early_stop: bool = ...,
+        pred_early_stop_freq: int = ...,
+        pred_early_stop_margin: float = ...,
+        num_threads: int = ...,
+        disable_shape_check: bool = ...,
+    ) -> Any: ...

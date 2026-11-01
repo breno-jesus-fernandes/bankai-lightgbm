@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `Booster.predict` accepts `scipy.sparse` CSR and CSC matrices natively (normal, raw score, leaf index and SHAP), matching upstream bit for bit without densifying the whole matrix; other sparse formats are converted with upstream's "Converting data to scipy sparse matrix." warning. `pred_contrib` on sparse input returns a sparse matrix of the same format (a list per class for multiclass) with upstream's stored entries and the input's float dtype.
+
 - Cover `extra_trees` with upstream parity tests across seeds (byte-identical model text and predictions).
 
 - Add `Dataset.set_label()`, `set_weight()` and `set_group()`, which also update an already constructed Dataset in place.
