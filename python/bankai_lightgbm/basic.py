@@ -290,6 +290,29 @@ class Dataset:
             raise LightGBMError("Dataset is not constructed")
         return self._handle
 
+    def get_weight(self) -> npt.NDArray[np.float32] | None:
+        """Return the sample weights as a one-dimensional float32 array."""
+        if self.weight is None:
+            return None
+        return np.asarray(self.weight, dtype=np.float32).reshape(-1)
+
+    def get_group(self) -> npt.NDArray[np.int32] | None:
+        """Return the query group sizes as a one-dimensional int32 array."""
+        if self.group is None:
+            return None
+        return np.asarray(self.group, dtype=np.int32).reshape(-1)
+
+    def get_init_score(self) -> npt.NDArray[np.float64] | None:
+        """Return init scores; multiclass scores are ``(num_data, num_class)``."""
+        if self.init_score is None:
+            return None
+        values = np.asarray(self.init_score, dtype=np.float64).ravel(order="F")
+        num_data = self.num_data()
+        num_classes = values.size // num_data if num_data else 0
+        if num_classes > 1:
+            return values.reshape((num_data, num_classes), order="F")
+        return values
+
     def set_init_score(self, init_score: Any) -> Dataset:
         """Set the init score; constructed handles are updated in place."""
         self.init_score = init_score

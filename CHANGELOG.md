@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `Dataset.get_weight()`, `get_group()`, `get_init_score()` and `set_init_score()` with upstream's array shapes and dtypes; multiclass init scores come back as `(num_data, num_class)`.
+
 - Add `Booster.shuffle_models(start_iteration, end_iteration)` with upstream's iteration order, keeping continued training consistent with the shuffled trees.
 
 - Add `Booster.set_leaf_output(tree, leaf, value)`, which edits the model and the trees continued training uses, like upstream's `SetLeafValue`.

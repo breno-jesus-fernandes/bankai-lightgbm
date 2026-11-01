@@ -1114,3 +1114,26 @@ def test_shuffle_models_matches_upstream() -> None:
     assert results[1][0][0] == results[0][0][0]
     np.testing.assert_allclose(results[1][0][1], results[0][0][1], rtol=1e-12, atol=1e-15)
     np.testing.assert_allclose(results[1][1], results[0][1], rtol=1e-12, atol=1e-15)
+
+
+def test_dataset_getters_match_upstream() -> None:
+    x = np.random.default_rng(54).normal(size=(12, 3))
+    y = np.arange(12, dtype=float)
+    weight = np.linspace(0.5, 2.0, 12)
+    group = [4, 3, 5]
+    init = np.arange(36, dtype=float).reshape(12, 3)
+    params = {"verbosity": -1, "min_data_in_leaf": 1}
+    values = []
+    for library in (lightgbm, lgb):
+        dataset = library.Dataset(
+            x, label=y, weight=weight, group=group, init_score=init, params=params
+        ).construct()
+        values.append(
+            (
+                np.asarray(dataset.get_weight(), dtype=np.float64),
+                np.asarray(dataset.get_group()),
+                np.asarray(dataset.get_init_score(), dtype=np.float64),
+            )
+        )
+    for ours, theirs in zip(values[1], values[0], strict=True):
+        np.testing.assert_array_equal(ours, theirs)
