@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Match upstream errors for empty, negative, and out-of-range Dataset subset selections before converting indices to native unsigned values.
+
 - Sort Dataset subset indices like upstream, preserving label, weight, and query-group alignment for unsorted and duplicate selections.
 
 - Construct dense reference-backed datasets using the source bin mappers and feature groups, including weighted and categorical training.

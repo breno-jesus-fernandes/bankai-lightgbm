@@ -214,6 +214,17 @@ class Dataset:
         """Select rows while reusing this Dataset's bin mappers."""
         self.construct()
         indices = np.sort(np.asarray(used_indices, dtype=np.int64).reshape(-1))
+        # upstream: src/c_api.cpp (v4.7.0) LGBM_DatasetGetSubset.
+        if indices.size == 0:
+            raise LightGBMError("Check failed: (num_used_row_indices) > (0)")
+        num_rows = self.num_data()
+        invalid = np.flatnonzero((indices < 0) | (indices >= num_rows))
+        if invalid.size:
+            position = int(invalid[0])
+            raise LightGBMError(
+                "[Used indices of subset]: does not tolerate element "
+                f"[#{position} = {indices[position]}] outside [0, {num_rows - 1}]"
+            )
         native = self._handle_or_raise().subset(indices.tolist())
         if _is_pandas_df(self.data):
             subset_data = self.data.iloc[indices]

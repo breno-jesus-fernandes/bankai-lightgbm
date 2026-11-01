@@ -767,3 +767,21 @@ def test_subset_metadata_matches_upstream(rows: list[int]) -> None:
         )
         predictions.append(booster.predict(x))
     np.testing.assert_allclose(predictions[1], predictions[0], rtol=1e-12, atol=1e-15)
+
+
+@pytest.mark.parametrize("rows", [[-1], [12], [], [0, 12]])
+def test_invalid_subset_indices_match_upstream(rows: list[int]) -> None:
+    x = np.arange(36, dtype=float).reshape(12, 3)
+    messages = []
+    for library in (lightgbm, lgb):
+        dataset = library.Dataset(
+            x, label=np.arange(12), params={"verbosity": -1, "min_data_in_leaf": 1}
+        )
+        with pytest.raises(library.basic.LightGBMError) as caught:
+            dataset.subset(rows).construct()
+        message = str(caught.value)
+        # Upstream embeds its build-machine path and line number in CHECK errors.
+        messages.append(message.split(" at ")[0])
+        assert dataset.num_data() == 12
+        assert dataset.subset([0, 1]).construct().num_data() == 2
+    assert messages[0] == messages[1]

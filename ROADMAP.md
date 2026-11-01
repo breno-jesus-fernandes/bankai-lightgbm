@@ -100,7 +100,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [ ] Model merge/shuffle, `set_leaf_output`, `rollback_one_iter`
 
 ## P6: Python package (drop-in)
-- [ ] `Dataset` (done: dense numpy and pandas incl. categoricals, weight, group, categorical_feature, subsets with source bin mapper reuse; pending: scipy.sparse, pyarrow, files, complete subset compatibility (unsorted/duplicate indices and weighted query metadata covered), init_score; dense shared reference binning implemented)
+- [ ] `Dataset` (done: dense numpy and pandas incl. categoricals, weight, group, categorical_feature, subsets with source bin mapper reuse; pending: scipy.sparse, pyarrow, files, complete subset compatibility (unsorted/duplicate indices, weighted query metadata, and empty/out-of-range index errors covered), init_score; dense shared reference binning implemented)
 - [ ] `Booster` (training works: `lgb.train` gives byte-identical model text; Rust `GbdtTrainer` and Python `Booster.update()` support incremental training; `cv` supports seeded/custom folds, metric aggregation, custom evaluation, callbacks, and `CVBooster`; pending: `cv` preprocessing/continued training and the remaining Booster methods)
 - [ ] Callbacks: `early_stopping`, `log_evaluation`, `record_evaluation` ✅; `reset_parameter` supports learning-rate schedules; pending resets for other parameters
 - [ ] sklearn API: `LGBMModel`, `LGBMClassifier`, `LGBMRegressor`, `LGBMRanker`
