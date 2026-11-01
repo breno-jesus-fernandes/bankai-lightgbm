@@ -1,10 +1,10 @@
+#![allow(unsafe_code)] // EXPERIMENT: spin pool regions
 //! Row-wise bins of the multi-value feature group, used to build its histograms during
 //! col-wise training. upstream: src/io/multi_val_sparse_bin.hpp,
 //! src/io/multi_val_dense_bin.hpp, src/io/dataset.cpp (`GetMultiBinFromSparseFeatures`,
 //! `PushDataToMultiValBin`), src/io/train_share_states.cpp (`CalcBinOffsets`,
 //! `MultiValBinWrapper`), all v4.7.0.
 
-use rayon::prelude::*;
 
 use crate::io::bin_data::BinData;
 use crate::io::dataset::FeatureGroupLayout;
@@ -196,53 +196,61 @@ impl MultiValBin {
         rows: Option<&[i32]>,
         num_rows: usize,
         num_threads: usize,
+        pool: Option<&crate::utils::spin_pool::SpinPool>,
         grad_at: &(impl Fn(usize, usize) -> f32 + Sync),
         hess_at: &(impl Fn(usize, usize) -> f32 + Sync),
         out: &mut [f64],
         scratch: &mut Vec<f64>,
     ) {
+        use crate::utils::spin_pool::SharedMut;
         let num_bin = self.num_bin();
         let out = &mut out[..num_bin * 2];
         out.fill(0.0);
         let (n_block, block_size) = block_info(num_threads, num_rows, self.min_block_size());
-        if n_block <= 1 {
-            self.accumulate(rows, 0, num_rows, grad_at, hess_at, out);
-            return;
-        }
+        let pool = match pool {
+            Some(p) if n_block > 1 => p,
+            _ => {
+                self.accumulate(rows, 0, num_rows, grad_at, hess_at, out);
+                return;
+            }
+        };
         let len = num_bin * 2;
         // Each block zeroes its own buffer inside its task (upstream memsets per block).
         scratch.resize(len * (n_block - 1), 0.0);
-        let first = out;
-        rayon::join(
-            || self.accumulate(rows, 0, block_size.min(num_rows), grad_at, hess_at, first),
-            || {
-                scratch
-                    .par_chunks_mut(len)
-                    .enumerate()
-                    .for_each(|(b, buf)| {
-                        buf.fill(0.0);
-                        let start = (b + 1) * block_size;
-                        let end = (start + block_size).min(num_rows);
-                        if start < end {
-                            self.accumulate(rows, start, end, grad_at, hess_at, buf);
-                        }
-                    });
-            },
-        );
+        let first = SharedMut::new(out);
+        let others = SharedMut::new(&mut scratch[..]);
+        pool.run(n_block, &|b| {
+            if b == 0 {
+                // SAFETY: block 0 is the only writer of `out`.
+                let dst = unsafe { first.range(0, len) };
+                self.accumulate(rows, 0, block_size.min(num_rows), grad_at, hess_at, dst);
+            } else {
+                // SAFETY: block b is the only writer of its own scratch buffer.
+                let buf = unsafe { others.range((b - 1) * len, b * len) };
+                buf.fill(0.0);
+                let start = b * block_size;
+                let end = (start + block_size).min(num_rows);
+                if start < end {
+                    self.accumulate(rows, start, end, grad_at, hess_at, buf);
+                }
+            }
+        });
         // upstream HistMerge: parallel over bin ranges, each bin adding blocks 1.. in order.
         let scratch: &[f64] = scratch;
-        first
-            .par_chunks_mut(MERGE_CHUNK)
-            .enumerate()
-            .for_each(|(c, dst)| {
-                let lo = c * MERGE_CHUNK;
-                for b in 0..n_block - 1 {
-                    let src = &scratch[b * len + lo..b * len + lo + dst.len()];
-                    for (d, s) in dst.iter_mut().zip(src) {
-                        *d += s;
-                    }
+        let chunks = len.div_ceil(MERGE_CHUNK);
+        let dst_all = SharedMut::new(out);
+        pool.run(chunks, &|c| {
+            let lo = c * MERGE_CHUNK;
+            let hi = (lo + MERGE_CHUNK).min(len);
+            // SAFETY: merge chunk c is the only writer of `out[lo..hi]`.
+            let dst = unsafe { dst_all.range(lo, hi) };
+            for b in 0..n_block - 1 {
+                let src = &scratch[b * len + lo..b * len + hi];
+                for (d, s) in dst.iter_mut().zip(src) {
+                    *d += s;
                 }
-            });
+            }
+        });
     }
 }
 
@@ -387,13 +395,15 @@ mod tests {
                 let grad_at = |_: usize, r: usize| grads[r];
                 let hess_at = |_: usize, r: usize| hess[r];
                 let mut got = vec![f64::NAN; num_bin * 2];
-                mv.construct(subset, n, 1, &grad_at, &hess_at, &mut got, &mut Vec::new());
+                mv.construct(subset, n, 1, None, &grad_at, &hess_at, &mut got, &mut Vec::new());
                 assert_eq!(got, want, "dense_multi_val={dense_multi_val} single block");
                 let mut blocked = vec![f64::NAN; num_bin * 2];
+                let pool = crate::utils::spin_pool::SpinPool::new(4);
                 mv.construct(
                     subset,
                     n,
                     4,
+                    Some(&pool),
                     &grad_at,
                     &hess_at,
                     &mut blocked,

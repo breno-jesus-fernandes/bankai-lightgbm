@@ -1,3 +1,4 @@
+#![allow(unsafe_code)] // EXPERIMENT: spin pool regions
 //! Row-to-leaf partition. upstream: src/treelearner/data_partition.hpp,
 //! src/io/dense_bin.hpp (`SplitInner`), include/LightGBM/feature_group.h (`Split`)
 
@@ -6,6 +7,11 @@ use crate::io::bin_data::{BinData, DenseBin, SparseBin};
 use crate::io::dataset::{Dataset, GroupData};
 use crate::meta::MissingType;
 use crate::utils::common::find_in_bitset;
+use crate::utils::spin_pool::{SharedMut, SpinPool};
+
+/// Rows a split must cover before it is routed in parallel blocks; below this the fork/join
+/// costs more than the routing.
+const PARALLEL_PARTITION_MIN_ROWS: usize = 1 << 11;
 
 /// A feature's stored bin column: a dense group column, or a sparse multi-value column
 /// (read through `SparseBin::cursor`, as upstream's `SparseBin::SplitInner` iterates).
@@ -65,6 +71,9 @@ pub struct DataPartition {
     indices: Vec<i32>,
     left_buf: Vec<i32>,
     right_buf: Vec<i32>,
+    /// Per-block routing buffers, reused across splits (upstream `left_`/`right_` per thread).
+    block_left: Vec<Vec<i32>>,
+    block_right: Vec<Vec<i32>>,
 }
 
 impl DataPartition {
@@ -76,6 +85,8 @@ impl DataPartition {
             indices: (0..num_data as i32).collect(),
             left_buf: Vec::with_capacity(num_data),
             right_buf: Vec::with_capacity(num_data),
+            block_left: Vec::new(),
+            block_right: Vec::new(),
         }
     }
 
@@ -109,45 +120,47 @@ impl DataPartition {
 
     /// upstream: `DataPartition::Split` — stable partition of `leaf` into
     /// `leaf` (<= threshold) and `right_leaf` (> threshold).
-    pub fn split(&mut self, leaf: usize, rule: &SplitRule<'_>, right_leaf: usize) {
+    ///
+    /// Large leaves are routed in contiguous blocks of rows, one per thread (upstream
+    /// `ParallelPartitionRunner`). Each block keeps its rows in order and the blocks are
+    /// concatenated in order, so the result is the sequential stable partition.
+    pub fn split(
+        &mut self,
+        leaf: usize,
+        rule: &SplitRule<'_>,
+        right_leaf: usize,
+        pool: Option<&SpinPool>,
+    ) {
         let begin = self.leaf_begin[leaf];
         let cnt = self.leaf_count[leaf];
         self.left_buf.clear();
         self.right_buf.clear();
         let idx = &self.indices[begin..begin + cnt];
-        // Monomorphize the routing loop per bin width (upstream: templated DenseBin).
-        let bin = match rule.col {
-            Column::Dense(d) => d,
-            Column::Sparse(sb) => {
-                partition_sparse(idx, sb, rule, &mut self.left_buf, &mut self.right_buf);
-                return self.finish_split(leaf, right_leaf, begin, cnt);
+        match pool {
+            Some(p) if p.threads() > 1 && cnt >= PARALLEL_PARTITION_MIN_ROWS && !std::env::var("BK_OFF_PART").is_ok() => {
+                let block_len = cnt.div_ceil(p.threads());
+                let blocks = cnt.div_ceil(block_len);
+                if self.block_left.len() < blocks {
+                    self.block_left.resize_with(blocks, Vec::new);
+                    self.block_right.resize_with(blocks, Vec::new);
+                }
+                let bl = SharedMut::new(&mut self.block_left[..blocks]);
+                let br = SharedMut::new(&mut self.block_right[..blocks]);
+                p.run(blocks, &|b| {
+                    let lo = b * block_len;
+                    let hi = (lo + block_len).min(cnt);
+                    // SAFETY: task b is the only user of block b's buffers.
+                    let (left, right) = unsafe { (&mut bl.range(b, b + 1)[0], &mut br.range(b, b + 1)[0]) };
+                    left.clear();
+                    right.clear();
+                    route(&idx[lo..hi], rule, left, right);
+                });
+                for b in 0..blocks {
+                    self.left_buf.extend_from_slice(&self.block_left[b]);
+                    self.right_buf.extend_from_slice(&self.block_right[b]);
+                }
             }
-        };
-        match bin {
-            DenseBin::U4(d) => partition(
-                idx,
-                |i| u32::from((d[i >> 1] >> ((i & 1) << 2)) & 0xf),
-                rule,
-                &mut self.left_buf,
-                &mut self.right_buf,
-            ),
-            DenseBin::U8(d) => partition(
-                idx,
-                |i| u32::from(d[i]),
-                rule,
-                &mut self.left_buf,
-                &mut self.right_buf,
-            ),
-            DenseBin::U16(d) => partition(
-                idx,
-                |i| u32::from(d[i]),
-                rule,
-                &mut self.left_buf,
-                &mut self.right_buf,
-            ),
-            DenseBin::U32(d) => {
-                partition(idx, |i| d[i], rule, &mut self.left_buf, &mut self.right_buf)
-            }
+            _ => route(idx, rule, &mut self.left_buf, &mut self.right_buf),
         }
         self.finish_split(leaf, right_leaf, begin, cnt);
     }
@@ -161,6 +174,24 @@ impl DataPartition {
         self.leaf_count[leaf] = left_cnt;
         self.leaf_begin[right_leaf] = begin + left_cnt;
         self.leaf_count[right_leaf] = cnt - left_cnt;
+    }
+}
+
+/// Route `idx` (in order) through `rule`'s column; left and right keep the order of `idx`.
+/// Monomorphized per bin width (upstream: templated DenseBin).
+fn route(idx: &[i32], rule: &SplitRule<'_>, left: &mut Vec<i32>, right: &mut Vec<i32>) {
+    match rule.col {
+        Column::Sparse(sb) => partition_sparse(idx, sb, rule, left, right),
+        Column::Dense(DenseBin::U4(d)) => partition(
+            idx,
+            |i| u32::from((d[i >> 1] >> ((i & 1) << 2)) & 0xf),
+            rule,
+            left,
+            right,
+        ),
+        Column::Dense(DenseBin::U8(d)) => partition(idx, |i| u32::from(d[i]), rule, left, right),
+        Column::Dense(DenseBin::U16(d)) => partition(idx, |i| u32::from(d[i]), rule, left, right),
+        Column::Dense(DenseBin::U32(d)) => partition(idx, |i| d[i], rule, left, right),
     }
 }
 
