@@ -1,74 +1,105 @@
-//! EXPERIMENT (not for merge until the unsafe policy is decided): a persistent pool whose
-//! workers spin between parallel regions, the way upstream's OpenMP threads do. Rayon's
-//! workers sleep after a short idle period, and waking them costs 15-30 us on the
-//! 2-vCPU benchmark machine, more than many training regions take.
+//! Persistent worker threads for the short parallel regions of one tree.
+//!
+//! Upstream's OpenMP threads spin between regions, so a region costs about a microsecond to
+//! start. Rayon's workers sleep after a short idle period, and waking them costs 15-30 us on
+//! the 2-vCPU benchmark machine, which is more than many training regions take.
+//!
+//! This is the only module where `unsafe` is used for parallelism; the learner reaches it
+//! through the safe helpers below.
+
 #![allow(unsafe_code)]
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU64, Ordering};
-
-pub static CALLER_TASK_NS: AtomicU64 = AtomicU64::new(0);
-pub static CALLER_WAIT_NS: AtomicU64 = AtomicU64::new(0);
-pub static WORKER_TASK_NS: AtomicU64 = AtomicU64::new(0);
-pub static REGIONS: AtomicU64 = AtomicU64::new(0);
-use std::sync::{Arc, Condvar, Mutex};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
-/// Spins before a worker sleeps on the condition variable.
-const SPIN_LIMIT: u32 = 2_000_000_000;
+use crate::error::{Error, Result};
+
+/// Spins before an idle worker sleeps on the condition variable.
+const SPIN_LIMIT: u32 = 200_000;
+
+/// Keeps hot atomics on separate cache lines, so spinning workers and the caller do not
+/// invalidate each other's lines.
+#[repr(align(128))]
+struct Padded<T>(T);
 
 struct Shared {
-    /// Bumped once per region; workers wait for it to change.
-    generation: AtomicUsize,
+    /// Bumped once per region; a worker runs a region when it sees a new value.
+    generation: Padded<AtomicUsize>,
+    /// Workers that finished the current region.
+    done: Padded<AtomicUsize>,
+    tasks: Padded<AtomicUsize>,
     /// The current region's task function, as the two words of a `&dyn Fn(usize)`.
     job: Mutex<Option<[usize; 2]>>,
-    tasks: AtomicUsize,
-    /// Workers that finished the current region.
-    done: AtomicUsize,
+    /// Set when a worker task panicked during the current region.
+    panicked: AtomicBool,
     sleepers: AtomicUsize,
-    shutdown: AtomicBool,
+    shutdown: Padded<AtomicBool>,
     sleep_lock: Mutex<()>,
     wake: Condvar,
 }
 
 /// A fixed set of threads that run `n` tasks per region. Task `i` runs on thread
-/// `i % threads`; the caller is thread 0. Regions must not nest.
+/// `i % threads`; the calling thread is thread 0. Regions must not be nested.
 pub struct SpinPool {
     shared: Arc<Shared>,
     threads: usize,
     handles: Vec<JoinHandle<()>>,
 }
 
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 impl SpinPool {
-    pub fn new(threads: usize) -> Self {
+    /// Starts `threads - 1` workers; the caller is the remaining thread.
+    pub fn new(threads: usize) -> Result<Self> {
         let threads = threads.max(1);
         let shared = Arc::new(Shared {
-            generation: AtomicUsize::new(0),
+            generation: Padded(AtomicUsize::new(0)),
+            done: Padded(AtomicUsize::new(0)),
+            tasks: Padded(AtomicUsize::new(0)),
             job: Mutex::new(None),
-            tasks: AtomicUsize::new(0),
-            done: AtomicUsize::new(0),
+            panicked: AtomicBool::new(false),
             sleepers: AtomicUsize::new(0),
-            shutdown: AtomicBool::new(false),
+            shutdown: Padded(AtomicBool::new(false)),
             sleep_lock: Mutex::new(()),
             wake: Condvar::new(),
         });
-        let handles = (1..threads)
-            .map(|k| {
-                let s = Arc::clone(&shared);
-                std::thread::spawn(move || worker(&s, k, threads))
-            })
-            .collect();
-        SpinPool {
+        let mut handles = Vec::with_capacity(threads - 1);
+        for k in 1..threads {
+            let s = Arc::clone(&shared);
+            let spawned = std::thread::Builder::new()
+                .name(format!("bankai-worker-{k}"))
+                .spawn(move || worker(&s, k, threads));
+            match spawned {
+                Ok(h) => handles.push(h),
+                Err(e) => {
+                    // Stop the workers already started before reporting the failure.
+                    let partial = SpinPool {
+                        shared,
+                        threads,
+                        handles,
+                    };
+                    drop(partial);
+                    return Err(Error::Io(e));
+                }
+            }
+        }
+        Ok(SpinPool {
             shared,
             threads,
             handles,
-        }
+        })
     }
 
     pub fn threads(&self) -> usize {
         self.threads
     }
 
-    /// Runs `f(i)` for every `i < n` and returns when all have finished.
+    /// Runs `f(i)` for every `i < n` and returns when all of them have finished. A panic in
+    /// any task is re-raised on the calling thread after the region has drained.
     pub fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
         if self.threads == 1 || n <= 1 {
             for i in 0..n {
@@ -77,33 +108,85 @@ impl SpinPool {
             return;
         }
         let s = &*self.shared;
-        // SAFETY: the pointer is only read by workers between the generation bump below and
-        // their `done` increment, and this function does not return before every worker has
-        // incremented `done`. So `f` outlives every use. Pointer layout: a fat `&dyn` is two
-        // words; `transmute` only changes the lifetime, which is the sole part erased here.
+        // SAFETY: a worker reads this pointer only after it sees the generation bump below,
+        // and this function does not return before every worker has incremented `done`, so
+        // `f` is alive for every use. The transmute only changes the lifetime of the fat
+        // pointer, which has the same two-word layout.
         let raw: [usize; 2] =
             unsafe { std::mem::transmute::<&(dyn Fn(usize) + Sync), [usize; 2]>(f) };
-        *s.job.lock().unwrap_or_else(|e| e.into_inner()) = Some(raw);
-        s.tasks.store(n, Ordering::Relaxed);
-        s.done.store(0, Ordering::Relaxed);
-        s.generation.fetch_add(1, Ordering::SeqCst);
+        *lock(&s.job) = Some(raw);
+        s.tasks.0.store(n, Ordering::Relaxed);
+        s.done.0.store(0, Ordering::Relaxed);
+        s.panicked.store(false, Ordering::Relaxed);
+        s.generation.0.fetch_add(1, Ordering::SeqCst);
         if s.sleepers.load(Ordering::SeqCst) > 0 {
-            let _g = s.sleep_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let _g = lock(&s.sleep_lock);
             s.wake.notify_all();
         }
-        REGIONS.fetch_add(1, Ordering::Relaxed);
-        let t0 = std::time::Instant::now();
-        let mut i = 0;
-        while i < n {
-            f(i);
-            i += self.threads;
-        }
-        let t1 = std::time::Instant::now();
-        while s.done.load(Ordering::Acquire) < self.threads - 1 {
+        let own = catch_unwind(AssertUnwindSafe(|| {
+            let mut i = 0;
+            while i < n {
+                f(i);
+                i += self.threads;
+            }
+        }));
+        while s.done.0.load(Ordering::Acquire) < self.threads - 1 {
             std::hint::spin_loop();
         }
-        CALLER_TASK_NS.fetch_add((t1 - t0).as_nanos() as u64, Ordering::Relaxed);
-        CALLER_WAIT_NS.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        if let Err(payload) = own {
+            resume_unwind(payload);
+        }
+        if s.panicked.load(Ordering::Acquire) {
+            resume_unwind(Box::new("a spin_pool worker task panicked"));
+        }
+    }
+
+    /// Calls `f(i, &mut items[i])` for every item, one task per item.
+    pub fn for_each_mut<T: Send>(&self, items: &mut [T], f: impl Fn(usize, &mut T) + Sync) {
+        let cells: Vec<Mutex<&mut T>> = items.iter_mut().map(Mutex::new).collect();
+        self.run(cells.len(), &|i| {
+            let mut cell = lock(&cells[i]);
+            f(i, &mut **cell);
+        });
+    }
+
+    /// Calls `f(c, chunk)` for each `chunk`-sized piece of `data` (the last may be shorter).
+    pub fn for_each_chunk_mut<T: Send>(
+        &self,
+        data: &mut [T],
+        chunk: usize,
+        f: impl Fn(usize, &mut [T]) + Sync,
+    ) {
+        let mut chunks: Vec<&mut [T]> = data.chunks_mut(chunk.max(1)).collect();
+        self.for_each_mut(&mut chunks, |c, piece| f(c, piece));
+    }
+
+    /// Calls `f(j, &mut data[lo..hi])` for each `(lo, hi)` in `ranges`, one task per range.
+    /// `ranges` must be ascending and disjoint.
+    pub fn for_each_range_mut<T: Send>(
+        &self,
+        data: &mut [T],
+        ranges: &[(usize, usize)],
+        f: impl Fn(usize, &mut [T]) + Sync,
+    ) -> Result<()> {
+        let total = data.len();
+        let mut pieces: Vec<&mut [T]> = Vec::with_capacity(ranges.len());
+        let mut rest = data;
+        let mut pos = 0usize;
+        for &(lo, hi) in ranges {
+            if lo < pos || hi < lo || hi > total {
+                return Err(Error::InvalidParameter(
+                    "histogram ranges must be ascending and disjoint".into(),
+                ));
+            }
+            let (_skip, after_skip) = rest.split_at_mut(lo - pos);
+            let (piece, tail) = after_skip.split_at_mut(hi - lo);
+            pieces.push(piece);
+            rest = tail;
+            pos = hi;
+        }
+        self.for_each_mut(&mut pieces, |j, piece| f(j, piece));
+        Ok(())
     }
 }
 
@@ -112,25 +195,25 @@ fn worker(s: &Shared, k: usize, threads: usize) {
     loop {
         let mut spins = 0u32;
         loop {
-            let g = s.generation.load(Ordering::SeqCst);
+            let g = s.generation.0.load(Ordering::SeqCst);
             if g != seen {
                 seen = g;
                 break;
             }
-            if s.shutdown.load(Ordering::SeqCst) {
+            if s.shutdown.0.load(Ordering::SeqCst) {
                 return;
             }
             if spins < SPIN_LIMIT {
                 spins += 1;
                 std::hint::spin_loop();
             } else {
-                let guard = s.sleep_lock.lock().unwrap_or_else(|e| e.into_inner());
+                let guard = lock(&s.sleep_lock);
                 s.sleepers.fetch_add(1, Ordering::SeqCst);
                 let guard = s
                     .wake
                     .wait_while(guard, |_| {
-                        s.generation.load(Ordering::SeqCst) == seen
-                            && !s.shutdown.load(Ordering::SeqCst)
+                        s.generation.0.load(Ordering::SeqCst) == seen
+                            && !s.shutdown.0.load(Ordering::SeqCst)
                     })
                     .unwrap_or_else(|e| e.into_inner());
                 s.sleepers.fetch_sub(1, Ordering::SeqCst);
@@ -138,32 +221,33 @@ fn worker(s: &Shared, k: usize, threads: usize) {
                 spins = 0;
             }
         }
-        let raw = match *s.job.lock().unwrap_or_else(|e| e.into_inner()) {
-            Some(r) => r,
-            None => continue,
-        };
-        let n = s.tasks.load(Ordering::Relaxed);
-        // SAFETY: `raw` was made from a live `&dyn Fn(usize) + Sync` by `run`, which is still
-        // blocked until this worker increments `done`; the reference is shared (`Sync`).
-        let f: &(dyn Fn(usize) + Sync) =
-            unsafe { std::mem::transmute::<[usize; 2], &(dyn Fn(usize) + Sync)>(raw) };
-        let t0 = std::time::Instant::now();
-        let mut i = k;
-        while i < n {
-            f(i);
-            i += threads;
+        let raw = *lock(&s.job);
+        if let Some(raw) = raw {
+            let n = s.tasks.0.load(Ordering::Relaxed);
+            // SAFETY: `raw` was made from a live `&dyn Fn(usize) + Sync` by `run`, which is
+            // still blocked until this worker increments `done` below.
+            let f: &(dyn Fn(usize) + Sync) =
+                unsafe { std::mem::transmute::<[usize; 2], &(dyn Fn(usize) + Sync)>(raw) };
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                let mut i = k;
+                while i < n {
+                    f(i);
+                    i += threads;
+                }
+            }));
+            if result.is_err() {
+                s.panicked.store(true, Ordering::Release);
+            }
         }
-        WORKER_TASK_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        s.done.fetch_add(1, Ordering::Release);
+        s.done.0.fetch_add(1, Ordering::Release);
     }
 }
 
 impl Drop for SpinPool {
     fn drop(&mut self) {
-        if std::env::var("BK_POOL_STATS").is_ok() { eprintln!("regions {} caller_tasks {:.1}ms caller_wait {:.1}ms worker_tasks {:.1}ms", REGIONS.swap(0,Ordering::Relaxed), CALLER_TASK_NS.swap(0,Ordering::Relaxed) as f64/1e6, CALLER_WAIT_NS.swap(0,Ordering::Relaxed) as f64/1e6, WORKER_TASK_NS.swap(0,Ordering::Relaxed) as f64/1e6); }
-        self.shared.shutdown.store(true, Ordering::SeqCst);
+        self.shared.shutdown.0.store(true, Ordering::SeqCst);
         {
-            let _g = self.shared.sleep_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let _g = lock(&self.shared.sleep_lock);
             self.shared.wake.notify_all();
         }
         for h in self.handles.drain(..) {
@@ -172,27 +256,100 @@ impl Drop for SpinPool {
     }
 }
 
-/// A buffer shared by the tasks of one region. Each task must use only ranges no other
-/// task of the same region touches.
-pub struct SharedMut<T>(*mut T, usize);
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
 
-// SAFETY: the pointer is only dereferenced through `range`, whose contract keeps concurrent
-// tasks on disjoint elements; `T: Send` lets those elements move between threads.
-unsafe impl<T: Send> Sync for SharedMut<T> {}
-
-impl<T> SharedMut<T> {
-    pub fn new(s: &mut [T]) -> Self {
-        SharedMut(s.as_mut_ptr(), s.len())
+    #[test]
+    fn run_executes_every_index_exactly_once() {
+        let pool = SpinPool::new(3).unwrap();
+        let hits: Vec<AtomicU32> = (0..11).map(|_| AtomicU32::new(0)).collect();
+        pool.run(11, &|i| {
+            hits[i].fetch_add(1, Ordering::Relaxed);
+        });
+        assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 1));
     }
 
-    /// `&mut` to `lo..hi`.
-    ///
-    /// # Safety
-    /// No other live reference to any element in `lo..hi` may exist while the result is used.
-    #[allow(clippy::mut_from_ref)]
-    pub unsafe fn range(&self, lo: usize, hi: usize) -> &mut [T] {
-        assert!(lo <= hi && hi <= self.1, "SharedMut range out of bounds");
-        // SAFETY: bounds were checked above; disjointness is the caller's contract.
-        unsafe { std::slice::from_raw_parts_mut(self.0.add(lo), hi - lo) }
+    #[test]
+    fn workers_are_reused_across_many_regions() {
+        let pool = SpinPool::new(2).unwrap();
+        let total = AtomicUsize::new(0);
+        for round in 0..500 {
+            pool.run(4, &|i| {
+                total.fetch_add(i + round, Ordering::Relaxed);
+            });
+        }
+        let expected: usize = (0..500).map(|r| 4 * r + 6).sum();
+        assert_eq!(total.load(Ordering::Relaxed), expected);
+    }
+
+    #[test]
+    fn for_each_mut_updates_every_item() {
+        let pool = SpinPool::new(2).unwrap();
+        let mut v: Vec<u64> = (0..9).collect();
+        pool.for_each_mut(&mut v, |i, x| *x = *x * 10 + i as u64);
+        assert_eq!(v, (0..9).map(|i| i * 11).collect::<Vec<u64>>());
+    }
+
+    #[test]
+    fn for_each_range_mut_hands_out_disjoint_slices() {
+        let pool = SpinPool::new(2).unwrap();
+        let mut data = vec![0u32; 10];
+        pool.for_each_range_mut(&mut data, &[(0, 3), (5, 9)], |j, s| {
+            for x in s.iter_mut() {
+                *x = j as u32 + 1;
+            }
+        })
+        .unwrap();
+        assert_eq!(data, [1, 1, 1, 0, 0, 2, 2, 2, 2, 0]);
+    }
+
+    #[test]
+    fn for_each_range_mut_rejects_overlapping_ranges() {
+        let pool = SpinPool::new(2).unwrap();
+        let mut data = vec![0u32; 10];
+        let err = pool.for_each_range_mut(&mut data, &[(0, 5), (3, 8)], |_, _| {});
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn chunks_cover_the_slice_in_order() {
+        let pool = SpinPool::new(3).unwrap();
+        let mut data = vec![0usize; 7];
+        pool.for_each_chunk_mut(&mut data, 3, |c, s| {
+            for x in s.iter_mut() {
+                *x = c;
+            }
+        });
+        assert_eq!(data, [0, 0, 0, 1, 1, 1, 2]);
+    }
+
+    #[test]
+    fn worker_panic_is_reraised_on_the_caller_without_deadlock() {
+        let pool = SpinPool::new(2).unwrap();
+        // Task 1 runs on the worker thread.
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            pool.run(2, &|i| {
+                if i == 1 {
+                    panic!("task failure");
+                }
+            });
+        }));
+        assert!(result.is_err());
+        // The pool stays usable afterwards.
+        let hits = AtomicUsize::new(0);
+        pool.run(2, &|_| {
+            hits.fetch_add(1, Ordering::Relaxed);
+        });
+        assert_eq!(hits.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn dropping_the_pool_joins_its_workers() {
+        let pool = SpinPool::new(4).unwrap();
+        pool.run(4, &|_| {});
+        drop(pool);
     }
 }

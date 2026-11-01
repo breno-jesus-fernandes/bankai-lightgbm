@@ -1,4 +1,3 @@
-#![allow(unsafe_code)] // EXPERIMENT: spin pool regions
 //! Row-to-leaf partition. upstream: src/treelearner/data_partition.hpp,
 //! src/io/dense_bin.hpp (`SplitInner`), include/LightGBM/feature_group.h (`Split`)
 
@@ -7,7 +6,7 @@ use crate::io::bin_data::{BinData, DenseBin, SparseBin};
 use crate::io::dataset::{Dataset, GroupData};
 use crate::meta::MissingType;
 use crate::utils::common::find_in_bitset;
-use crate::utils::spin_pool::{SharedMut, SpinPool};
+use crate::utils::spin_pool::SpinPool;
 
 /// Rows a split must cover before it is routed in parallel blocks; below this the fork/join
 /// costs more than the routing.
@@ -71,9 +70,8 @@ pub struct DataPartition {
     indices: Vec<i32>,
     left_buf: Vec<i32>,
     right_buf: Vec<i32>,
-    /// Per-block routing buffers, reused across splits (upstream `left_`/`right_` per thread).
-    block_left: Vec<Vec<i32>>,
-    block_right: Vec<Vec<i32>>,
+    /// Per-block routing buffers (left, right), reused across splits.
+    block_bufs: Vec<(Vec<i32>, Vec<i32>)>,
 }
 
 impl DataPartition {
@@ -85,8 +83,7 @@ impl DataPartition {
             indices: (0..num_data as i32).collect(),
             left_buf: Vec::with_capacity(num_data),
             right_buf: Vec::with_capacity(num_data),
-            block_left: Vec::new(),
-            block_right: Vec::new(),
+            block_bufs: Vec::new(),
         }
     }
 
@@ -137,28 +134,28 @@ impl DataPartition {
         self.right_buf.clear();
         let idx = &self.indices[begin..begin + cnt];
         match pool {
-            Some(p) if p.threads() > 1 && cnt >= PARALLEL_PARTITION_MIN_ROWS && !std::env::var("BK_OFF_PART").is_ok() => {
+            Some(p) if p.threads() > 1 && cnt >= PARALLEL_PARTITION_MIN_ROWS => {
                 let block_len = cnt.div_ceil(p.threads());
                 let blocks = cnt.div_ceil(block_len);
-                if self.block_left.len() < blocks {
-                    self.block_left.resize_with(blocks, Vec::new);
-                    self.block_right.resize_with(blocks, Vec::new);
+                if self.block_bufs.len() < blocks {
+                    self.block_bufs
+                        .resize_with(blocks, || (Vec::new(), Vec::new()));
                 }
-                let bl = SharedMut::new(&mut self.block_left[..blocks]);
-                let br = SharedMut::new(&mut self.block_right[..blocks]);
-                p.run(blocks, &|b| {
+                let mut bufs = std::mem::take(&mut self.block_bufs);
+                // Each block routes its own rows in order; the blocks are then concatenated
+                // in order, which is the sequential stable partition.
+                p.for_each_mut(&mut bufs[..blocks], |b, (left, right)| {
                     let lo = b * block_len;
                     let hi = (lo + block_len).min(cnt);
-                    // SAFETY: task b is the only user of block b's buffers.
-                    let (left, right) = unsafe { (&mut bl.range(b, b + 1)[0], &mut br.range(b, b + 1)[0]) };
                     left.clear();
                     right.clear();
                     route(&idx[lo..hi], rule, left, right);
                 });
-                for b in 0..blocks {
-                    self.left_buf.extend_from_slice(&self.block_left[b]);
-                    self.right_buf.extend_from_slice(&self.block_right[b]);
+                for (left, right) in &bufs[..blocks] {
+                    self.left_buf.extend_from_slice(left);
+                    self.right_buf.extend_from_slice(right);
                 }
+                self.block_bufs = bufs;
             }
             _ => route(idx, rule, &mut self.left_buf, &mut self.right_buf),
         }
@@ -205,7 +202,8 @@ fn partition_sparse(
     left: &mut Vec<i32>,
     right: &mut Vec<i32>,
 ) {
-    let mut cur = sb.cursor();
+    // Start at the leaf's first row: the cursor seeks there through the fast index.
+    let mut cur = sb.cursor_from(idx.first().map_or(0, |&r| r as usize));
     for &i in idx {
         if matches!(rule.route_bin(cur.get(i as usize)), Route::Left) {
             left.push(i);

@@ -75,7 +75,7 @@ fn partition(c: &mut Criterion) {
     c.bench_function("partition/numerical/200k", |b| {
         b.iter(|| {
             part.init();
-            part.split(0, &rule, 1);
+            part.split(0, &rule, 1, None);
             black_box((part.leaf_count(0), part.leaf_count(1)));
         });
     });

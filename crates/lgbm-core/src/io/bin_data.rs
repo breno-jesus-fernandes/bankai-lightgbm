@@ -222,6 +222,16 @@ impl SparseBin {
         }
     }
 
+    /// A cursor positioned at `row` through the fast index, so a reader that starts in the
+    /// middle of the column (one partition block) does not walk the entries before it.
+    pub fn cursor_from(&self, row: usize) -> SparseCursor<'_> {
+        let mut cur = self.cursor();
+        if row > 0 {
+            cur.seek(row);
+        }
+        cur
+    }
+
     /// Every stored `(row, bin)` with a non-zero bin, rows ascending (continuation
     /// entries of long gaps hold `0` and are skipped).
     pub fn for_each_nonzero(&self, mut f: impl FnMut(usize, u32)) {
@@ -380,6 +390,18 @@ mod tests {
             ));
         }
         out
+    }
+
+    #[test]
+    fn cursor_from_matches_cursor_for_every_start_row() {
+        for (bin, dense) in sparse_cases() {
+            for start in [0, dense.len() / 3, dense.len().saturating_sub(1)] {
+                let mut cur = bin.cursor_from(start);
+                for (row, &want) in dense.iter().enumerate().skip(start) {
+                    assert_eq!(cur.get(row), want, "start {start}, row {row}");
+                }
+            }
+        }
     }
 
     #[test]

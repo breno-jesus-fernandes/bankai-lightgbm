@@ -68,7 +68,7 @@ Rules:
 
 - Pin the stable toolchain in `rust-toolchain.toml`. Edition 2024.
 - `cargo fmt --all` and `cargo clippy --workspace --all-targets -- -D warnings` must be clean.
-- `unsafe_code` is denied workspace-wide (`[workspace.lints.rust]`). `unsafe` is allowed only in modules on the allowlist (`histogram`, `simd`, `capi`, `python` FFI), opted in with `#[allow(unsafe_code)]` on the module declaration. Every `unsafe` block needs a `// SAFETY:` comment, and these modules run under `cargo miri test`.
+- `unsafe_code` is denied workspace-wide (`[workspace.lints.rust]`). `unsafe` is allowed only in modules on the allowlist (`histogram`, `simd`, `capi`, `python` FFI, `utils::spin_pool`: the persistent worker pool for training's parallel regions; other modules reach it only through its safe API), opted in with `#[allow(unsafe_code)]` on the module declaration. Every `unsafe` block needs a `// SAFETY:` comment, and these modules run under `cargo miri test`.
 - No `unwrap()`, `expect()`, or `panic!` in library code outside tests. Return `Result` with errors defined via `thiserror`. Panics must never cross the FFI boundary (`catch_unwind` in `lgbm-capi` and `lgbm-python`).
 - Numeric types match upstream exactly: `f64` scores and gradients where upstream uses `double`, and `f32` (`score_t`/`label_t`) where upstream does. Bin indices use the same widths (u8/u16/u32, plus the 4-bit packed form).
 - Public items have doc comments. Prefer small modules and plain functions over deep trait hierarchies. Use static dispatch (generics) in hot paths and `dyn Trait` only at config-selected boundaries (objective, metric, boosting type).

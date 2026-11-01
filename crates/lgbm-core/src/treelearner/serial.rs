@@ -1,4 +1,3 @@
-#![allow(unsafe_code)] // EXPERIMENT: spin pool regions
 //! Leaf-wise tree learner. upstream: src/treelearner/serial_tree_learner.{h,cpp},
 //! src/io/dataset.cpp (`ConstructHistogramsInner`, `FixHistogram`),
 //! src/treelearner/feature_histogram.hpp (`HistogramPool`)
@@ -212,7 +211,11 @@ impl SerialTreeLearner {
         } else {
             rayon::current_num_threads()
         };
-        let spin = (num_threads > 1).then(|| SpinPool::new(num_threads));
+        let spin = if num_threads > 1 {
+            Some(SpinPool::new(num_threads)?)
+        } else {
+            None
+        };
         let mut metas = Vec::with_capacity(num_features);
         let mut feature_hist_offsets = Vec::with_capacity(num_features);
         let mut feature_hist_len = Vec::with_capacity(num_features);
@@ -552,20 +555,21 @@ impl SerialTreeLearner {
             }
         };
         let hist = &mut self.pool.slots[slot];
-        match self.spin.as_ref() {
-            Some(pool) if jobs.len() > 1 && leaf_cnt * jobs.len() >= PARALLEL_HIST_MIN_WORK && !std::env::var("BK_OFF_HIST").is_ok() => {
-                let hs = crate::utils::spin_pool::SharedMut::new(&mut hist[..]);
-                pool.run(jobs.len(), &|j| {
-                    let (gi, gs, nb) = jobs[j];
-                    // SAFETY: each group owns the histogram bins `gs..gs + nb`.
-                    let out = unsafe { hs.range(gs * 2, (gs + nb) * 2) };
-                    build(gi, out);
-                });
+        let parallel_done = match self.spin.as_ref() {
+            Some(pool) if jobs.len() > 1 && leaf_cnt * jobs.len() >= PARALLEL_HIST_MIN_WORK => {
+                // Groups own disjoint, ascending bin ranges.
+                let ranges: Vec<(usize, usize)> = jobs
+                    .iter()
+                    .map(|&(_, gs, nb)| (gs * 2, (gs + nb) * 2))
+                    .collect();
+                pool.for_each_range_mut(&mut hist[..], &ranges, |j, out| build(jobs[j].0, out))
+                    .is_ok()
             }
-            _ => {
-                for &(gi, gs, nb) in &jobs {
-                    build(gi, &mut hist[gs * 2..(gs + nb) * 2]);
-                }
+            _ => false,
+        };
+        if !parallel_done {
+            for &(gi, gs, nb) in &jobs {
+                build(gi, &mut hist[gs * 2..(gs + nb) * 2]);
             }
         }
         // upstream: ConstructHistogramsMultiVal after the dense groups. Values are the same
@@ -694,7 +698,7 @@ impl SerialTreeLearner {
             .map(|f| self.feature_hist_len[f])
             .sum::<usize>()
             * if larger.is_some() { 2 } else { 1 };
-        let parallel = self.num_threads > 1 && searched_bins >= PARALLEL_SEARCH_MIN_BINS && !std::env::var("BK_OFF_SEARCH").is_ok();
+        let parallel = self.num_threads > 1 && searched_bins >= PARALLEL_SEARCH_MIN_BINS;
         let ctx = SearchCtx {
             params: &self.params,
             cat_params: &self.cat_params,
@@ -739,21 +743,12 @@ impl SerialTreeLearner {
         };
         let outcomes: Vec<Option<FeatureOutcome>> = match self.spin.as_ref() {
             Some(pool) if parallel => {
-                let nf = self.num_features;
-                let mut outs: Vec<Option<FeatureOutcome>> = (0..nf).map(|_| None).collect();
-                let metas_s = crate::utils::spin_pool::SharedMut::new(&mut self.metas);
-                let outs_s = crate::utils::spin_pool::SharedMut::new(&mut outs);
-                let tasks = pool.threads();
-                let chunk = nf.div_ceil(tasks);
-                pool.run(tasks, &|t| {
-                    for f in t * chunk..((t + 1) * chunk).min(nf) {
-                        // SAFETY: feature `f` belongs to exactly one task.
-                        let meta = unsafe { &mut metas_s.range(f, f + 1)[0] };
-                        let o = search(f, meta);
-                        unsafe { outs_s.range(f, f + 1)[0] = o };
-                    }
+                let mut work: Vec<(&mut FeatureMeta, Option<FeatureOutcome>)> =
+                    self.metas.iter_mut().map(|m| (m, None)).collect();
+                pool.for_each_mut(&mut work, |f, item| {
+                    item.1 = search(f, &mut *item.0);
                 });
-                outs
+                work.into_iter().map(|(_, o)| o).collect()
             }
             _ => self
                 .metas
@@ -827,7 +822,8 @@ impl SerialTreeLearner {
             let bitset_real = construct_bitset(&real);
             let bitset_bin = construct_bitset(&bins);
             let rule = SplitRule::categorical(&ds, inner, &bitset_bin);
-            self.partition.split(best_leaf, &rule, next_leaf, self.spin.as_ref());
+            self.partition
+                .split(best_leaf, &rule, next_leaf, self.spin.as_ref());
             self.splits.push(SplitRecord {
                 leaf: best_leaf,
                 right: next_leaf,
@@ -853,7 +849,8 @@ impl SerialTreeLearner {
         } else {
             let threshold_double = m.bin_to_value(info.threshold);
             let rule = SplitRule::numerical(&ds, inner, info.threshold, info.default_left);
-            self.partition.split(best_leaf, &rule, next_leaf, self.spin.as_ref());
+            self.partition
+                .split(best_leaf, &rule, next_leaf, self.spin.as_ref());
             self.splits.push(SplitRecord {
                 leaf: best_leaf,
                 right: next_leaf,
