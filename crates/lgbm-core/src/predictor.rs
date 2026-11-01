@@ -167,7 +167,9 @@ impl<'a> Predictor<'a> {
             )));
         }
         let mut out = vec![0.0; nrow * self.num_pred_one_row];
-        if nrow == 0 {
+        // No output per row (e.g. leaf indices with no iterations left): nothing to fill, and
+        // `par_chunks_mut(0)` would panic.
+        if nrow == 0 || self.num_pred_one_row == 0 {
             return Ok(out);
         }
         let k = self.num_pred_one_row;

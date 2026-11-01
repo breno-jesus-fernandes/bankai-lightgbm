@@ -756,7 +756,12 @@ def create_tree_digraph(
         if example_case.shape[0] != 1:
             raise ValueError("example_case must have a single row.")
         if isinstance(example_case, pd_DataFrame):
-            example_case = _data_from_pandas(example_case, booster.pandas_categorical)
+            example_case = _data_from_pandas(
+                data=example_case,
+                feature_name="auto",
+                categorical_feature="auto",
+                pandas_categorical=booster.pandas_categorical,
+            )[0]
         example_case = example_case[0]
 
     return _to_graphviz(

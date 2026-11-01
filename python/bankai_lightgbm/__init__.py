@@ -5,8 +5,16 @@ Use ``import bankai_lightgbm as lgb`` wherever ``import lightgbm as lgb`` works.
 
 from bankai_lightgbm import dask as dask
 from bankai_lightgbm._lib import UPSTREAM_VERSION, __version__
-from bankai_lightgbm.basic import Booster, Dataset, LightGBMError
+from bankai_lightgbm.basic import (
+    Booster,
+    Dataset,
+    EvalResult,
+    LightGBMError,
+    Sequence,
+    register_logger,
+)
 from bankai_lightgbm.callback import (
+    EarlyStopException,
     early_stopping,
     log_evaluation,
     record_evaluation,
@@ -27,11 +35,14 @@ __all__ = [
     "Booster",
     "CVBooster",
     "Dataset",
+    "EarlyStopException",
+    "EvalResult",
     "LGBMClassifier",
     "LGBMModel",
     "LGBMRanker",
     "LGBMRegressor",
     "LightGBMError",
+    "Sequence",
     "__version__",
     "create_tree_digraph",
     "cv",
@@ -42,6 +53,7 @@ __all__ = [
     "plot_split_value_histogram",
     "plot_tree",
     "record_evaluation",
+    "register_logger",
     "reset_parameter",
     "train",
 ]

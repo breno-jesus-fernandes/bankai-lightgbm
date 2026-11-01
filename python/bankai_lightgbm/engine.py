@@ -85,17 +85,17 @@ def train(
         eval_sets = [valid_sets]
     else:
         eval_sets = list(valid_sets)
-    if valid_names is not None and len(valid_names) != len(eval_sets):
-        raise ValueError("Length of valid_names does not match valid_sets")
     # upstream: engine.py (v4.7.0) train(). The training set is evaluated first, under
     # ``valid_names[i]`` or "training"; other sets keep their original index in "valid_{i}".
+    # A ``valid_names`` shorter than ``valid_sets`` only names the first sets, as upstream does.
     named: list[tuple[Dataset, str]] = []
     for i, valid_set in enumerate(eval_sets):
+        given = valid_names[i] if valid_names is not None and i < len(valid_names) else None
         if valid_set is train_set:
-            booster._train_data_name = valid_names[i] if valid_names is not None else "training"
+            booster._train_data_name = given if given is not None else "training"
             named.insert(0, (valid_set, booster._train_data_name))
         else:
-            named.append((valid_set, valid_names[i] if valid_names is not None else f"valid_{i}"))
+            named.append((valid_set, given if given is not None else f"valid_{i}"))
     for valid_set, name in named:
         booster.add_valid(valid_set, name)
 

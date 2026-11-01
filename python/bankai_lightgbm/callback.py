@@ -308,13 +308,13 @@ class _ResetParameterCallback:
     order = 10
     before_iteration = True
 
-    def __init__(self, parameters: dict[str, list[object] | Callable[[int], object]]) -> None:
-        self.parameters = parameters
+    def __init__(self, **kwargs: list[object] | Callable[[int], object]) -> None:
+        self.kwargs = kwargs
 
     def __call__(self, env: CallbackEnv) -> None:
         new_parameters: dict[str, object] = {}
         iteration = env.iteration - env.begin_iteration
-        for name, schedule in self.parameters.items():
+        for name, schedule in self.kwargs.items():
             if isinstance(schedule, list):
                 if len(schedule) != env.end_iteration - env.begin_iteration:
                     raise ValueError(
@@ -339,4 +339,4 @@ def reset_parameter(
     **kwargs: list[object] | Callable[[int], object],
 ) -> _ResetParameterCallback:
     """Reset a supported parameter from a per-iteration list or callback function."""
-    return _ResetParameterCallback(kwargs)
+    return _ResetParameterCallback(**kwargs)

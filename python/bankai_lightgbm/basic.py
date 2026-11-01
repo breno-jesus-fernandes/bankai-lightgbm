@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import abc
 import ctypes
 import json
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
+from collections.abc import Sequence as _ABCSequence
 from copy import deepcopy
 from enum import Enum
 from functools import cache
 from pathlib import Path
-from typing import Any, Literal, Union
+from tempfile import NamedTemporaryFile
+from typing import Any, Literal, NamedTuple, Union
 
 import narwhals.typing as nwt
 import numpy as np
@@ -25,7 +28,7 @@ from bankai_lightgbm.compat import pd_Series as pd_Series
 __all__ = ["Booster", "Dataset", "LightGBMError"]
 
 
-def _list_to_1d_numpy(data: Any, dtype: npt.DTypeLike) -> npt.NDArray[Any]:
+def _list_to_1d_numpy(*, data: Any, dtype: npt.DTypeLike, name: str) -> npt.NDArray[Any]:
     """Flatten a label- or weight-like field to 1-D (upstream ``_list_to_1d_numpy``, v4.7.0).
 
     A column vector is flattened with the warning upstream logs; lists and pandas Series are
@@ -98,7 +101,7 @@ def _log_unknown_params(params: dict[str, Any]) -> None:
     known = _known_parameter_names()
     for key in params:
         if str(key) not in known:
-            _LOGGER.info(f"[LightGBM] [Warning] Unknown parameter: {key}")
+            _log_info(f"[LightGBM] [Warning] Unknown parameter: {key}")
 
 
 def _validate_feature_names(booster_names: list[str], data_names: list[str]) -> None:
@@ -145,6 +148,10 @@ def _categorical_indices(
             out.append(int(item))
     return out
 
+
+# Rows per native call when predicting contributions from a sparse matrix (bounds the dense
+# per-block output; the stacked result stays sparse).
+_SPARSE_PREDICT_BLOCK_ROWS = 16384
 
 # upstream: C_API_PREDICT_* constants
 _C_API_PREDICT_NORMAL = 0
@@ -201,7 +208,7 @@ def _dump_pandas_categorical(pandas_categorical: list[list[Any]] | None) -> str:
     return f"\npandas_categorical:{categorical_json}\n"
 
 
-def _data_from_pandas(data: Any, pandas_categorical: list[list[Any]] | None) -> npt.NDArray[Any]:
+def _pandas_to_matrix(data: Any, pandas_categorical: list[list[Any]] | None) -> npt.NDArray[Any]:
     """Map categorical columns to the training categories' codes (NaN for unseen)."""
     import pandas as pd
 
@@ -222,6 +229,36 @@ def _data_from_pandas(data: Any, pandas_categorical: list[list[Any]] | None) -> 
             codes = data[col].cat.codes.astype(np.float64)
             data[col] = codes.where(codes != -1, np.nan)
     return np.asarray(data.to_numpy(dtype=np.float64, na_value=np.nan))
+
+
+def _data_from_pandas(
+    *,
+    data: Any,
+    feature_name: Any,
+    categorical_feature: Any,
+    pandas_categorical: list[list[Any]] | None,
+) -> tuple[npt.NDArray[Any], Any, Any, list[list[Any]] | None]:
+    """Convert a DataFrame; returns ``(matrix, feature_name, categorical_feature, pandas_categorical)``.
+
+    upstream: python-package/lightgbm/basic.py (v4.7.0) ``_data_from_pandas``. ``"auto"`` names
+    the columns, and ``"auto"`` categorical features are the unordered category columns.
+    """
+    import pandas as pd
+
+    cat_cols = [
+        col
+        for col, dtype in zip(data.columns, data.dtypes, strict=True)
+        if isinstance(dtype, pd.CategoricalDtype)
+    ]
+    cat_cols_not_ordered = [col for col in cat_cols if not data[col].cat.ordered]
+    if pandas_categorical is None:
+        pandas_categorical = [list(data[col].cat.categories) for col in cat_cols]
+    matrix = _pandas_to_matrix(data, pandas_categorical)
+    if feature_name == "auto":
+        feature_name = [str(col) for col in data.columns]
+    if categorical_feature == "auto":
+        categorical_feature = [list(data.columns).index(col) for col in cat_cols_not_ordered]
+    return matrix, feature_name, categorical_feature, pandas_categorical
 
 
 def _init_score_values(init_score: Any, num_data: int) -> list[float]:
@@ -372,6 +409,20 @@ def _choose_param_value(
     return params
 
 
+class _TempFile:
+    """Proxy class to workaround errors on Windows (upstream ``_TempFile``)."""
+
+    def __enter__(self) -> _TempFile:
+        with NamedTemporaryFile(prefix="lightgbm_tmp_", delete=True) as f:
+            self.name = f.name
+            self.path = Path(self.name)
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if self.path.is_file():
+            self.path.unlink()
+
+
 class _DummyLogger:
     """upstream's default logger: ``info`` prints, ``warning`` emits a ``UserWarning``."""
 
@@ -383,14 +434,48 @@ class _DummyLogger:
 
 
 _LOGGER: Any = _DummyLogger()
+_INFO_METHOD_NAME = "info"
+_WARNING_METHOD_NAME = "warning"
+
+
+# upstream: python-package/lightgbm/basic.py (v4.7.0) register_logger
+def _has_method(logger: Any, method_name: str) -> bool:
+    return callable(getattr(logger, method_name, None))
+
+
+def register_logger(
+    logger: Any,
+    info_method_name: str = "info",
+    warning_method_name: str = "warning",
+) -> None:
+    """Register custom logger.
+
+    Parameters
+    ----------
+    logger : Any
+        Custom logger.
+    info_method_name : str, optional (default="info")
+        Method used to log info messages.
+    warning_method_name : str, optional (default="warning")
+        Method used to log warning messages.
+    """
+    if not _has_method(logger, info_method_name) or not _has_method(logger, warning_method_name):
+        raise TypeError(
+            f"Logger must provide '{info_method_name}' and '{warning_method_name}' method"
+        )
+
+    global _LOGGER, _INFO_METHOD_NAME, _WARNING_METHOD_NAME
+    _LOGGER = logger
+    _INFO_METHOD_NAME = info_method_name
+    _WARNING_METHOD_NAME = warning_method_name
 
 
 def _log_info(msg: str) -> None:
-    _LOGGER.info(msg)
+    getattr(_LOGGER, _INFO_METHOD_NAME)(msg)
 
 
 def _log_warning(msg: str) -> None:
-    _LOGGER.warning(msg)
+    getattr(_LOGGER, _WARNING_METHOD_NAME)(msg)
 
 
 def _c_float_dtype_check(data: npt.NDArray[Any]) -> None:
@@ -447,8 +532,8 @@ _LGBM_TrainDataType = Union[
     np.ndarray,
     pd_DataFrame,
     scipy.sparse.spmatrix,
-    "Sequence[Any]",
-    list["Sequence[Any]"],
+    "_ABCSequence[Any]",
+    list["_ABCSequence[Any]"],
     list[np.ndarray],
     nwt.IntoDataFrame,
 ]
@@ -517,6 +602,156 @@ class _MissingType(Enum):
     ZERO = "Zero"
 
 
+# upstream: python-package/lightgbm/basic.py (v4.7.0) Sequence
+class Sequence(abc.ABC):
+    """
+    Generic data access interface.
+
+    Object should support the following operations:
+
+    .. code-block::
+
+        # Get total row number.
+        >>> len(seq)
+        # Random access by row index. Used for data sampling.
+        >>> seq[10]
+        # Range data access. Used to read data in batch when constructing Dataset.
+        >>> seq[0:100]
+        # Optionally specify batch_size to control range data read size.
+        >>> seq.batch_size
+
+    - With random access, **data sampling does not need to go through all data**.
+    - With range data access, there's **no need to read all data into memory thus reduce memory usage**.
+
+    .. versionadded:: 3.3.0
+
+    Attributes
+    ----------
+    batch_size : int
+        Default size of a batch.
+    """
+
+    batch_size = 4096  # Defaults to read 4K rows in each batch.
+
+    @abc.abstractmethod
+    def __getitem__(self, idx: int | slice | list[int]) -> np.ndarray:
+        """Return data for given row index.
+
+        A basic implementation should look like this:
+
+        .. code-block:: python
+
+            if isinstance(idx, numbers.Integral):
+                return self._get_one_line(idx)
+            elif isinstance(idx, slice):
+                return np.stack([self._get_one_line(i) for i in range(idx.start, idx.stop)])
+            elif isinstance(idx, list):
+                # Only required if using ``Dataset.subset()``.
+                return np.array([self._get_one_line(i) for i in idx])
+            else:
+                raise TypeError(f"Sequence index must be integer, slice or list, got {type(idx).__name__}")
+
+        Parameters
+        ----------
+        idx : int, slice[int], list[int]
+            Item index.
+
+        Returns
+        -------
+        result : numpy 1-D array or numpy 2-D array
+            1-D array if idx is int, 2-D array if idx is slice or list.
+        """
+        raise NotImplementedError("Sub-classes of lightgbm.Sequence must implement __getitem__()")
+
+    @abc.abstractmethod
+    def __len__(self) -> int:
+        """Return row count of this sequence."""
+        raise NotImplementedError("Sub-classes of lightgbm.Sequence must implement __len__()")
+
+
+# upstream: python-package/lightgbm/basic.py (v4.7.0) EvalResult
+class EvalResult(NamedTuple):
+    """
+    Result from computing an evaluation metric on a dataset.
+
+    In ``lightgbm<4.7.0``, evaluation results were stored in tuples like this:
+
+      * train(): ``(dataset_name, metric_name, metric_value, maximize)``
+      * cv(): ``(dataset_name, metric_name, mean(metric_value), maximize, std_dev(metric_value))``
+
+    Parameters
+    ----------
+    dataset_name : str
+        Unique identifier for the dataset this result was computed on.
+    metric_name : str
+        Unique identifier for the metric (e.g. "rmse").
+    metric_value : float
+        Value of the evaluation metric.
+    maximize : bool
+        Are higher values better? e.g. ``True`` for AUC and ``False`` for binary error.
+    metric_std_dev : float or None
+        If not ``None``, the standard deviation of metric values computed over a range of results.
+        For example, used when aggregating over cross-validation folds in ``cv()``.
+    """
+
+    dataset_name: str
+    metric_name: str
+    metric_value: float
+    maximize: bool
+    metric_std_dev: float | None = None
+
+    def __len__(self) -> int:
+        if not self.is_cv_result():
+            return 4
+        else:
+            return 5
+
+    def __iter__(self) -> Any:
+        i = 0
+        while i < len(self):
+            yield getattr(self, self._fields[i])
+            i += 1
+
+    def is_cv_result(self) -> bool:
+        """
+        Whether the result was created by ``cv()``.
+
+        If ``True``:
+
+          * ``metric_value`` = mean of ``metric_name`` over CV folds
+          * ``metric_std_dev`` = standard deviation of ``metric_name`` over CV folds
+        """
+        return self.metric_std_dev is not None
+
+
+def _is_sequence_data(data: Any) -> bool:
+    """Whether data is a ``Sequence`` or a list holding one (upstream ``_is_list_of_sequences``)."""
+    return isinstance(data, Sequence) or (
+        isinstance(data, list) and any(isinstance(item, Sequence) for item in data)
+    )
+
+
+def _rows_from_sequences(data: Any) -> npt.NDArray[np.float64]:
+    """Read all rows of a ``Sequence`` (or of a list of Sequences and arrays) in batches.
+
+    upstream reads the same batches but streams them into its bin finder; here the rows are
+    gathered into one matrix, so the memory saving of ``Sequence`` is not kept.
+    """
+    parts: list[npt.NDArray[np.float64]] = []
+    for source in data if isinstance(data, list) else [data]:
+        if isinstance(source, np.ndarray):
+            parts.append(np.asarray(source, dtype=np.float64).reshape(len(source), -1))
+            continue
+        n_rows = len(source)
+        batch = getattr(source, "batch_size", None) or Sequence.batch_size
+        for start in range(0, n_rows, batch):
+            stop = min(start + batch, n_rows)
+            parts.append(np.asarray(source[start:stop], dtype=np.float64).reshape(stop - start, -1))
+    if not parts:
+        raise ValueError("Cannot construct a Dataset from empty data")
+    return np.vstack(parts)
+
+
 class Dataset:
     """Training data. API-compatible with ``lightgbm.Dataset`` for dense inputs.
 
@@ -532,7 +767,7 @@ class Dataset:
         group: Any = None,
         init_score: Any = None,
         feature_name: list[str] | str = "auto",
-        categorical_feature: Sequence[int | str] | str = "auto",
+        categorical_feature: _ABCSequence[int | str] | str = "auto",
         params: dict[str, Any] | None = None,
         free_raw_data: bool = True,
     ) -> None:
@@ -564,6 +799,70 @@ class Dataset:
 
     def num_feature(self) -> int:
         return self.construct()._handle_or_raise().num_feature()
+
+    def create_valid(
+        self,
+        data: Any,
+        label: Any = None,
+        weight: Any = None,
+        group: Any = None,
+        init_score: Any = None,
+        params: dict[str, Any] | None = None,
+    ) -> Dataset:
+        """Create a validation Dataset that uses this Dataset's bin boundaries (upstream ``create_valid``)."""
+        return Dataset(
+            data,
+            label=label,
+            reference=self,
+            weight=weight,
+            group=group,
+            init_score=init_score,
+            params=params,
+        )
+
+    def get_params(self) -> dict[str, Any]:
+        """Return a copy of the parameters given to this Dataset (upstream ``get_params``)."""
+        return deepcopy(self.params)
+
+    def get_data(self) -> Any:
+        """Return the raw data this Dataset was created from (upstream ``get_data``)."""
+        return self.data
+
+    def get_feature_name(self) -> list[str]:
+        """Return the feature names (upstream ``get_feature_name``)."""
+        if isinstance(self.feature_name, list):
+            return [str(name) for name in self.feature_name]
+        if _is_pandas_df(self.data):
+            return [str(c) for c in self.data.columns]
+        return [f"Column_{i}" for i in range(self.num_feature())]
+
+    def set_field(self, field_name: str, data: Any) -> Dataset:
+        """Set a field by name: ``label``, ``weight``, ``init_score`` or ``group`` (upstream ``set_field``)."""
+        setters = {
+            "label": self.set_label,
+            "weight": self.set_weight,
+            "init_score": self.set_init_score,
+            "group": self.set_group,
+        }
+        if field_name not in setters:
+            raise NotImplementedError(f"field '{field_name}' is not supported yet (roadmap P2)")
+        setters[field_name](data)
+        return self
+
+    def get_field(self, field_name: str) -> npt.NDArray[Any] | None:
+        """Get a field by name; ``group`` returns the query boundaries (upstream ``get_field``)."""
+        if field_name == "label":
+            return self.get_label()
+        if field_name == "weight":
+            return self.get_weight()
+        if field_name == "init_score":
+            return self.get_init_score()
+        if field_name == "group":
+            group = self.get_group()
+            if group is None:
+                return None
+            return np.concatenate(([0], np.cumsum(group))).astype(np.int32)
+        raise NotImplementedError(f"field '{field_name}' is not supported yet (roadmap P2)")
 
     def get_label(self) -> npt.NDArray[np.float32] | None:
         """Return the dataset labels as a one-dimensional float32 array.
@@ -780,7 +1079,9 @@ class Dataset:
                 if self.reference is not None
                 else observed_categorical
             )
-            matrix = _data_from_pandas(self.data, self.pandas_categorical)
+            matrix = _pandas_to_matrix(self.data, self.pandas_categorical)
+        elif _is_sequence_data(self.data):
+            matrix = _rows_from_sequences(self.data)
         else:
             matrix = np.asarray(self.data, dtype=np.float64)
         if matrix is not None:
@@ -791,7 +1092,7 @@ class Dataset:
         if self.label is None:
             label = np.zeros(n, dtype=np.float64)
         else:
-            label = _list_to_1d_numpy(self.label, np.float64)
+            label = _list_to_1d_numpy(data=self.label, dtype=np.float64, name="label")
             if label.shape[0] != n:
                 raise ValueError(f"Length of label ({label.shape[0]}) is not same with #data ({n})")
         if isinstance(self.feature_name, list):
@@ -811,7 +1112,10 @@ class Dataset:
             params["categorical_feature"] = ",".join(str(c) for c in categorical)
         weight = None
         if self.weight is not None:
-            weight = [float(w) for w in _list_to_1d_numpy(self.weight, np.float32)]
+            weight = [
+                float(w)
+                for w in _list_to_1d_numpy(data=self.weight, dtype=np.float32, name="weight")
+            ]
             if weight and len(weight) != n:
                 raise LightGBMError("Length of weights differs from the length of #data")
         group = None
@@ -1125,6 +1429,21 @@ class Booster:
         """Register a validation dataset for :meth:`eval_valid`."""
         self.__dict__.setdefault("valid_sets", []).append((data, name))
 
+    def eval(self, data: Dataset, name: str, feval: Any = None) -> list[EvalResult]:
+        """Evaluate the configured metrics on ``data`` (upstream ``Booster.eval``).
+
+        Custom metrics (``feval``) are not supported yet.
+        """
+        if not isinstance(data, Dataset):
+            raise TypeError("Can only eval for Dataset instance")
+        if feval is not None:
+            raise NotImplementedError(
+                "custom metrics (feval) in Booster.eval are not supported yet"
+            )
+        params = {**data.params, **self.params}
+        native = self._native().eval(data._construct_for_eval(), _params_to_strings(params), name)
+        return [EvalResult(*item) for item in native]
+
     def eval_valid(self, feval: Any = None) -> list[tuple[str, str, float, bool]]:
         """Evaluate configured and custom metrics on registered validation data."""
         if feval is None:
@@ -1340,7 +1659,7 @@ class Booster:
         if _is_pandas_df(data):
             if validate_features:
                 _validate_feature_names(self.feature_name(), [str(c) for c in data.columns])
-            mat = _data_from_pandas(data, self.pandas_categorical)
+            mat = _pandas_to_matrix(data, self.pandas_categorical)
         else:
             mat = self._to_dense(data)
         if mat.ndim != 2:
@@ -1396,6 +1715,33 @@ class Booster:
         import scipy.sparse
 
         is_csc = isinstance(cs, scipy.sparse.csc_matrix)
+        nrow_total = int(cs.shape[0])
+        if predict_type == _C_API_PREDICT_CONTRIB and nrow_total > _SPARSE_PREDICT_BLOCK_ROWS:
+            # The native output is built for the rows it is given, so a large input is predicted
+            # in row blocks; the sparse blocks are stacked, as upstream's sparse output is.
+            csr = cs.tocsr()
+            blocks = [
+                self._predict_sparse(
+                    csr[start : start + _SPARSE_PREDICT_BLOCK_ROWS],
+                    predict_type,
+                    start_iteration,
+                    num_iteration,
+                    native_kwargs,
+                )
+                for start in range(0, nrow_total, _SPARSE_PREDICT_BLOCK_ROWS)
+            ]
+            if isinstance(blocks[0], list):
+                stacked: Any = [
+                    scipy.sparse.vstack([block[k] for block in blocks], format="csr")
+                    for k in range(len(blocks[0]))
+                ]
+            else:
+                stacked = scipy.sparse.vstack(blocks, format="csr")
+            if not is_csc:
+                return stacked
+            if isinstance(stacked, list):
+                return [m.tocsc() for m in stacked]
+            return stacked.tocsc()
         _c_int_dtype_check(cs.indptr)
         _c_float_dtype_check(cs.data)
         nrow, ncol = cs.shape
