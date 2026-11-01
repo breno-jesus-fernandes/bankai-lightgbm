@@ -21,6 +21,12 @@ jobs:
 
   benchmark:
     runs-on: ubuntu-latest
+    env:
+      # Intel code placement: where the linker puts a tight loop's branches changes its speed by
+      # about 30% (partition/numerical/200k on the 2-vCPU runners). Keeping branches inside 32-byte
+      # windows removes that swing. Base and candidate are both built with it, so the comparison
+      # stays fair; the product build is unchanged.
+      RUSTFLAGS: "-C llvm-args=-x86-branches-within-32B-boundaries"
     steps:
       - uses: actions/checkout@v4
         with:
