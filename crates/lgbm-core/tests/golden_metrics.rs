@@ -50,6 +50,20 @@ fn flat_params(case: &Path) -> HashMap<String, String> {
         .collect()
 }
 
+/// Relative tolerance off the fixture platform (bit-exact is still required on it).
+///
+/// Justification for `gamma`: upstream's `GammaMetric::LossOnPoint` calls `SafeLog(label)`
+/// on the `float` label, i.e. single-precision `logf`
+/// (upstream: src/metric/regression_metric.hpp (v4.7.0) GammaMetric). `logf` is not
+/// correctly rounded and differs by up to 1 f32 ULP (~1.2e-7) between glibc and Apple's libm;
+/// those per-row differences survive the mean, so 1e-12 cannot hold across libms. Upstream
+/// 4.7.0 itself reproduces our exact bits on linux/x86_64 (`0x3ffebe01709c7c80` for the
+/// `gamma` case vs the macOS/arm64 fixture `0x3ffebe0170985020`, rel. diff ~3.2e-11).
+/// 1e-9 still catches any formula error while admitting a few f32 ULPs of `logf` noise.
+fn off_platform_rtol(metric: &str) -> f64 {
+    if metric == "gamma" { 1e-9 } else { 1e-12 }
+}
+
 #[test]
 fn metrics_match_upstream() {
     let mut failures = Vec::new();
@@ -112,9 +126,10 @@ fn metrics_match_upstream() {
             continue;
         }
         for ((n, g), (_, w)) in got.iter().zip(&want) {
-            let max_ulps = if on_fixture_platform() { 0 } else { 64 };
+            let off_platform_rtol = off_platform_rtol(n);
             let same = g.to_bits() == w.to_bits()
-                || (max_ulps > 0 && (g - w).abs() <= 1e-12 * w.abs().max(1.0));
+                || (!on_fixture_platform()
+                    && (g - w).abs() <= off_platform_rtol * w.abs().max(1.0));
             if !same {
                 failures.push(format!(
                     "{}: {n}\n  ours {g:e} ({:#x})\n  want {w:e} ({:#x})",

@@ -7,11 +7,19 @@ Each case writes ``tests/fixtures/train/<case>/``:
   - ``model.txt`` (upstream ``model_to_string()`` after ``lgb.train``)
 
 bankai must reproduce ``model.txt`` byte-for-byte (see AGENTS.md, parity tolerances).
+
+Upstream's output is platform-specific (FMA contraction, vectorized reductions), so a few cases
+train differently off the fixture platform (``tests/fixtures/platform.json``). Run
+``--platform-overrides`` on another platform to retrain every existing case with upstream there
+and write ``model.<system>-<machine>.txt`` only where it differs from ``model.txt``; the golden
+test then compares bit-exactly against that file on that platform.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+import platform
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -530,10 +538,50 @@ def write_case(
     print(f"wrote {out} ({booster.num_trees()} trees)")
 
 
+def platform_tag() -> str:
+    """``<system>-<machine>``, spelled like ``platform.json`` (e.g. ``linux-x86_64``)."""
+    return f"{platform.system().lower()}-{platform.machine().lower()}"
+
+
+def write_platform_overrides() -> None:
+    """Retrain every existing case here and record upstream's model where it differs."""
+    fixture_platform = json.loads((OUT.parent / "platform.json").read_text())
+    tag = platform_tag()
+    if tag == f"{fixture_platform['system']}-{fixture_platform['machine']}":
+        raise SystemExit(f"{tag} is the fixture platform; regenerate model.txt instead")
+    for out in sorted(p for p in OUT.iterdir() if (p / "model.txt").exists()):
+        meta = json.loads((out / "params.json").read_text())
+        x = np.load(out / "x.npy")
+        y = np.load(out / "y.npy")
+        w = np.load(out / "w.npy") if (out / "w.npy").exists() else None
+        group = np.load(out / "group.npy") if (out / "group.npy").exists() else None
+        cats: list[int] = meta["categorical"]
+        dataset = lgb.Dataset(x, y, weight=w, group=group, categorical_feature=cats or "auto")
+        model = lgb.train(
+            dict(meta["params"]), dataset, num_boost_round=meta["num_boost_round"]
+        ).model_to_string()
+        override = out / f"model.{tag}.txt"
+        if model == (out / "model.txt").read_text():
+            override.unlink(missing_ok=True)
+        else:
+            override.write_text(model)
+            print(f"wrote {override}")
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--platform-overrides",
+        action="store_true",
+        help="write model.<system>-<machine>.txt where upstream differs on this platform",
+    )
+    args = parser.parse_args()
     expected = UPSTREAM_VERSION.lstrip("v")
     if lgb.__version__ != expected:
         raise SystemExit(f"need lightgbm=={expected}, found {lgb.__version__}")
+    if args.platform_overrides:
+        write_platform_overrides()
+        return
     for case, (make, extra, rounds) in CASES.items():
         rng = np.random.default_rng(0)
         x, y = make(rng)

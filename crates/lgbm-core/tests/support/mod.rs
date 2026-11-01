@@ -141,6 +141,14 @@ pub fn load_npy(path: &Path) -> (Vec<f64>, Vec<usize>) {
 /// (`tests/fixtures/platform.json`). Only then is bit-exact parity required.
 pub fn on_fixture_platform() -> bool {
     let text = std::fs::read_to_string(fixtures_dir().join("platform.json")).unwrap_or_default();
+    let (os, arch) = platform();
+    text.contains(&format!("\"system\": \"{os}\""))
+        && text.contains(&format!("\"machine\": \"{arch}\""))
+}
+
+/// This build's platform as Python's `platform.system().lower()` and
+/// `platform.machine().lower()` spell it (the names `platform.json` records).
+fn platform() -> (&'static str, &'static str) {
     let os = match std::env::consts::OS {
         "macos" => "darwin",
         other => other,
@@ -150,8 +158,29 @@ pub fn on_fixture_platform() -> bool {
         "x86_64" if os == "windows" => "amd64",
         other => other,
     };
-    text.contains(&format!("\"system\": \"{os}\""))
-        && text.contains(&format!("\"machine\": \"{arch}\""))
+    (os, arch)
+}
+
+/// `<system>-<machine>`, e.g. `linux-x86_64` or `darwin-arm64`.
+pub fn platform_tag() -> String {
+    let (os, arch) = platform();
+    format!("{os}-{arch}")
+}
+
+/// The expected-output file for this platform: `<stem>.<platform_tag>.<ext>` when upstream
+/// produced different bits here than on the fixture platform (written by
+/// `scripts/gen_train_fixtures.py --platform-overrides`), otherwise `<stem>.<ext>`.
+///
+/// Upstream's own output is platform-specific (FMA contraction, vectorized reductions), so an
+/// override keeps the comparison bit-exact against upstream on every platform that has one.
+pub fn platform_fixture(case: &Path, file: &str) -> PathBuf {
+    let (stem, ext) = file.rsplit_once('.').unwrap_or((file, ""));
+    let specific = case.join(format!("{stem}.{}.{ext}", platform_tag()));
+    if specific.exists() {
+        specific
+    } else {
+        case.join(file)
+    }
 }
 
 fn ulp_distance(a: f64, b: f64) -> u64 {

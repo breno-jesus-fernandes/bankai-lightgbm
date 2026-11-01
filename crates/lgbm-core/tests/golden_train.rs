@@ -1,5 +1,6 @@
 //! P3 gate: models trained by bankai are byte-identical to upstream's
-//! (`deterministic=true`, `num_threads=1`, `force_col_wise=true`).
+//! (`deterministic=true`, `num_threads=1`, `force_col_wise=true`), compared against the
+//! upstream model for this platform when one is recorded (`support::platform_fixture`).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod support;
@@ -67,7 +68,7 @@ fn trained_models_match_upstream() {
             "{}\npandas_categorical:null\n",
             model.save_model_to_string(0, -1, 0).unwrap()
         );
-        let want = std::fs::read_to_string(case.join("model.txt")).unwrap();
+        let want = std::fs::read_to_string(platform_fixture(&case, "model.txt")).unwrap();
         if ours != want {
             let (i, (a, b)) = ours
                 .lines()
