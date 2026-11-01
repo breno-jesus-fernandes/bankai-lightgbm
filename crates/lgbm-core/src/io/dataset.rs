@@ -564,6 +564,16 @@ fn numeric_feature_map(layout: &DatasetLayout) -> Vec<i32> {
     map
 }
 
+/// Labels as stored by upstream's `Metadata::SetLabel` (src/io/metadata.cpp v4.7.0):
+/// `label_t` (float) through `Common::AvoidInf`, so NaN becomes `0` and infinities are
+/// clamped to `+-1e38`.
+fn label_values(label: &[f64]) -> Vec<f32> {
+    label
+        .iter()
+        .map(|&v| crate::tree::avoid_inf_f32(v as f32))
+        .collect()
+}
+
 fn check_label_len(label: &[f64], nrow: usize) -> Result<()> {
     if label.len() != nrow {
         return Err(Error::InvalidParameter(format!(
@@ -811,7 +821,7 @@ impl Dataset {
                 self.num_data()
             )));
         }
-        self.metadata.label = label.iter().map(|&v| v as f32).collect();
+        self.metadata.label = label_values(label);
         Ok(())
     }
 
@@ -873,7 +883,7 @@ impl Dataset {
             max_bin_by_feature: cfg.max_bin_by_feature.clone(),
             forced_bin_bounds: vec![Vec::new(); ncol],
             metadata: Metadata {
-                label: label.iter().map(|&v| v as f32).collect(),
+                label: label_values(label),
                 ..Metadata::default()
             },
             data: group_data,
@@ -909,7 +919,7 @@ impl Dataset {
             .map(|g| g.fill_dense(data, nrow, ncol))
             .collect();
         ds.metadata = Metadata {
-            label: label.iter().map(|&v| v as f32).collect(),
+            label: label_values(label),
             ..Metadata::default()
         };
         ds.raw_data = if reference.raw_data.is_empty() {
@@ -957,7 +967,7 @@ impl Dataset {
             max_bin_by_feature: cfg.max_bin_by_feature.clone(),
             forced_bin_bounds: vec![Vec::new(); m.ncol()],
             metadata: Metadata {
-                label: label.iter().map(|&v| v as f32).collect(),
+                label: label_values(label),
                 ..Metadata::default()
             },
             data: Vec::new(),
@@ -981,7 +991,7 @@ impl Dataset {
         let mut ds = reference.clone();
         ds.layout.num_data = nrow;
         ds.metadata = Metadata {
-            label: label.iter().map(|&v| v as f32).collect(),
+            label: label_values(label),
             ..Metadata::default()
         };
         let has_raw = !reference.raw_data.is_empty();

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Labels are stored like upstream's `Metadata::SetLabel` (float32 through `AvoidInf`: NaN becomes 0, infinities are clamped to ±1e38); NaN labels used to poison the gradients so that no tree could split. `Dataset.get_label()`/`get_weight()` return the stored (sanitized) values once the Dataset is constructed, as upstream does.
+
 - `train()` now returns the reparsed model unless `keep_training_booster=True`, like upstream (`model_from_string(model_to_string())`): the model text matches upstream's byte for byte in every case (e.g. a one-leaf tree's empty `leaf_weight`), and, as upstream, such a booster cannot continue training.
 
 - Nested list parameters are passed like upstream (`interaction_constraints=[[0, 1], [2]]` becomes `[0,1],[2]`); they were flattened into a single group, which silently disabled interaction constraints given as Python lists.

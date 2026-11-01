@@ -1537,3 +1537,38 @@ def test_train_returns_the_reparsed_model_like_upstream(valid: bool) -> None:
     for lib in (lgb, lightgbm):
         kept = lib.train(params, lib.Dataset(x, label=y), 2, keep_training_booster=True)
         assert "leaf_weight=0\n" in kept.model_to_string()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"label_nan": True},
+        {"label_inf": True},
+        {"weight_nan": True},
+        {"weight_huge": True},
+    ],
+    ids=["label-nan", "label-inf", "weight-nan", "weight-huge"],
+)
+def test_non_finite_labels_and_weights_are_sanitized_like_upstream(bad: dict[str, bool]) -> None:
+    """upstream: src/io/metadata.cpp (v4.7.0) stores labels and weights through
+    Common::AvoidInf (NaN -> 0, clamped to +-1e38 as float)."""
+    rng = np.random.default_rng(70)
+    x = rng.normal(size=(500, 4))
+    y = x[:, 0] + rng.normal(size=500) * 0.1
+    w = rng.uniform(0.5, 2.0, size=500)
+    if bad.get("label_nan"):
+        y[::17] = np.nan
+    if bad.get("label_inf"):
+        y[5], y[9] = np.inf, -np.inf
+    if bad.get("weight_nan"):
+        w[::13] = np.nan
+    if bad.get("weight_huge"):
+        w[3] = 1e300
+    params = {"verbosity": -1, "num_threads": 1, "deterministic": True, "num_leaves": 7}
+    outputs = []
+    for lib in (lgb, lightgbm):
+        ds = lib.Dataset(x, label=y, weight=w if "weight" in next(iter(bad)) else None)
+        booster = lib.train(params, ds, num_boost_round=3)
+        outputs.append((booster.model_to_string(), ds.get_label()))
+    assert outputs[0][0] == outputs[1][0]
+    np.testing.assert_array_equal(outputs[0][1], outputs[1][1])

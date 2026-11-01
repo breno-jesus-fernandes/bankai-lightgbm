@@ -229,6 +229,18 @@ impl NativeDataset {
         self.ds.layout.num_total_features
     }
 
+    /// Labels as stored natively (float32, NaN mapped to 0 and clamped like upstream's
+    /// `Metadata::SetLabel`), for `Dataset.get_label` after construction.
+    fn label<'py>(&self, py: Python<'py>) -> Bound<'py, numpy::PyArray1<f32>> {
+        numpy::PyArray1::from_slice(py, &self.ds.metadata.label)
+    }
+
+    /// Weights as stored natively (sanitized like upstream), `None` when unweighted.
+    fn weight<'py>(&self, py: Python<'py>) -> Option<Bound<'py, numpy::PyArray1<f32>>> {
+        let w = &self.ds.metadata.weights;
+        (!w.is_empty()).then(|| numpy::PyArray1::from_slice(py, w))
+    }
+
     /// Write the binned dataset in upstream's binary format (`LGBM_DatasetSaveBinary`).
     fn save_binary(&self, py: Python<'_>, path: String) -> PyResult<()> {
         let ds = Arc::clone(&self.ds);

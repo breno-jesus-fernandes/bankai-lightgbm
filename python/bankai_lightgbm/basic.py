@@ -357,7 +357,13 @@ class Dataset:
         return self.construct()._handle_or_raise().num_feature()
 
     def get_label(self) -> npt.NDArray[np.float32] | None:
-        """Return the dataset labels as a one-dimensional float32 array."""
+        """Return the dataset labels as a one-dimensional float32 array.
+
+        Once constructed, the labels are read back from the native Dataset, as upstream's
+        ``set_label`` does, so non-finite values come back sanitized (NaN -> 0, +-1e38).
+        """
+        if self._handle is not None:
+            return np.asarray(self._handle.label(), dtype=np.float32)
         if self.label is None:
             return None
         return np.asarray(self.label, dtype=np.float32).reshape(-1)
@@ -438,7 +444,11 @@ class Dataset:
         return self._handle
 
     def get_weight(self) -> npt.NDArray[np.float32] | None:
-        """Return the sample weights as a one-dimensional float32 array."""
+        """Return the sample weights as a one-dimensional float32 array (read back from the
+        native Dataset once constructed, sanitized like upstream)."""
+        if self._handle is not None:
+            native = self._handle.weight()
+            return None if native is None else np.asarray(native, dtype=np.float32)
         if self.weight is None:
             return None
         return np.asarray(self.weight, dtype=np.float32).reshape(-1)
