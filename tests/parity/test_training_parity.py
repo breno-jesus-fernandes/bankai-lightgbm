@@ -470,3 +470,29 @@ def test_train_rejects_unimplemented_options() -> None:
         referenced.construct()
     with pytest.raises(ValueError, match="greater than zero"):
         lgb.train({"verbose": -1}, ds, num_boost_round=0)
+
+
+@pytest.mark.xfail(reason="roadmap P4: custom objective gradients are not wired yet")
+def test_custom_regression_objective_matches_upstream() -> None:
+    rng = np.random.default_rng(501)
+    x = rng.normal(size=(80, 3))
+    y = x[:, 0] - 0.4 * x[:, 1]
+
+    def objective(predictions: np.ndarray, dataset: Any) -> tuple[np.ndarray, np.ndarray]:
+        return predictions - dataset.get_label(), np.ones_like(predictions)
+
+    params: dict[str, Any] = {
+        "objective": objective,
+        "metric": "None",
+        "verbosity": -1,
+        "num_leaves": 5,
+        "min_data_in_leaf": 2,
+        "min_data_in_bin": 1,
+        "max_bin": 15,
+        "num_threads": 1,
+        "deterministic": True,
+        "force_col_wise": True,
+    }
+    ours = lgb.train(params, lgb.Dataset(x, label=y), num_boost_round=3)
+    theirs = lightgbm.train(params, lightgbm.Dataset(x, label=y), num_boost_round=3)
+    np.testing.assert_allclose(ours.predict(x), theirs.predict(x), rtol=1e-12, atol=1e-15)
