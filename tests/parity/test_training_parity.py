@@ -742,3 +742,28 @@ def test_reference_dataset_training_matches_upstream(categorical: bool) -> None:
         ).construct()
         predictions.append(library.train(params, dataset, num_boost_round=3).predict(x))
     np.testing.assert_allclose(predictions[1], predictions[0], rtol=1e-12, atol=1e-15)
+
+
+@pytest.mark.parametrize("rows", [[8, 0, 5, 2, 6], [2, 0, 2, 8]])
+def test_subset_metadata_matches_upstream(rows: list[int]) -> None:
+    x = np.random.default_rng(71).normal(size=(12, 3))
+    y = np.arange(12, dtype=float)
+    weights = np.linspace(0.5, 2.0, 12)
+    subsets = []
+    params = {"verbosity": -1, "min_data_in_leaf": 1, "min_data_in_bin": 1}
+    for library in (lightgbm, lgb):
+        source = library.Dataset(x, label=y, weight=weights, group=[4, 3, 5], params=params)
+        subset = source.subset(rows).construct()
+        subsets.append(subset)
+    np.testing.assert_array_equal(subsets[1].label, subsets[0].label)
+    np.testing.assert_array_equal(
+        np.asarray(subsets[1].weight, dtype=np.float32), subsets[0].get_weight()
+    )
+    np.testing.assert_array_equal(subsets[1].group, subsets[0].get_group())
+    predictions = []
+    for library, subset in zip((lightgbm, lgb), subsets, strict=True):
+        booster = library.train(
+            {**params, "objective": "lambdarank", "num_threads": 1}, subset, num_boost_round=3
+        )
+        predictions.append(booster.predict(x))
+    np.testing.assert_allclose(predictions[1], predictions[0], rtol=1e-12, atol=1e-15)

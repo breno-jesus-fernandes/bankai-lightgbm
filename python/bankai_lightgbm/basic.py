@@ -213,7 +213,7 @@ class Dataset:
     def subset(self, used_indices: Any, params: dict[str, Any] | None = None) -> Dataset:
         """Select rows while reusing this Dataset's bin mappers."""
         self.construct()
-        indices = np.asarray(used_indices, dtype=np.int64).reshape(-1)
+        indices = np.sort(np.asarray(used_indices, dtype=np.int64).reshape(-1))
         native = self._handle_or_raise().subset(indices.tolist())
         if _is_pandas_df(self.data):
             subset_data = self.data.iloc[indices]

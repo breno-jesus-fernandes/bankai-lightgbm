@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Sort Dataset subset indices like upstream, preserving label, weight, and query-group alignment for unsorted and duplicate selections.
+
 - Construct dense reference-backed datasets using the source bin mappers and feature groups, including weighted and categorical training.
 
 - Recognize callable objectives through all upstream objective aliases in training and CV. Complete multiclass, DART/GOSS switching, RF rejection, and raw-score custom evaluation acceptance coverage.
