@@ -3,6 +3,12 @@
 
 use std::path::{Path, PathBuf};
 
+/// Reads a model text fixture with LF line endings. A Windows checkout turns the fixtures into
+/// CRLF, while upstream writes LF, so the endings are normalized before any byte comparison.
+pub fn read_model_text(path: impl AsRef<Path>) -> String {
+    std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
+}
+
 pub fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
 }

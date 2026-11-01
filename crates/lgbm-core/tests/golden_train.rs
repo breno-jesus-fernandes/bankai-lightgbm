@@ -68,7 +68,7 @@ fn trained_models_match_upstream() {
             "{}\npandas_categorical:null\n",
             model.save_model_to_string(0, -1, 0).unwrap()
         );
-        let want = std::fs::read_to_string(platform_fixture(&case, "model.txt")).unwrap();
+        let want = read_model_text(platform_fixture(&case, "model.txt"));
         if ours != want {
             let (i, (a, b)) = ours
                 .lines()
