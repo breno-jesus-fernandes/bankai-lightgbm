@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Support switching trained regression/binary boosters to custom objectives while retaining trees and scores; reject updates without derivatives after switching.
+
 - Validate custom gradient/Hessian dimensions and lengths in Python with upstream-compatible errors before native updates; rejected inputs preserve trained model state.
 
 - Apply CV training parameters before constructing dataset bins; verify custom multiclass objectives and CV fold predictions against upstream.

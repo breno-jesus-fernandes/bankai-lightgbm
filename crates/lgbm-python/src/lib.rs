@@ -188,12 +188,27 @@ impl NativeBooster {
                 "Cannot continue training a Booster loaded from a model; construct it with a training Dataset.",
             ));
         };
+        if self.model.objective().is_none() {
+            return Err(LightGBMError::new_err(
+                "Cannot update due to null objective function.",
+            ));
+        }
         let (finished, model) = py.allow_threads(|| {
             let finished = trainer.update_one_iter();
             (finished, trainer.snapshot())
         });
         self.model = model;
         Ok(finished)
+    }
+
+    fn reset_custom_objective(&mut self) -> PyResult<()> {
+        let trainer = self
+            .trainer
+            .as_mut()
+            .ok_or_else(|| LightGBMError::new_err("Booster has no training Dataset"))?;
+        trainer.reset_custom_objective().map_err(to_py)?;
+        self.model = trainer.snapshot();
+        Ok(())
     }
 
     fn update_custom(

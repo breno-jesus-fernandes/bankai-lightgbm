@@ -88,7 +88,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] `binary`, `multiclass`, `multiclassova`, `cross_entropy`, `cross_entropy_lambda` (weighted and unweighted)
 - [x] Ranking: `lambdarank`, `rank_xendcg` (byte-identical training, weighted and unweighted)
 - [ ] Ranking: unbiased lambdarank position bias (`position` field, `lambdarank_position_bias_regularization`)
-- [ ] Custom evaluation (`feval` supports `train` and `cv`, implemented); custom objective (`fobj`) gradient update path implemented for GBDT/DART with regression parity and upstream-compatible RF rejection; multiclass/CV acceptance passes; invalid regression gradient dimensions/lengths covered; pending: objective switching on existing boosters
+- [ ] Custom evaluation (`feval` supports `train` and `cv`, implemented); custom objective (`fobj`) gradient update path implemented for GBDT/DART with regression parity and upstream-compatible RF rejection; multiclass/CV acceptance passes; invalid regression gradient dimensions/lengths covered; regression/binary objective switching covered; remaining boosting-variant and multiclass switching acceptance still pending
 - [x] All metrics: l1/l2/rmse/quantile/huber/fair/poisson/mape/gamma/gamma_deviance/tweedie/r2, ndcg@k, map@k, auc, average_precision, binary_logloss/error, auc_mu, multi_logloss/error (`multi_error_top_k`), cross_entropy, cross_entropy_lambda, kullback_leibler (bit-exact vs upstream on 24 fixtures; wiring into training/early stopping is P5)
 
 ## P5: Boosting variants + training loop

@@ -383,6 +383,8 @@ class Booster:
     def update(self, train_set: Dataset | None = None, fobj: Any = None) -> bool:
         """Train one additional iteration and return whether training has finished."""
         if fobj is not None:
+            if self._handle is not None and self._native().objective() is not None:
+                self._native().reset_custom_objective()
             self.params["objective"] = "none"
         if train_set is not None:
             if self._train_set is not None and train_set is not self._train_set:

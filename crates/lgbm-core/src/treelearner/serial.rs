@@ -150,6 +150,11 @@ pub struct SerialTreeLearner {
 }
 
 impl SerialTreeLearner {
+    /// upstream: SerialTreeLearner::ResetIsConstantHessian after objective reset.
+    pub fn reset_constant_hessian(&mut self, value: bool) {
+        self.is_constant_hessian = value;
+    }
+
     /// upstream: `SerialTreeLearner::Init` (col-wise histogram layout).
     pub fn new(cfg: Arc<Config>, ds: Arc<Dataset>, is_constant_hessian: bool) -> Result<Self> {
         let l = &ds.layout;

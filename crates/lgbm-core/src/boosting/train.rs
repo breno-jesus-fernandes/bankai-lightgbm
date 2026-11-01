@@ -95,6 +95,25 @@ impl GbdtTrainer {
         self.trainer.train_one_iter()
     }
 
+    /// Switch to external derivatives, preserving trees and scores.
+    /// upstream: src/boosting/gbdt.h (v4.7.0) ResetConfig.
+    pub fn reset_custom_objective(&mut self) -> Result<()> {
+        let t = &mut self.trainer;
+        if t.rf {
+            return Err(Error::InvalidParameter(
+                "RF mode do not support custom objective function, please use built-in objectives."
+                    .into(),
+            ));
+        }
+        let mut cfg = (*t.cfg).clone();
+        cfg.objective = "custom".into();
+        t.objective = create_objective(&cfg, &t.ds.metadata)?;
+        t.cfg = Arc::new(cfg);
+        t.class_need_train.fill(true);
+        t.learner.reset_constant_hessian(false);
+        Ok(())
+    }
+
     /// External derivatives in class-major order, as in upstream GBDT::TrainOneIter.
     pub fn update_custom(&mut self, gradients: &[f32], hessians: &[f32]) -> Result<bool> {
         let t = &mut self.trainer;

@@ -607,3 +607,39 @@ def test_invalid_custom_gradients_match_upstream(invalid: str) -> None:
         booster.update(fobj=valid)
         assert booster.current_iteration() == iteration + 1
     assert errors[0] == errors[1]
+
+
+@pytest.mark.parametrize("initial_objective", ["regression", "binary"])
+def test_switch_to_custom_objective_matches_upstream(initial_objective: str) -> None:
+    x = np.random.default_rng(415).normal(size=(80, 3))
+    y = (x[:, 0] > 0).astype(float) if initial_objective == "binary" else x[:, 0]
+    params = {
+        "objective": initial_objective,
+        "verbosity": -1,
+        "num_threads": 1,
+        "min_data_in_leaf": 2,
+        "num_leaves": 5,
+        "min_data_in_bin": 1,
+    }
+    models = []
+    for library in (lightgbm, lgb):
+        booster = library.train(
+            params, library.Dataset(x, label=y), num_boost_round=2, keep_training_booster=True
+        )
+
+        def objective(predictions: np.ndarray, dataset: Any) -> tuple[np.ndarray, np.ndarray]:
+            hessian = np.linspace(0.5, 1.5, len(predictions))
+            return predictions - dataset.get_label(), hessian
+
+        booster.update(fobj=objective)
+        before = booster.predict(x, raw_score=True)
+        iteration = booster.current_iteration()
+        with pytest.raises(
+            library.basic.LightGBMError, match="Cannot update due to null objective function"
+        ):
+            booster.update()
+        assert booster.current_iteration() == iteration
+        np.testing.assert_array_equal(booster.predict(x, raw_score=True), before)
+        booster.update(fobj=objective)
+        models.append(booster)
+    np.testing.assert_allclose(models[1].predict(x), models[0].predict(x), rtol=1e-12, atol=1e-15)
