@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `Booster.shuffle_models(start_iteration, end_iteration)` with upstream's iteration order, keeping continued training consistent with the shuffled trees.
+
 - Add `Booster.set_leaf_output(tree, leaf, value)`, which edits the model and the trees continued training uses, like upstream's `SetLeafValue`.
 
 - Add `Booster.rollback_one_iter()`: removes the last iteration's trees and their training-score contribution like upstream, so training continues identically.

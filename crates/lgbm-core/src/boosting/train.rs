@@ -113,6 +113,11 @@ impl GbdtTrainer {
         Ok(trainer)
     }
 
+    /// Shuffle the trainer's iterations in `[start, end)` (upstream `GBDT::ShuffleModels`).
+    pub fn shuffle_models(&mut self, start: i32, end: i32) {
+        self.trainer.shuffle_models(start, end);
+    }
+
     /// Edit one leaf output of the trainer's trees (upstream `GBDT::SetLeafValue`).
     pub fn set_leaf_value(&mut self, tree_idx: usize, leaf_idx: usize, value: f64) -> Result<()> {
         super::gbdt::set_leaf_in(&mut self.trainer.models, tree_idx, leaf_idx, value)
@@ -521,6 +526,19 @@ impl Trainer {
             &rows,
             &mut self.score[k * n..(k + 1) * n],
         );
+    }
+
+    /// Shuffle iterations in `[start, end)` (upstream `GBDT::ShuffleModels`). Split records
+    /// move with their trees so rollback and DART keep matching them.
+    fn shuffle_models(&mut self, start: i32, end: i32) {
+        let ntpi = self.num_tree_per_iteration.max(1);
+        // Split records exist only for trees this trainer built; keep them aligned if so.
+        let aligned = self.tree_splits.len() == self.models.len();
+        let order = super::gbdt::shuffle_order(self.models.len() / ntpi, start, end);
+        super::gbdt::permute_iterations(&mut self.models, ntpi, &order);
+        if aligned {
+            super::gbdt::permute_iterations(&mut self.tree_splits, ntpi, &order);
+        }
     }
 
     /// upstream: `GBDT::RollbackOneIter`. Subtracts the last iteration's trees (leaf values

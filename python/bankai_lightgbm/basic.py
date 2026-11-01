@@ -460,6 +460,11 @@ class Booster:
         self._init_model = init._native()
         self.pandas_categorical = dataset.pandas_categorical
 
+    def shuffle_models(self, start_iteration: int = 0, end_iteration: int = -1) -> Booster:
+        """Shuffle the iterations in ``[start_iteration, end_iteration)`` (upstream order)."""
+        self._native().shuffle_models(int(start_iteration), int(end_iteration))
+        return self
+
     def set_leaf_output(self, tree_id: int, leaf_id: int, value: float) -> Booster:
         """Set one leaf output of a tree (model tree index, as in ``get_leaf_output``)."""
         self._native().set_leaf_output(int(tree_id), int(leaf_id), float(value))

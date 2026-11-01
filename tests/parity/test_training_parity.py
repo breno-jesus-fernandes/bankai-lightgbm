@@ -1090,3 +1090,27 @@ def test_set_leaf_output_matches_upstream() -> None:
     np.testing.assert_allclose(results[1][0], results[0][0], rtol=1e-12, atol=1e-15)
     np.testing.assert_allclose(results[1][1], results[0][1], rtol=1e-12, atol=1e-15)
     assert results[1][2] == results[0][2] == 0.75
+
+
+def test_shuffle_models_matches_upstream() -> None:
+    # upstream: GBDT::ShuffleModels draws the iteration order with Random(17) over
+    # [start, end); trees move in blocks of num_tree_per_iteration.
+    rng = np.random.default_rng(53)
+    x = rng.normal(size=(100, 3))
+    y = x[:, 0] - 0.5 * x[:, 1] + rng.normal(scale=0.2, size=100)
+    params = {**_init_score_params(), "objective": "regression"}
+    results = []
+    for library in (lightgbm, lgb):
+        booster = library.train(
+            params,
+            library.Dataset(x, label=y, params=params),
+            num_boost_round=5,
+            keep_training_booster=True,
+        )
+        booster.shuffle_models(1, 4)
+        shuffled = (booster.model_to_string(), booster.predict(x, raw_score=True))
+        booster.update()
+        results.append((shuffled, booster.predict(x, raw_score=True)))
+    assert results[1][0][0] == results[0][0][0]
+    np.testing.assert_allclose(results[1][0][1], results[0][0][1], rtol=1e-12, atol=1e-15)
+    np.testing.assert_allclose(results[1][1], results[0][1], rtol=1e-12, atol=1e-15)

@@ -223,6 +223,15 @@ impl NativeBooster {
         })
     }
 
+    /// Shuffle iterations in `[start, end)` in the model and the trainer (upstream
+    /// `LGBM_BoosterShuffleModels`).
+    fn shuffle_models(&mut self, start: i32, end: i32) {
+        self.model.shuffle_models(start, end);
+        if let Some(trainer) = self.trainer.as_mut() {
+            trainer.shuffle_models(start, end);
+        }
+    }
+
     /// Edit one leaf output in the model and in the trainer's copy (upstream
     /// `LGBM_BoosterSetLeafValue`), so continued training sees the edit.
     fn set_leaf_output(&mut self, tree_idx: usize, leaf_idx: usize, value: f64) -> PyResult<()> {

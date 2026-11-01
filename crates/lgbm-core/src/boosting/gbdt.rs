@@ -3,6 +3,7 @@
 use crate::error::{Error, Result};
 use crate::objective::LoadedObjective;
 use crate::tree::Tree;
+use crate::utils::random::Random;
 
 /// A GBDT ensemble (also hosts DART/RF/GOSS models, which share the format).
 #[derive(Debug, Clone)]
@@ -44,7 +45,45 @@ pub(crate) fn set_leaf_in(
     Ok(())
 }
 
+/// upstream: `GBDT::ShuffleModels`: the iteration order over `[start, end)` drawn with
+/// `Random(17)`; iterations outside the range keep their place.
+pub(crate) fn shuffle_order(total_iter: usize, start: i32, end: i32) -> Vec<usize> {
+    let start = start.max(0) as usize;
+    let end = if end <= 0 {
+        total_iter
+    } else {
+        (end as usize).min(total_iter)
+    };
+    let mut order: Vec<usize> = (0..total_iter).collect();
+    let mut rng = Random::new(17);
+    for i in start..end.saturating_sub(1) {
+        let j = rng.next_short(i as i32 + 1, end as i32) as usize;
+        order.swap(i, j);
+    }
+    order
+}
+
+/// Reorder `items` (blocks of `ntpi` per iteration) by `order`.
+pub(crate) fn permute_iterations<T>(items: &mut Vec<T>, ntpi: usize, order: &[usize]) {
+    let mut taken: Vec<Option<T>> = items.drain(..).map(Some).collect();
+    for &iter in order {
+        for j in 0..ntpi {
+            if let Some(item) = taken[iter * ntpi + j].take() {
+                items.push(item);
+            }
+        }
+    }
+    items.extend(taken.into_iter().flatten());
+}
+
 impl Gbdt {
+    /// Shuffle iterations in `[start, end)` (upstream `GBDT::ShuffleModels`).
+    pub fn shuffle_models(&mut self, start: i32, end: i32) {
+        let ntpi = self.num_tree_per_iteration.max(1);
+        let order = shuffle_order(self.models.len() / ntpi, start, end);
+        permute_iterations(&mut self.models, ntpi, &order);
+    }
+
     /// Edit one leaf output of the model (upstream `LGBM_BoosterSetLeafValue`).
     pub fn set_leaf_value(&mut self, tree_idx: usize, leaf_idx: usize, value: f64) -> Result<()> {
         set_leaf_in(&mut self.models, tree_idx, leaf_idx, value)
