@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Split search with `num_threads > 1` fixes and derives each feature's histogram in the same task as its threshold search, so phase 1 runs in parallel and the histogram is not handed between cores. Models are unchanged; on the 2-vCPU benchmark machine training is about 1.35x faster on sparse data and 1.1x on dense data at two threads.
+
 - Training with `num_threads > 1` runs its parallel regions (split search, data partition, dense histograms, multi-value histograms) on a persistent pool of spinning workers instead of rayon, which cuts the per-region overhead on small trees. Models are unchanged; the speedup on two threads is modest on the 2-vCPU benchmark machine (see ROADMAP P3).
 
 - Train on data whose features bundle into a multi-value group (typical once most values are zero, dense or sparse input): histograms are built from upstream's row-wise multi-value bins with the same offsets, block split and merge order, so models match upstream byte for byte (also with several threads). Previously training raised "not supported yet: training with multi-value (sparse) feature groups".

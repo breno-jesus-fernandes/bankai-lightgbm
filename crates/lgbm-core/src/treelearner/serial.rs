@@ -606,16 +606,12 @@ impl SerialTreeLearner {
         let m = &g.bin_mappers[l.feature2subfeature[feature] as usize];
         let mfb = m.most_freq_bin as usize;
         if mfb > 0 {
+            // Only a nonzero most-frequent bin is fixed, so the slice is taken only then:
+            // for bin 0 the range can extend past the end of the histogram.
+            let num_bin = m.num_bin as usize;
             let start = self.feature_hist_offsets[feature] * 2;
-            let data = &mut self.pool.slots[slot][start..start + (m.num_bin as usize) * 2];
-            data[mfb << 1] = sum_gradient;
-            data[(mfb << 1) + 1] = sum_hessian;
-            for i in 0..m.num_bin as usize {
-                if i != mfb {
-                    data[mfb << 1] -= data[i << 1];
-                    data[(mfb << 1) + 1] -= data[(i << 1) + 1];
-                }
-            }
+            let data = &mut self.pool.slots[slot][start..start + num_bin * 2];
+            fix_slice(data, mfb, num_bin, sum_gradient, sum_hessian);
         }
     }
 
@@ -672,26 +668,6 @@ impl SerialTreeLearner {
             None => None,
         };
 
-        // Phase 1 (sequential).
-        for f in 0..self.num_features {
-            if !is_feature_used[f] {
-                continue;
-            }
-            self.fix_histogram(smaller_slot, f, smaller.sum_gradients, smaller.sum_hessians);
-            if let Some(ls) = larger {
-                if use_subtract {
-                    let start = self.feature_hist_offsets[f] * 2;
-                    let len = self.feature_hist_len[f] * 2;
-                    let (small, large) = two_slots(&mut self.pool.slots, smaller_slot, ls);
-                    for i in start..start + len {
-                        large[i] -= small[i];
-                    }
-                } else {
-                    self.fix_histogram(ls, f, larger_leaf.sum_gradients, larger_leaf.sum_hessians);
-                }
-            }
-        }
-
         // Phase 2: threshold searches. Parallel only when the work outweighs a fork/join.
         let searched_bins: usize = (0..self.num_features)
             .filter(|&f| is_feature_used[f])
@@ -699,63 +675,116 @@ impl SerialTreeLearner {
             .sum::<usize>()
             * if larger.is_some() { 2 } else { 1 };
         let parallel = self.num_threads > 1 && searched_bins >= PARALLEL_SEARCH_MIN_BINS;
-        let ctx = SearchCtx {
-            params: &self.params,
-            cat_params: &self.cat_params,
-            monotone_active: self.monotone_active,
-            monotone_penalization: self.monotone_penalization,
-            leaf_depth: &self.leaf_depth,
+        let inp = SearchInputs {
+            is_feature_used,
+            use_subtract,
+            smaller_slot,
+            smaller,
+            smaller_parent_output,
+            mc_smaller,
+            larger: larger.map(|slot| (slot, larger_leaf)),
+            larger_parent_output,
+            mc_larger,
         };
-        let slots = &self.pool.slots;
-        let offsets = &self.feature_hist_offsets;
-        let lens = &self.feature_hist_len;
-        let real_idx = &self.ds.layout.real_feature_idx;
-        let search = |f: usize, meta: &mut FeatureMeta| -> Option<FeatureOutcome> {
-            if !is_feature_used[f] {
-                return None;
-            }
-            let range = |slot: usize| {
-                let start = offsets[f] * 2;
-                &slots[slot][start..start + lens[f] * 2]
-            };
-            let real = real_idx[f];
-            let small = search_feature(
-                &ctx,
-                range(smaller_slot),
-                meta,
-                real,
-                &smaller,
-                smaller_parent_output,
-                mc_smaller,
-            );
-            let large = larger.map(|ls| {
-                search_feature(
-                    &ctx,
-                    range(ls),
-                    meta,
-                    real,
-                    &larger_leaf,
-                    larger_parent_output,
-                    mc_larger,
-                )
-            });
-            Some(FeatureOutcome { small, large })
+        // Parallel: fused per-feature phases (see `fused_search`). Otherwise, or when the
+        // histogram extents overlap, the two sequential phases below.
+        let fused = if parallel {
+            self.fused_search(&inp)
+        } else {
+            None
         };
-        let outcomes: Vec<Option<FeatureOutcome>> = match self.spin.as_ref() {
-            Some(pool) if parallel => {
-                let mut work: Vec<(&mut FeatureMeta, Option<FeatureOutcome>)> =
-                    self.metas.iter_mut().map(|m| (m, None)).collect();
-                pool.for_each_mut(&mut work, |f, item| {
-                    item.1 = search(f, &mut *item.0);
-                });
-                work.into_iter().map(|(_, o)| o).collect()
+        let outcomes: Vec<Option<FeatureOutcome>> = match fused {
+            Some(outcomes) => outcomes,
+            None => {
+                // Phase 1 (sequential).
+                for f in 0..self.num_features {
+                    if !is_feature_used[f] {
+                        continue;
+                    }
+                    self.fix_histogram(
+                        smaller_slot,
+                        f,
+                        smaller.sum_gradients,
+                        smaller.sum_hessians,
+                    );
+                    if let Some(ls) = larger {
+                        if use_subtract {
+                            let start = self.feature_hist_offsets[f] * 2;
+                            let len = self.feature_hist_len[f] * 2;
+                            let (small, large) = two_slots(&mut self.pool.slots, smaller_slot, ls);
+                            for i in start..start + len {
+                                large[i] -= small[i];
+                            }
+                        } else {
+                            self.fix_histogram(
+                                ls,
+                                f,
+                                larger_leaf.sum_gradients,
+                                larger_leaf.sum_hessians,
+                            );
+                        }
+                    }
+                }
+
+                let ctx = SearchCtx {
+                    params: &self.params,
+                    cat_params: &self.cat_params,
+                    monotone_active: self.monotone_active,
+                    monotone_penalization: self.monotone_penalization,
+                    leaf_depth: &self.leaf_depth,
+                };
+                let slots = &self.pool.slots;
+                let offsets = &self.feature_hist_offsets;
+                let lens = &self.feature_hist_len;
+                let real_idx = &self.ds.layout.real_feature_idx;
+                let search = |f: usize, meta: &mut FeatureMeta| -> Option<FeatureOutcome> {
+                    if !is_feature_used[f] {
+                        return None;
+                    }
+                    let range = |slot: usize| {
+                        let start = offsets[f] * 2;
+                        &slots[slot][start..start + lens[f] * 2]
+                    };
+                    let real = real_idx[f];
+                    let small = search_feature(
+                        &ctx,
+                        range(smaller_slot),
+                        meta,
+                        real,
+                        &smaller,
+                        smaller_parent_output,
+                        mc_smaller,
+                    );
+                    let large = larger.map(|ls| {
+                        search_feature(
+                            &ctx,
+                            range(ls),
+                            meta,
+                            real,
+                            &larger_leaf,
+                            larger_parent_output,
+                            mc_larger,
+                        )
+                    });
+                    Some(FeatureOutcome { small, large })
+                };
+                match self.spin.as_ref() {
+                    Some(pool) if parallel => {
+                        let mut work: Vec<(&mut FeatureMeta, Option<FeatureOutcome>)> =
+                            self.metas.iter_mut().map(|m| (m, None)).collect();
+                        pool.for_each_mut(&mut work, |f, item| {
+                            item.1 = search(f, &mut *item.0);
+                        });
+                        work.into_iter().map(|(_, o)| o).collect()
+                    }
+                    _ => self
+                        .metas
+                        .iter_mut()
+                        .enumerate()
+                        .map(|(f, meta)| search(f, meta))
+                        .collect(),
+                }
             }
-            _ => self
-                .metas
-                .iter_mut()
-                .enumerate()
-                .map(|(f, meta)| search(f, meta))
-                .collect(),
         };
 
         // Fold in feature order, as the sequential search did.
@@ -779,6 +808,107 @@ impl SerialTreeLearner {
         if larger_leaf.leaf_index >= 0 {
             self.best_split_per_leaf[larger_leaf.leaf_index as usize] = larger_best;
         }
+    }
+
+    /// Phases 1 and 2 for the parallel path, fused per feature. Each used feature's fix (and
+    /// the subtraction for the larger leaf) runs in the same task as its threshold search, so
+    /// the thread that writes a feature's histogram also reads it, and phase 1 runs in
+    /// parallel. Every feature owns disjoint histogram slices, and each sum keeps the order of
+    /// the sequential code, so the results are identical. Returns `None` when the features'
+    /// histogram extents overlap; the caller then runs the sequential order.
+    fn fused_search(&mut self, inp: &SearchInputs<'_>) -> Option<Vec<Option<FeatureOutcome>>> {
+        let pool = self.spin.as_ref()?;
+        // (start, extent, feature, most-frequent bin, num_bin, searched length, real index)
+        // in histogram entries (two per bin). The fix writes `num_bin` bins, the search reads
+        // `feature_hist_len` bins, and the extent covers both.
+        let mut spans: Vec<(usize, usize, usize, usize, usize, usize, i32)> = Vec::new();
+        for f in 0..self.num_features {
+            if !inp.is_feature_used[f] {
+                continue;
+            }
+            let l = &self.ds.layout;
+            let m = &l.groups[l.feature2group[f] as usize].bin_mappers
+                [l.feature2subfeature[f] as usize];
+            let num_bin = m.num_bin as usize;
+            let len_bins = self.feature_hist_len[f];
+            let mfb = m.most_freq_bin as usize;
+            // A feature with bin 0 as most frequent is not fixed, so it reads only `len_bins`.
+            let extent_bins = if mfb > 0 {
+                num_bin.max(len_bins)
+            } else {
+                len_bins
+            };
+            spans.push((
+                self.feature_hist_offsets[f] * 2,
+                extent_bins * 2,
+                f,
+                mfb,
+                num_bin,
+                len_bins * 2,
+                l.real_feature_idx[f],
+            ));
+        }
+        spans.sort_unstable_by_key(|s| s.0);
+        let mut end = 0usize;
+        for s in &spans {
+            if s.0 < end {
+                return None;
+            }
+            end = s.0 + s.1;
+        }
+        if end > self.pool.slots[inp.smaller_slot].len()
+            || inp
+                .larger
+                .is_some_and(|(ls, _)| end > self.pool.slots[ls].len())
+        {
+            return None;
+        }
+
+        let (small_buf, large_buf) = match inp.larger {
+            Some((ls, _)) => {
+                let (a, b) = two_slots_mut(&mut self.pool.slots, inp.smaller_slot, ls);
+                (a, Some(b))
+            }
+            None => (&mut self.pool.slots[inp.smaller_slot], None),
+        };
+        let spans_iter = || spans.iter().map(|s| (s.0, s.1));
+        let small_pieces = carve_mut(small_buf.as_mut_slice(), spans_iter());
+        let large_pieces: Vec<Option<&mut [f64]>> = match large_buf {
+            Some(b) => carve_mut(b.as_mut_slice(), spans_iter())
+                .into_iter()
+                .map(Some)
+                .collect(),
+            None => spans.iter().map(|_| None).collect(),
+        };
+        let mut metas: Vec<Option<&mut FeatureMeta>> = self.metas.iter_mut().map(Some).collect();
+        let mut work: Vec<(Option<FeatureWork<'_>>, Option<FeatureOutcome>)> =
+            (0..self.num_features).map(|_| (None, None)).collect();
+        for ((s, small), large) in spans.iter().zip(small_pieces).zip(large_pieces) {
+            let meta = metas[s.2].take()?;
+            work[s.2].0 = Some(FeatureWork {
+                meta,
+                small,
+                large,
+                mfb: s.3,
+                num_bin: s.4,
+                search_len: s.5,
+                real: s.6,
+            });
+        }
+
+        let ctx = SearchCtx {
+            params: &self.params,
+            cat_params: &self.cat_params,
+            monotone_active: self.monotone_active,
+            monotone_penalization: self.monotone_penalization,
+            leaf_depth: &self.leaf_depth,
+        };
+        pool.for_each_mut(&mut work, |_f, item| {
+            if let Some(w) = item.0.as_mut() {
+                item.1 = Some(run_feature(&ctx, inp, w));
+            }
+        });
+        Some(work.into_iter().map(|(_, outcome)| outcome).collect())
     }
 
     /// upstream: `SerialTreeLearner::GetParentOutput`
@@ -982,6 +1112,130 @@ impl SerialTreeLearner {
                 score[idx as usize] += out;
             }
         }
+    }
+}
+
+/// Inputs shared by every feature's search in one `find_best_splits_from_histograms` call.
+struct SearchInputs<'a> {
+    is_feature_used: &'a [bool],
+    use_subtract: bool,
+    smaller_slot: usize,
+    smaller: LeafSplits,
+    smaller_parent_output: f64,
+    mc_smaller: Option<(f64, f64)>,
+    /// Slot and leaf of the larger leaf, when it is being searched.
+    larger: Option<(usize, LeafSplits)>,
+    larger_parent_output: f64,
+    mc_larger: Option<(f64, f64)>,
+}
+
+/// One feature's disjoint histogram slices and its metadata, for the fused search.
+struct FeatureWork<'a> {
+    meta: &'a mut FeatureMeta,
+    small: &'a mut [f64],
+    large: Option<&'a mut [f64]>,
+    mfb: usize,
+    num_bin: usize,
+    search_len: usize,
+    real: i32,
+}
+
+/// Phases 1 and 2 for one feature, in the sequential order: fix the smaller leaf, derive the
+/// larger leaf (subtraction, or its own fix), then search both leaves.
+fn run_feature(
+    ctx: &SearchCtx<'_>,
+    inp: &SearchInputs<'_>,
+    w: &mut FeatureWork<'_>,
+) -> FeatureOutcome {
+    fix_slice(
+        w.small,
+        w.mfb,
+        w.num_bin,
+        inp.smaller.sum_gradients,
+        inp.smaller.sum_hessians,
+    );
+    if let Some(large) = w.large.as_deref_mut() {
+        if inp.use_subtract {
+            for (l, s) in large[..w.search_len]
+                .iter_mut()
+                .zip(&w.small[..w.search_len])
+            {
+                *l -= *s;
+            }
+        } else if let Some((_, leaf)) = inp.larger {
+            fix_slice(
+                large,
+                w.mfb,
+                w.num_bin,
+                leaf.sum_gradients,
+                leaf.sum_hessians,
+            );
+        }
+    }
+    let small = search_feature(
+        ctx,
+        &w.small[..w.search_len],
+        w.meta,
+        w.real,
+        &inp.smaller,
+        inp.smaller_parent_output,
+        inp.mc_smaller,
+    );
+    let large = match (w.large.as_deref(), inp.larger) {
+        (Some(large), Some((_, leaf))) => Some(search_feature(
+            ctx,
+            &large[..w.search_len],
+            w.meta,
+            w.real,
+            &leaf,
+            inp.larger_parent_output,
+            inp.mc_larger,
+        )),
+        _ => None,
+    };
+    FeatureOutcome { small, large }
+}
+
+/// upstream: `Dataset::FixHistogram` on one feature's `num_bin` bins (the body of
+/// `SerialTreeLearner::fix_histogram`): the most frequent bin takes the leaf totals minus the rest.
+fn fix_slice(data: &mut [f64], mfb: usize, num_bin: usize, sum_gradient: f64, sum_hessian: f64) {
+    if mfb > 0 {
+        let data = &mut data[..num_bin * 2];
+        data[mfb << 1] = sum_gradient;
+        data[(mfb << 1) + 1] = sum_hessian;
+        for i in 0..num_bin {
+            if i != mfb {
+                data[mfb << 1] -= data[i << 1];
+                data[(mfb << 1) + 1] -= data[(i << 1) + 1];
+            }
+        }
+    }
+}
+
+/// Splits `buf` into the given ascending, disjoint `(start, len)` spans, in order. Spans are
+/// validated by the caller, so the splits cannot go out of range.
+fn carve_mut(mut buf: &mut [f64], spans: impl Iterator<Item = (usize, usize)>) -> Vec<&mut [f64]> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    for (start, len) in spans {
+        let (_skip, after) = buf.split_at_mut(start - pos);
+        let (piece, tail) = after.split_at_mut(len);
+        out.push(piece);
+        buf = tail;
+        pos = start + len;
+    }
+    out
+}
+
+/// Two distinct slots, both mutable.
+fn two_slots_mut(slots: &mut [Vec<f64>], a: usize, b: usize) -> (&mut Vec<f64>, &mut Vec<f64>) {
+    assert_ne!(a, b);
+    if a < b {
+        let (x, y) = slots.split_at_mut(b);
+        (&mut x[a], &mut y[0])
+    } else {
+        let (x, y) = slots.split_at_mut(a);
+        (&mut y[0], &mut x[b])
     }
 }
 
