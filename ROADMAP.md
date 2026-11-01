@@ -3,6 +3,36 @@
 Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every phase ends only when its
 **parity gate** and **bench gate** pass. Follow the TDD rules in `AGENTS.md`.
 
+## Implementation order
+
+Phase numbers group features; they do not define implementation order. Complete CPU parity
+and the Python API before starting P8. Use one feature branch and PR per green step.
+
+1. **Custom objectives (P4):** turn the existing expected-failure regression parity test green;
+   expose native gradient/Hessian updates and wire `Booster.update()`, `train`, and `cv`.
+   Cover multiclass shape and class-major ordering, invalid gradients, and supported boosting variants.
+2. **Dataset state and continuation (P2/P5/P6):** finish metadata, shared reference binning,
+   and subset acceptance coverage, then `init_score`, `init_model`, merge/shuffle,
+   leaf output changes, and rollback.
+3. **Input and interchange (P1/P2/P6):** sparse training/prediction and contributions,
+   text parsers and file prediction, upstream binary dataset decoding, Arrow, forced bins,
+   and raw-data retention for linear trees.
+4. **CPU learners (P3/P4):** query bagging and position metadata before unbiased LambdaRank;
+   extra trees, remaining monotone methods, forced splits, CEGB, linear trees, quantization,
+   refit, and deterministic behavior. Profile before row-wise layout, histogram pool/subtraction,
+   layout selection, and SIMD work; retain and test a scalar fallback.
+5. **Python surface (P6):** remaining Dataset/Booster methods, CV preprocessing/continuation,
+   parameter resets, sklearn estimators, plotting, and the upstream Python package suite.
+6. **CLI and C API (P7):** CLI tasks and conversion on the completed interfaces, then
+   compatible `LGBM_*` symbols and FFI error boundaries.
+7. **Post-1.0 (P8):** only after CPU parity and performance gates pass, implement network
+   and distributed learners, Dask, CUDA, and OpenCL/ROCm behind feature boundaries.
+
+For each feature, first run a failing upstream parity/regression test, implement it, update
+this roadmap and the changelog, and run `scripts/check.sh` before committing and pushing.
+Hot-path changes also require profile evidence and before/after Criterion results. Keep a
+checkbox open until every behavior it names and its applicable performance gates pass.
+
 ## P0: Foundations
 - [x] Cargo workspace + crate skeleton (`lgbm-core`, `lgbm-io`, `lgbm-cli`, `lgbm-capi`, `lgbm-python`)
 - [x] maturin/PyO3 package `bankai_lightgbm` (Python >= 3.11)
@@ -31,7 +61,7 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 - [x] Dense, 4-bit dense, and sparse bins; multi-val (per-feature) bins
 - [ ] `MultiValBin` (row-wise training layout)
 - [x] Exclusive Feature Bundling (`enable_bundle`), sampling identical to upstream
-- [ ] Metadata: label ✅, weight, group/query, init_score, position
+- [ ] Metadata: label, weight, and group/query implemented; init_score and position pending
 - [ ] Parsers: CSV/TSV/LibSVM, header, `label_column`, `weight_column`, `group_column`, `ignore_column`, `two_round`
 - [x] Binary dataset file (`save_binary`) byte-identical to upstream (20 fixtures); reader for upstream files
 - [ ] Load a `Dataset` from an upstream `.bin` file (decode bin data)
@@ -58,7 +88,7 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 - [x] `binary`, `multiclass`, `multiclassova`, `cross_entropy`, `cross_entropy_lambda` (weighted and unweighted)
 - [x] Ranking: `lambdarank`, `rank_xendcg` (byte-identical training, weighted and unweighted)
 - [ ] Ranking: unbiased lambdarank position bias (`position` field, `lambdarank_position_bias_regularization`)
-- [ ] Custom evaluation (`feval` supports `train` and `cv`); custom objective (`fobj`) path
+- [ ] Custom evaluation (`feval` supports `train` and `cv`, implemented); custom objective (`fobj`) path pending
 - [x] All metrics: l1/l2/rmse/quantile/huber/fair/poisson/mape/gamma/gamma_deviance/tweedie/r2, ndcg@k, map@k, auc, average_precision, binary_logloss/error, auc_mu, multi_logloss/error (`multi_error_top_k`), cross_entropy, cross_entropy_lambda, kullback_leibler (bit-exact vs upstream on 24 fixtures; wiring into training/early stopping is P5)
 
 ## P5: Boosting variants + training loop
@@ -70,7 +100,7 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 - [ ] Model merge/shuffle, `set_leaf_output`, `rollback_one_iter`
 
 ## P6: Python package (drop-in)
-- [ ] `Dataset` (done: dense numpy and pandas incl. categoricals, weight, group, categorical_feature; pending: scipy.sparse, pyarrow, files, shared reference binning, subsets, init_score)
+- [ ] `Dataset` (done: dense numpy and pandas incl. categoricals, weight, group, categorical_feature, subsets with source bin mapper reuse; pending: scipy.sparse, pyarrow, files, shared reference binning, complete subset compatibility, init_score)
 - [ ] `Booster` (training works: `lgb.train` gives byte-identical model text; Rust `GbdtTrainer` and Python `Booster.update()` support incremental training; `cv` supports seeded/custom folds, metric aggregation, custom evaluation, callbacks, and `CVBooster`; pending: `cv` preprocessing/continued training and the remaining Booster methods)
 - [ ] Callbacks: `early_stopping`, `log_evaluation`, `record_evaluation` ✅; `reset_parameter` supports learning-rate schedules; pending resets for other parameters
 - [ ] sklearn API: `LGBMModel`, `LGBMClassifier`, `LGBMRegressor`, `LGBMRanker`
