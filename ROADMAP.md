@@ -5,28 +5,37 @@ Target: feature parity with LightGBM **v4.7.0** (see `UPSTREAM_VERSION`). Every 
 
 ## Implementation order
 
-Phase numbers group features; they do not define implementation order. Complete CPU parity
-and the Python API before starting P8. Use one feature branch and PR per green step.
+Phase numbers group features; they do not define implementation order. The work now runs in
+three steps, in this order. Each step ends only when its gate passes. Remaining items (below
+the steps) start after step 3.
 
-1. **Custom objectives (P4):** turn the existing expected-failure regression parity test green;
-   expose native gradient/Hessian updates and wire `Booster.update()`, `train`, and `cv`.
-   Cover multiclass shape and class-major ordering, invalid gradients, and supported boosting variants.
-2. **Dataset state and continuation (P2/P5/P6):** finish metadata, shared reference binning,
-   and subset acceptance coverage, then `init_score`, `init_model`, merge/shuffle,
-   leaf output changes, and rollback.
-3. **Input and interchange (P1/P2/P6):** sparse training/prediction and contributions,
-   text parsers and file prediction, upstream binary dataset decoding, Arrow, forced bins,
-   and raw-data retention for linear trees.
-4. **CPU learners (P3/P4):** query bagging and position metadata before unbiased LambdaRank;
-   extra trees, remaining monotone methods, forced splits, CEGB, linear trees, quantization,
-   refit, and deterministic behavior. Profile before row-wise layout, histogram pool/subtraction,
-   layout selection, and SIMD work; retain and test a scalar fallback.
-5. **Python surface (P6):** remaining Dataset/Booster methods, CV preprocessing/continuation,
-   parameter resets, sklearn estimators, plotting, and the upstream Python package suite.
-6. **CLI and C API (P7):** CLI tasks and conversion on the completed interfaces, then
-   compatible `LGBM_*` symbols and FFI error boundaries.
-7. **Post-1.0 (P8):** only after CPU parity and performance gates pass, implement network
-   and distributed learners, Dask, CUDA, and OpenCL/ROCm behind feature boundaries.
+### Step 1: Python surface (P6)
+Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow.
+- [ ] sklearn estimators: `LGBMModel`, `LGBMClassifier`, `LGBMRegressor`, `LGBMRanker`
+      (names, signatures, defaults, `fit`/`predict`/`predict_proba`, `LightGBMError` behavior as upstream)
+- [ ] Plotting helpers: `plot_importance`, `plot_split_value_histogram`, `plot_metric`, `plot_tree`, `create_tree_digraph`
+- [ ] Port upstream `tests/python_package_test` and run it green against `bankai_lightgbm`
+- Gate: the ported upstream suite passes for everything the step names; unsupported parts raise `NotImplementedError`.
+
+### Step 2: Text input and file prediction (P2/P1)
+Goal: load CSV/TSV/LibSVM files and predict from a file path, as upstream does.
+- [ ] Parsers: CSV/TSV/LibSVM, header, `label_column`, `weight_column`, `group_column`, `ignore_column`, `two_round`
+- [ ] Predict from file (`data` as path)
+- Gate: parity tests against `lightgbm==4.7.0` on the same files (model text and predictions match as the parity tolerances in `AGENTS.md`).
+
+### Step 3: Speed on sparse and dense data (P3/P2)
+Goal: training with `num_threads` 1 and 2 is at least as fast as upstream on both sparse and dense data.
+Start with profiling evidence, then change one thing at a time with interleaved benchmarks.
+- [ ] Row-wise training layout (`force_row_wise`; upstream `GetMultiBinFromAllFeatures`) and layout auto-choice
+- [ ] Multi-value histogram: per-call fixed cost and block merge
+- [ ] Data partition: sparse path and thread scaling
+- [ ] Split search: sequential threshold phase scaling
+- Gate: interleaved benchmark against `lightgbm==4.7.0` (dense and sparse, 1 and 2 threads, medians over at least 7 rounds)
+  shows bankai at or below upstream within the 3% noise threshold; models stay identical to the previous commit.
+
+### After step 3
+The remaining features follow in the order of the sections below: P1–P5 items not yet done,
+then P7 (CLI and C API). P8 (distributed and GPU) starts only after CPU parity and the gates above pass.
 
 For each feature, first run a failing upstream parity/regression test, implement it, update
 this roadmap and the changelog, and run `scripts/check.sh` before committing and pushing.
