@@ -62,6 +62,17 @@ def test_dataset_introspection() -> None:
     assert ds.num_feature() == 4
 
 
+def test_train_without_keep_training_booster_cannot_continue_like_upstream() -> None:
+    rng = np.random.default_rng(482)
+    x = rng.normal(size=(80, 3))
+    for library in (lgb, lightgbm):
+        booster = library.train({"verbosity": -1}, library.Dataset(x, label=x[:, 0]), 1)
+        # upstream fails with AttributeError (free_dataset drops train_set); bankai raises
+        # LightGBMError("Cannot continue training a Booster loaded from a model ...").
+        with pytest.raises((AttributeError, library.basic.LightGBMError)):
+            booster.update()
+
+
 def test_booster_update_matches_two_round_upstream_training() -> None:
     rng = np.random.default_rng(481)
     x = rng.normal(size=(80, 3))
@@ -94,8 +105,13 @@ def test_booster_update_matches_two_round_upstream_training() -> None:
     # Split-gain diagnostics can differ by a few f32 rounding bits across builds.
     np.testing.assert_allclose(incremental.predict(x), expected.predict(x), rtol=1e-12, atol=1e-15)
 
+    # upstream train() returns a reparsed model without its Dataset unless
+    # keep_training_booster=True (engine.py v4.7.0), so only then can training continue.
     trained_once = lgb.train(
-        dict(params), lgb.Dataset(x, label=y, params=dict(params)), num_boost_round=1
+        dict(params),
+        lgb.Dataset(x, label=y, params=dict(params)),
+        num_boost_round=1,
+        keep_training_booster=True,
     )
     assert trained_once.update() is False
     np.testing.assert_allclose(trained_once.predict(x), expected.predict(x), rtol=1e-12, atol=1e-15)
@@ -1500,3 +1516,24 @@ def test_nested_interaction_constraints_keep_their_groups() -> None:
     ]
     assert models[0] == models[1]
     assert "[interaction_constraints: [0],[1,2]]" in models[0]
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_train_returns_the_reparsed_model_like_upstream(valid: bool) -> None:
+    """upstream: engine.py (v4.7.0) train() ends with model_from_string(model_to_string())
+    unless keep_training_booster; a one-leaf tree then prints an empty leaf_weight, as
+    Tree(const char*) returns before parsing it."""
+    rng = np.random.default_rng(71)
+    x = rng.normal(size=(300, 3))
+    y = x[:, 0]
+    params = {"verbosity": -1, "num_threads": 1, "min_data_in_leaf": 250, "metric": "l2"}
+    texts = []
+    for lib in (lgb, lightgbm):
+        train = lib.Dataset(x, label=y)
+        kw = {"valid_sets": [lib.Dataset(x, label=y, reference=train)]} if valid else {}
+        texts.append(lib.train(params, train, num_boost_round=2, **kw).model_to_string())
+    assert texts[0] == texts[1]
+    assert "num_leaves=1\n" in texts[0] and "leaf_weight=\n" in texts[0]
+    for lib in (lgb, lightgbm):
+        kept = lib.train(params, lib.Dataset(x, label=y), 2, keep_training_booster=True)
+        assert "leaf_weight=0\n" in kept.model_to_string()

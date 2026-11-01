@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `train()` now returns the reparsed model unless `keep_training_booster=True`, like upstream (`model_from_string(model_to_string())`): the model text matches upstream's byte for byte in every case (e.g. a one-leaf tree's empty `leaf_weight`), and, as upstream, such a booster cannot continue training.
+
 - Nested list parameters are passed like upstream (`interaction_constraints=[[0, 1], [2]]` becomes `[0,1],[2]`); they were flattened into a single group, which silently disabled interaction constraints given as Python lists.
 
 - Custom objectives (`fobj`) now receive upstream's internal training score instead of a fresh prediction on the training rows: the `init_score` is included, and with DART the trees dropped for that iteration are excluded (previously the drop happened after `fobj` ran, so DART with a custom objective trained differently from upstream).

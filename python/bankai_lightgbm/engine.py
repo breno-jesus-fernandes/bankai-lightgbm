@@ -77,7 +77,7 @@ def train(
     booster.best_iteration = 0
     if valid_sets is None and not callbacks and fobj is None:
         booster._train(num_boost_round)
-        return booster
+        return _finish_training(booster, keep_training_booster)
 
     if valid_sets is None:
         eval_sets = []
@@ -159,9 +159,16 @@ def train(
             break
         if finished:
             break
-    if booster.best_iteration > 0 and not keep_training_booster:
-        model_str = booster.model_to_string(num_iteration=booster.best_iteration)
-        booster.model_from_string(model_str)
+    return _finish_training(booster, keep_training_booster)
+
+
+def _finish_training(booster: Booster, keep_training_booster: bool) -> Booster:
+    """upstream: engine.py (v4.7.0) train() ends with
+    ``booster.model_from_string(booster.model_to_string()).free_dataset()`` unless
+    ``keep_training_booster``: the returned model is the reparsed text, truncated to
+    ``best_iteration`` (a one-leaf tree, for example, loses its ``leaf_weight``)."""
+    if not keep_training_booster:
+        booster.model_from_string(booster.model_to_string())
         booster.valid_sets = []
     return booster
 
