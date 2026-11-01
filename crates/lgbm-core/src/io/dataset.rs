@@ -685,6 +685,130 @@ impl Dataset {
         self.layout.num_data
     }
 
+    /// upstream: `Dataset::GetSubset` — select rows while reusing the source bin mappers.
+    pub fn subset(&self, rows: &[usize]) -> Result<Dataset> {
+        if rows.is_empty() {
+            return Err(Error::InvalidParameter(
+                "Dataset subset must contain at least one row".into(),
+            ));
+        }
+        if rows.iter().any(|&row| row >= self.num_data()) {
+            return Err(Error::InvalidParameter(
+                "Dataset subset row index is out of range".into(),
+            ));
+        }
+        if !self.metadata.init_score.is_empty() {
+            return Err(Error::Unsupported("Dataset subset with init_score".into()));
+        }
+
+        fn subset_bin(source: &BinData, rows: &[usize], num_bins: u32) -> BinData {
+            match source {
+                BinData::Dense(source) => {
+                    let mut subset = DenseBin::new(rows.len(), num_bins);
+                    for (dst, &src) in rows.iter().enumerate() {
+                        subset.set(dst, source.get(src));
+                    }
+                    BinData::Dense(subset)
+                }
+                BinData::Sparse(source) => {
+                    let dense = source.to_dense();
+                    let pairs: Vec<(usize, u32)> = rows
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(dst, &src)| {
+                            let value = dense[src];
+                            (value != 0).then_some((dst, value))
+                        })
+                        .collect();
+                    BinData::Sparse(SparseBin::from_sorted_pairs(rows.len(), num_bins, &pairs))
+                }
+            }
+        }
+
+        let data = self
+            .data
+            .iter()
+            .zip(&self.layout.groups)
+            .map(|(group_data, group_layout)| match group_data {
+                GroupData::Single(bin) => {
+                    GroupData::Single(subset_bin(bin, rows, group_layout.num_total_bin))
+                }
+                GroupData::Multi(bins) => GroupData::Multi(
+                    bins.iter()
+                        .zip(&group_layout.bin_mappers)
+                        .map(|(bin, mapper)| {
+                            let num_bins =
+                                mapper.num_bin as u32 + u32::from(mapper.most_freq_bin != 0);
+                            subset_bin(bin, rows, num_bins)
+                        })
+                        .collect(),
+                ),
+            })
+            .collect();
+
+        let mut layout = self.layout.clone();
+        layout.num_data = rows.len();
+        let label = rows.iter().map(|&row| self.metadata.label[row]).collect();
+        let weights = if self.metadata.weights.is_empty() {
+            Vec::new()
+        } else {
+            rows.iter().map(|&row| self.metadata.weights[row]).collect()
+        };
+        let query_boundaries = if self.metadata.query_boundaries.is_empty() {
+            Vec::new()
+        } else {
+            let mut boundaries = vec![0];
+            let mut current_query = None;
+            let mut current_size = 0i32;
+            for &row in rows {
+                let query = self
+                    .metadata
+                    .query_boundaries
+                    .partition_point(|&boundary| boundary <= row as i32)
+                    .saturating_sub(1);
+                if current_query.is_some_and(|previous| previous != query) {
+                    let previous = boundaries.last().copied().unwrap_or(0);
+                    boundaries.push(previous + current_size);
+                    current_size = 0;
+                }
+                current_query = Some(query);
+                current_size += 1;
+            }
+            if current_size > 0 {
+                let previous = boundaries.last().copied().unwrap_or(0);
+                boundaries.push(previous + current_size);
+            }
+            boundaries
+        };
+        let raw_data = self
+            .raw_data
+            .iter()
+            .map(|column| rows.iter().map(|&row| column[row]).collect())
+            .collect();
+
+        Ok(Dataset {
+            layout,
+            data,
+            metadata: Metadata {
+                label,
+                weights,
+                query_boundaries,
+                init_score: Vec::new(),
+            },
+            feature_names: self.feature_names.clone(),
+            label_idx: self.label_idx,
+            max_bin: self.max_bin,
+            bin_construct_sample_cnt: self.bin_construct_sample_cnt,
+            min_data_in_bin: self.min_data_in_bin,
+            use_missing: self.use_missing,
+            zero_as_missing: self.zero_as_missing,
+            max_bin_by_feature: self.max_bin_by_feature.clone(),
+            forced_bin_bounds: self.forced_bin_bounds.clone(),
+            raw_data,
+            numeric_feature_map: self.numeric_feature_map.clone(),
+        })
+    }
+
     /// upstream: `Dataset::SaveBinaryFile` — byte-identical to upstream's output.
     pub fn to_binary_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -776,6 +900,63 @@ impl Dataset {
 
     pub fn save_binary(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
         std::fs::write(path, self.to_binary_bytes())?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod subset_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn bin_values(bin: &BinData) -> Vec<u32> {
+        match bin {
+            BinData::Dense(dense) => (0..dense.num_rows()).map(|row| dense.get(row)).collect(),
+            BinData::Sparse(sparse) => sparse.to_dense(),
+        }
+    }
+
+    #[test]
+    fn subset_keeps_source_bins_and_selects_metadata_rows() -> crate::Result<()> {
+        let values = [
+            0.0, 10.0, 1.0, 11.0, 2.0, 12.0, 3.0, 13.0, 4.0, 14.0, 5.0, 15.0,
+        ];
+        let labels = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let cfg = Config::from_params(&HashMap::new())?;
+        let mut dataset = Dataset::from_dense(&values, 6, 2, &labels, &cfg, &[])?;
+        dataset.set_weights(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])?;
+        dataset.set_group(&[2, 2, 2])?;
+
+        let rows = [0, 2, 3, 5];
+        let subset = dataset.subset(&rows)?;
+        assert_eq!(subset.num_data(), rows.len());
+        assert_eq!(subset.metadata.label, vec![0.0, 2.0, 3.0, 5.0]);
+        assert_eq!(subset.metadata.weights, vec![1.0, 3.0, 4.0, 6.0]);
+        assert_eq!(subset.metadata.query_boundaries, vec![0, 1, 3, 4]);
+
+        for (source_group, subset_group) in dataset.data.iter().zip(&subset.data) {
+            let (source_bins, subset_bins): (Vec<&BinData>, Vec<&BinData>) =
+                match (source_group, subset_group) {
+                    (GroupData::Single(source), GroupData::Single(subset)) => {
+                        (vec![source], vec![subset])
+                    }
+                    (GroupData::Multi(source), GroupData::Multi(subset)) => {
+                        (source.iter().collect(), subset.iter().collect())
+                    }
+                    _ => {
+                        return Err(Error::InvalidParameter(
+                            "subset changed feature group layout".into(),
+                        ));
+                    }
+                };
+            for (source, selected) in source_bins.iter().zip(subset_bins) {
+                let source = bin_values(source);
+                let selected = bin_values(selected);
+                for (dst, &src) in rows.iter().enumerate() {
+                    assert_eq!(selected[dst], source[src]);
+                }
+            }
+        }
         Ok(())
     }
 }

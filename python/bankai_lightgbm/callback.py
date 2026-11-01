@@ -3,26 +3,23 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Any
 
-if TYPE_CHECKING:
-    from bankai_lightgbm.basic import Booster
-
-EvaluationResult = tuple[str, str, float, bool]
+EvaluationResult = tuple[str, str, float, bool] | tuple[str, str, float, bool, float]
 
 
 @dataclass
 class CallbackEnv:
     """State passed to callbacks after each boosting iteration."""
 
-    model: Booster
+    model: Any
     params: dict[str, object]
     iteration: int
     begin_iteration: int
     end_iteration: int
-    evaluation_result_list: list[EvaluationResult] | None
+    evaluation_result_list: Sequence[EvaluationResult] | None
 
 
 class EarlyStopException(Exception):
@@ -52,13 +49,16 @@ class _EarlyStoppingCallback:
         self.best: dict[tuple[str, str], tuple[float, int, EvaluationResult]] = {}
         self.first_metric: str | None = None
 
-    def before_training(self, model: Booster) -> Booster:
+    def before_training(self, model: Any) -> Any:
         self.best.clear()
         self.first_metric = None
         return model
 
     def __call__(self, env: CallbackEnv) -> None:
         results = env.evaluation_result_list
+        if not results:
+            return
+        results = [result for result in results if result[0] != "train"]
         if not results:
             return
         if self.first_metric is None:
@@ -69,7 +69,7 @@ class _EarlyStoppingCallback:
             return
 
         for result in results:
-            data_name, metric_name, score, higher_is_better = result
+            data_name, metric_name, score, higher_is_better = result[:4]
             key = (data_name, metric_name)
             previous = self.best.get(key)
             improved = previous is None or (
@@ -118,10 +118,14 @@ class _LogEvaluationCallback:
         results = env.evaluation_result_list
         if self.period <= 0 or not results or (env.iteration + 1) % self.period != 0:
             return
-        formatted = "\t".join(
-            f"{data_name}'s {metric_name}: {value:g}"
-            for data_name, metric_name, value, _ in results
-        )
+        formatted_results = []
+        for result in results:
+            data_name, metric_name, value, _ = result[:4]
+            formatted = f"{data_name}'s {metric_name}: {value:g}"
+            if self.show_stdv and len(result) == 5:
+                formatted += f" + {result[4]:g}"
+            formatted_results.append(formatted)
+        formatted = "\t".join(formatted_results)
         logging.getLogger("bankai_lightgbm").info("[%d]\t%s", env.iteration + 1, formatted)
 
 
@@ -139,7 +143,7 @@ class _RecordEvaluationCallback:
             raise TypeError("eval_result should be a dictionary")
         self.eval_result = eval_result
 
-    def before_training(self, model: Booster) -> Booster:
+    def before_training(self, model: Any) -> Any:
         self.eval_result.clear()
         return model
 
@@ -148,9 +152,14 @@ class _RecordEvaluationCallback:
             raise RuntimeError(
                 "record_evaluation() callback enabled but no evaluation results were found"
             )
-        for data_name, metric_name, value, _ in env.evaluation_result_list:
+        for result in env.evaluation_result_list:
+            data_name, metric_name, value, _ = result[:4]
             metrics = self.eval_result.setdefault(data_name, {})
-            metrics.setdefault(metric_name, []).append(value)
+            if len(result) == 5:
+                metrics.setdefault(f"{metric_name}-mean", []).append(value)
+                metrics.setdefault(f"{metric_name}-stdv", []).append(result[4])
+            else:
+                metrics.setdefault(metric_name, []).append(value)
 
 
 def record_evaluation(

@@ -51,5 +51,5 @@ strict = true
 files = ["python/bankai_lightgbm", "scripts"]
 
 [[tool.mypy.overrides]]
-module = ["pandas", "pandas.*", "scipy", "scipy.*", "lightgbm", "lightgbm.*"]
+module = ["pandas", "pandas.*", "scipy", "scipy.*", "sklearn", "sklearn.*", "lightgbm", "lightgbm.*"]
 ignore_missing_imports = true

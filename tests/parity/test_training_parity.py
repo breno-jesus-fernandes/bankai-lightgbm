@@ -266,6 +266,122 @@ def test_reset_parameter_learning_rate_matches_upstream() -> None:
     )
 
 
+def test_cv_metrics_match_upstream() -> None:
+    rng = np.random.default_rng(120)
+    x = rng.normal(size=(90, 3))
+    y = (x[:, 0] - 0.4 * x[:, 1] > 0).astype(float)
+    params: dict[str, Any] = {
+        "objective": "binary",
+        "metric": "binary_logloss",
+        "verbosity": -1,
+        "num_leaves": 5,
+        "min_data_in_leaf": 2,
+        "min_data_in_bin": 1,
+        "max_bin": 15,
+        "learning_rate": 0.2,
+        "boost_from_average": False,
+        "deterministic": True,
+        "force_col_wise": True,
+        "seed": 120,
+        "num_threads": 1,
+    }
+    ours_history: dict[str, dict[str, list[float]]] = {}
+    ours = lgb.cv(
+        dict(params),
+        lgb.Dataset(x, label=y, params=dict(params)),
+        num_boost_round=4,
+        nfold=3,
+        stratified=False,
+        seed=120,
+        eval_train_metric=True,
+        callbacks=[lgb.record_evaluation(ours_history)],
+        return_cvbooster=True,
+    )
+    theirs_history: dict[str, dict[str, list[float]]] = {}
+    theirs = lightgbm.cv(
+        dict(params),
+        lightgbm.Dataset(x, label=y, params=dict(params)),
+        num_boost_round=4,
+        nfold=3,
+        stratified=False,
+        seed=120,
+        eval_train_metric=True,
+        callbacks=[lightgbm.record_evaluation(theirs_history)],
+        return_cvbooster=True,
+    )
+
+    assert ours.keys() == theirs.keys()
+    assert ours_history.keys() == theirs_history.keys()
+    for dataset_name in theirs_history:
+        assert ours_history[dataset_name].keys() == theirs_history[dataset_name].keys()
+        for metric_name in theirs_history[dataset_name]:
+            np.testing.assert_allclose(
+                ours_history[dataset_name][metric_name],
+                theirs_history[dataset_name][metric_name],
+                rtol=1e-12,
+                atol=1e-15,
+            )
+    for name in theirs:
+        if name == "cvbooster":
+            continue
+        np.testing.assert_allclose(ours[name], theirs[name], rtol=1e-12, atol=1e-15)
+    cvbooster = ours["cvbooster"]
+    assert isinstance(cvbooster, lgb.CVBooster)
+    assert cvbooster.current_iteration() == [4, 4, 4]
+    restored = lgb.CVBooster().model_from_string(cvbooster.model_to_string())
+    assert restored.current_iteration() == [4, 4, 4]
+
+
+def test_cv_early_stopping_matches_upstream() -> None:
+    rng = np.random.default_rng(221)
+    x = rng.normal(size=(60, 3))
+    y = (x[:, 0] > 0).astype(float)
+    params: dict[str, Any] = {
+        "objective": "binary",
+        "metric": "binary_logloss",
+        "verbosity": -1,
+        "num_leaves": 5,
+        "min_data_in_leaf": 2,
+        "min_data_in_bin": 1,
+        "max_bin": 15,
+        "learning_rate": 0.2,
+        "boost_from_average": False,
+        "deterministic": True,
+        "force_col_wise": True,
+        "seed": 221,
+        "num_threads": 1,
+        "early_stopping_round": 2,
+        "early_stopping_min_delta": 1.0,
+    }
+    ours = lgb.cv(
+        dict(params),
+        lgb.Dataset(x, label=y, params=dict(params)),
+        num_boost_round=10,
+        nfold=3,
+        stratified=False,
+        seed=221,
+        return_cvbooster=True,
+    )
+    theirs = lightgbm.cv(
+        dict(params),
+        lightgbm.Dataset(x, label=y, params=dict(params)),
+        num_boost_round=10,
+        nfold=3,
+        stratified=False,
+        seed=221,
+        return_cvbooster=True,
+    )
+
+    assert ours["cvbooster"].best_iteration == theirs["cvbooster"].best_iteration == 1
+    assert len(ours["valid binary_logloss-mean"]) == len(theirs["valid binary_logloss-mean"]) == 1
+    np.testing.assert_allclose(
+        ours["valid binary_logloss-mean"],
+        theirs["valid binary_logloss-mean"],
+        rtol=1e-12,
+        atol=1e-15,
+    )
+
+
 def test_train_rejects_unimplemented_options() -> None:
     x = np.random.default_rng(0).normal(size=(40, 2))
     ds = lgb.Dataset(x, label=x[:, 0], params={"verbose": -1})

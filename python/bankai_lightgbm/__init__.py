@@ -11,14 +11,16 @@ from bankai_lightgbm.callback import (
     record_evaluation,
     reset_parameter,
 )
-from bankai_lightgbm.engine import train
+from bankai_lightgbm.engine import CVBooster, cv, train
 
 __all__ = [
     "UPSTREAM_VERSION",
     "Booster",
+    "CVBooster",
     "Dataset",
     "LightGBMError",
     "__version__",
+    "cv",
     "early_stopping",
     "log_evaluation",
     "record_evaluation",

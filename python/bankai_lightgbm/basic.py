@@ -185,6 +185,56 @@ class Dataset:
     def num_feature(self) -> int:
         return self.construct()._handle_or_raise().num_feature()
 
+    def subset(self, used_indices: Any, params: dict[str, Any] | None = None) -> Dataset:
+        """Select rows while reusing this Dataset's bin mappers."""
+        self.construct()
+        indices = np.asarray(used_indices, dtype=np.int64).reshape(-1)
+        native = self._handle_or_raise().subset(indices.tolist())
+        if _is_pandas_df(self.data):
+            subset_data = self.data.iloc[indices]
+        elif _is_scipy_sparse(self.data):
+            subset_data = self.data.tocsr()[indices]
+        else:
+            subset_data = np.asarray(self.data)[indices]
+
+        def take(values: Any) -> Any:
+            if values is None:
+                return None
+            return np.asarray(values)[indices]
+
+        subset_group = None
+        if self.group is not None:
+            group_sizes = [int(size) for size in np.asarray(self.group).reshape(-1)]
+            group_ends = np.cumsum(group_sizes)
+            subset_group = []
+            current_group = -1
+            current_size = 0
+            for row in indices:
+                group_index = int(np.searchsorted(group_ends, row, side="right"))
+                if group_index != current_group:
+                    if current_size:
+                        subset_group.append(current_size)
+                    current_group = group_index
+                    current_size = 0
+                current_size += 1
+            if current_size:
+                subset_group.append(current_size)
+
+        subset = Dataset(
+            subset_data,
+            label=take(self.label),
+            weight=take(self.weight),
+            group=subset_group,
+            feature_name=self.feature_name,
+            categorical_feature=self.categorical_feature,
+            params={**self.params, **(params or {})},
+            free_raw_data=self.free_raw_data,
+        )
+        subset.pandas_categorical = self.pandas_categorical
+        subset._categorical = self._categorical.copy()
+        subset._handle = native
+        return subset
+
     def _handle_or_raise(self) -> NativeDataset:
         if self._handle is None:  # pragma: no cover - construct() always sets it
             raise LightGBMError("Dataset is not constructed")

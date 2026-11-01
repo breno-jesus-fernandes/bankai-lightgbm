@@ -86,6 +86,21 @@ impl NativeDataset {
     fn num_feature(&self) -> usize {
         self.ds.layout.num_total_features
     }
+
+    fn subset(&self, indices: Vec<usize>) -> PyResult<Self> {
+        let ds = self.ds.subset(&indices).map_err(to_py)?;
+        let mut data = Vec::with_capacity(indices.len() * self.ncol);
+        for &row in &indices {
+            let start = row * self.ncol;
+            data.extend_from_slice(&self.data[start..start + self.ncol]);
+        }
+        Ok(NativeDataset {
+            ds: Arc::new(ds),
+            data: Arc::new(data),
+            nrow: indices.len(),
+            ncol: self.ncol,
+        })
+    }
 }
 
 /// Native booster handle. Mirrors upstream's C API `BoosterHandle`.
