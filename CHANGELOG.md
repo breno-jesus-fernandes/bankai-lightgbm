@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add external gradient/Hessian updates and callable regression objectives for GBDT/DART training; reject custom RF objectives as upstream does. Broader custom-objective compatibility remains in progress.
+
 - Add custom evaluation functions (`feval`) to training and cross-validation, including multiple metrics returned by one function.
 - Add seeded cross-validation with custom folds, train/validation metric aggregation, callbacks, early stopping, and optional serializable `CVBooster` results.
 - Add `Dataset.subset()` with source bin mapper reuse for fold construction.

@@ -472,8 +472,8 @@ def test_train_rejects_unimplemented_options() -> None:
         lgb.train({"verbose": -1}, ds, num_boost_round=0)
 
 
-@pytest.mark.xfail(reason="roadmap P4: custom objective gradients are not wired yet")
-def test_custom_regression_objective_matches_upstream() -> None:
+@pytest.mark.parametrize("boosting", ["gbdt", "dart", "rf"])
+def test_custom_regression_objective_matches_upstream(boosting: str) -> None:
     rng = np.random.default_rng(501)
     x = rng.normal(size=(80, 3))
     y = x[:, 0] - 0.4 * x[:, 1]
@@ -483,6 +483,9 @@ def test_custom_regression_objective_matches_upstream() -> None:
 
     params: dict[str, Any] = {
         "objective": objective,
+        "boosting": boosting,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 1,
         "metric": "None",
         "verbosity": -1,
         "num_leaves": 5,
@@ -493,6 +496,11 @@ def test_custom_regression_objective_matches_upstream() -> None:
         "deterministic": True,
         "force_col_wise": True,
     }
+    if boosting == "rf":
+        for library in (lgb, lightgbm):
+            with pytest.raises(library.basic.LightGBMError, match="RF mode do not support custom"):
+                library.train(params, library.Dataset(x, label=y), num_boost_round=3)
+        return
     ours = lgb.train(params, lgb.Dataset(x, label=y), num_boost_round=3)
     theirs = lightgbm.train(params, lightgbm.Dataset(x, label=y), num_boost_round=3)
     np.testing.assert_allclose(ours.predict(x), theirs.predict(x), rtol=1e-12, atol=1e-15)

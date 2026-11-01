@@ -196,6 +196,23 @@ impl NativeBooster {
         Ok(finished)
     }
 
+    fn update_custom(
+        &mut self,
+        py: Python<'_>,
+        gradients: Vec<f32>,
+        hessians: Vec<f32>,
+    ) -> PyResult<bool> {
+        let trainer = self
+            .trainer
+            .as_mut()
+            .ok_or_else(|| LightGBMError::new_err("Booster has no training Dataset"))?;
+        let finished = py
+            .allow_threads(|| trainer.update_custom(&gradients, &hessians))
+            .map_err(to_py)?;
+        self.model = trainer.snapshot();
+        Ok(finished)
+    }
+
     fn reset_learning_rate(&mut self, learning_rate: f64) -> PyResult<()> {
         let Some(trainer) = self.trainer.as_mut() else {
             return Err(LightGBMError::new_err(

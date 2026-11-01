@@ -44,13 +44,16 @@ def train(
     if init_model is not None:
         raise NotImplementedError("init_model is not implemented yet (roadmap P5)")
     params = dict(params)
+    fobj = params.get("objective") if callable(params.get("objective")) else None
+    if fobj is not None:
+        params["objective"] = "none"
     if feature_name != "auto":
         train_set.feature_name = feature_name
     if categorical_feature != "auto":
         train_set.categorical_feature = categorical_feature
     train_set.params.update(params)
     booster = Booster(params=params, train_set=train_set)
-    if valid_sets is None and not callbacks:
+    if valid_sets is None and not callbacks and fobj is None:
         booster._train(num_boost_round)
         return booster
 
@@ -106,7 +109,7 @@ def train(
         before_env = CallbackEnv(booster, params, iteration, 0, num_boost_round, None)
         for callback in before_callbacks:
             callback(before_env)
-        finished = booster.update()
+        finished = booster.update(fobj=fobj)
         evaluation_result_list = booster.eval_valid(feval=feval) or None
         booster.best_score = {}
         for data_name, metric_name, value, _ in evaluation_result_list or []:
@@ -140,9 +143,9 @@ class CVBooster:
         self.boosters = boosters or []
         self.best_iteration = -1
 
-    def update(self) -> list[bool]:
+    def update(self, fobj: Any = None) -> list[bool]:
         """Update every fold model by one boosting iteration."""
-        return [booster.update() for booster in self.boosters]
+        return [booster.update(fobj=fobj) for booster in self.boosters]
 
     def eval_valid(self, feval: Any = None) -> list[list[tuple[str, str, float, bool]]]:
         """Return validation metric results for each fold."""
@@ -321,6 +324,9 @@ def cv(
         if value is not None:
             raise NotImplementedError(f"{name} is not implemented yet")
     params = dict(params)
+    fobj = params.get("objective") if callable(params.get("objective")) else None
+    if fobj is not None:
+        params["objective"] = "none"
     if metrics is not None:
         for alias in ("metric", "metrics", "metric_types"):
             params.pop(alias, None)
@@ -385,7 +391,7 @@ def cv(
         before_env = CallbackEnv(cvbooster, params, iteration, 0, num_boost_round, None)
         for callback in before_callbacks:
             callback(before_env)
-        cvbooster.update()
+        cvbooster.update(fobj=fobj)
         fold_results = cvbooster.eval_valid(feval=feval)
         metric_values: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
         metric_flags: dict[tuple[str, str], bool] = {}

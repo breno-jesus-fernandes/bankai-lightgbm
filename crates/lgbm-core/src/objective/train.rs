@@ -42,6 +42,7 @@ pub fn create_objective(cfg: &Config, md: &Metadata) -> Result<Box<dyn Objective
     Ok(match name {
         "regression" | "regression_l1" | "quantile" | "huber" | "fair" | "poisson" | "mape"
         | "gamma" | "tweedie" => Box::new(Regression::new(name, cfg, md)?),
+        "custom" => Box::new(CustomObjective(cfg.num_class as usize)),
         "binary" => Box::new(BinaryLogloss::new(cfg, md, |l| l > 0.0)?),
         "multiclass" => Box::new(MulticlassSoftmax::new(cfg, md)?),
         "multiclassova" => Box::new(MulticlassOva::new(cfg, md)?),
@@ -69,5 +70,26 @@ pub(crate) fn check_labels_in(label: &[f32], lo: f32, hi: f32, name: &str) -> Re
             "[{name}]: does not tolerate element [{l}] outside [{lo}, {hi}]"
         ))),
         None => Ok(()),
+    }
+}
+
+/// External derivatives, matching upstream GBDT with a null objective function.
+struct CustomObjective(usize);
+impl Objective for CustomObjective {
+    fn name(&self) -> &'static str {
+        "custom"
+    }
+    fn to_model_string(&self) -> String {
+        String::new()
+    }
+    fn get_gradients(&self, _: &[f64], _: &mut [f32], _: &mut [f32]) {}
+    fn boost_from_score(&self, _: usize) -> f64 {
+        0.0
+    }
+    fn is_constant_hessian(&self) -> bool {
+        false
+    }
+    fn num_model_per_iteration(&self) -> usize {
+        self.0
     }
 }

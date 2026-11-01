@@ -78,6 +78,12 @@ impl GbdtTrainer {
         if !matches!(cfg.boosting.as_str(), "gbdt" | "rf" | "dart") {
             return Err(Error::Unsupported(format!("boosting={}", cfg.boosting)));
         }
+        if cfg.boosting == "rf" && cfg.objective == "custom" {
+            return Err(Error::InvalidParameter(
+                "RF mode do not support custom objective function, please use built-in objectives."
+                    .into(),
+            ));
+        }
         let objective = create_objective(&cfg, &ds.metadata)?;
         Ok(GbdtTrainer {
             trainer: Trainer::new(cfg, ds, objective)?,
@@ -87,6 +93,24 @@ impl GbdtTrainer {
     /// One boosting iteration. Returns `true` when no tree could split any further.
     pub fn update_one_iter(&mut self) -> bool {
         self.trainer.train_one_iter()
+    }
+
+    /// External derivatives in class-major order, as in upstream GBDT::TrainOneIter.
+    pub fn update_custom(&mut self, gradients: &[f32], hessians: &[f32]) -> Result<bool> {
+        let t = &mut self.trainer;
+        if t.cfg.objective != "custom" {
+            return Err(Error::InvalidParameter(
+                "custom updates require objective=custom".into(),
+            ));
+        }
+        if gradients.len() != t.gradients.len() || hessians.len() != t.hessians.len() {
+            return Err(Error::InvalidParameter(
+                "gradient and Hessian lengths must equal rows times classes".into(),
+            ));
+        }
+        t.gradients.copy_from_slice(gradients);
+        t.hessians.copy_from_slice(hessians);
+        Ok(t.train_one_iter())
     }
 
     /// Completed iterations.

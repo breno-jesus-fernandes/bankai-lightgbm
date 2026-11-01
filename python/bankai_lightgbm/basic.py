@@ -364,7 +364,7 @@ class Booster:
     def update(self, train_set: Dataset | None = None, fobj: Any = None) -> bool:
         """Train one additional iteration and return whether training has finished."""
         if fobj is not None:
-            raise NotImplementedError("custom objectives are not implemented yet (roadmap P4)")
+            self.params["objective"] = "none"
         if train_set is not None:
             if self._train_set is not None and train_set is not self._train_set:
                 raise NotImplementedError("changing the training Dataset is not implemented yet")
@@ -380,6 +380,12 @@ class Booster:
                 _params_to_strings(merged), dataset._handle_or_raise()
             )
             self.pandas_categorical = dataset.pandas_categorical
+        if fobj is not None:
+            predictions = self.predict(self._train_set.data, raw_score=True)
+            gradients, hessians = fobj(predictions, self._train_set)
+            grad = np.asarray(gradients, dtype=np.float32).ravel(order="F")
+            hess = np.asarray(hessians, dtype=np.float32).ravel(order="F")
+            return self._native().update_custom(grad.tolist(), hess.tolist())
         return self._native().update()
 
     def add_valid(self, data: Dataset, name: str) -> None:
