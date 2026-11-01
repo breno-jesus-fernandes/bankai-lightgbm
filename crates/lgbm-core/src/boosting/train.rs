@@ -244,6 +244,15 @@ fn min_upstream(a: f64, b: f64) -> f64 {
 
 impl Trainer {
     fn new(cfg: Arc<Config>, ds: Arc<Dataset>, objective: Box<dyn Objective>) -> Result<Self> {
+        // Linear-leaf fitting (upstream: src/treelearner/linear_tree_learner.cpp) is not
+        // ported yet (ROADMAP P3); refuse instead of silently training constant leaves.
+        if cfg.linear_tree {
+            return Err(Error::Unsupported(
+                "linear_tree training (roadmap P3); linear-tree models can still be loaded \
+                 and used for prediction"
+                    .into(),
+            ));
+        }
         let n = ds.num_data();
         let ntpi = objective.num_model_per_iteration();
         let sampler = SampleStrategy::new(&cfg, &ds.metadata, ntpi)?;

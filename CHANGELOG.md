@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Training with `linear_tree=true` (or `linear_trees`) now raises an error instead of silently training constant-leaf trees; linear-tree models still load and predict.
+
 - `early_stopping` now follows upstream exactly: metrics are checked in order and the first one that stops improving decides, `best_score` holds that iteration's full evaluation list, the best iteration is also reported when training ends without stopping, `min_delta` accepts a list, `stopping_rounds <= 0` disables it (non-integers raise `TypeError`), and DART or training-set-only evaluation disable it with upstream's warnings. `train` sets `best_iteration = 0` and names a training set passed in `valid_sets` `"training"` (evaluated first), like upstream.
 
 - `train` and `cv` resolve the number of boosting rounds like upstream: `num_iterations` or any of its aliases in `params` (e.g. `n_estimators`) take precedence over `num_boost_round`, conflicting aliases warn, and the chosen value is recorded in the model's parameters on every path (previously training with `valid_sets` or callbacks recorded the default `100`). Invalid counts raise upstream's message.

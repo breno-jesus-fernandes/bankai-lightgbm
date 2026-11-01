@@ -79,7 +79,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [ ] Monotone constraints: basic (done, byte-identical, with `monotone_penalty`); intermediate and advanced still missing
 - [x] `interaction_constraints` (byte-identical; by-tree and by-node sampling)
 - [ ] `forcedsplits_filename`, CEGB (`cegb_*`)
-- [ ] `linear_tree` (`linear_lambda`)
+- [ ] `linear_tree` (`linear_lambda`); training currently refuses `linear_tree=true` with an explicit error
 - [ ] Quantized training (`use_quantized_grad`, `num_grad_quant_bins`, ...)
 - [ ] `refit`, `deterministic`
 - **Gate:** identical trees on fixed seeds; training as fast as upstream

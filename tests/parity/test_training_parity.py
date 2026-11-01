@@ -1264,6 +1264,19 @@ def test_conflicting_num_iterations_aliases_warn_like_upstream() -> None:
     assert split(messages[0]) == split(messages[1])
 
 
+@pytest.mark.parametrize("alias", ["linear_tree", "linear_trees"])
+def test_linear_tree_training_is_rejected_until_ported(alias: str) -> None:
+    # Upstream fits a linear model in every leaf. bankai does not train linear trees yet
+    # (ROADMAP P3 `linear_tree`), so it must refuse rather than silently train plain trees.
+    rng = np.random.default_rng(64)
+    x = rng.normal(size=(200, 3))
+    params = {"verbosity": -1, alias: True}
+    with pytest.raises(lgb.LightGBMError, match="linear_tree"):
+        lgb.train(params, lgb.Dataset(x, label=x[:, 0]), num_boost_round=2)
+    booster = lightgbm.train(params, lightgbm.Dataset(x, label=x[:, 0]), num_boost_round=2)
+    assert "is_linear=1" in booster.model_to_string()
+
+
 def _early_stopping_outcome(
     library: Any, params: dict[str, Any], rounds: int, callback_kw: dict[str, Any], **train_kw: Any
 ) -> tuple[int, int, dict[str, Any]]:
