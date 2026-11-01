@@ -125,3 +125,61 @@ scripts/check.sh
 # Fixtures (needs upstream lightgbm installed)
 python scripts/gen_fixtures.py
 ```
+
+## 12. How tests and benchmarks are run
+
+### Build profile (read this before any timing)
+- **Benchmarks use a release build only.** Python timings require `maturin develop -r`. Rust timings require `cargo bench` or `cargo test --release`.
+- `scripts/check.sh` installs a **debug** build of the Python package. After running it, rebuild with `maturin develop -r` before measuring anything.
+- Before reporting a Python timing, confirm the installed build: the `.so` under `python/bankai_lightgbm/` must be newer than `target/release`, and must not be newer than `target/debug` from a later check run. If in doubt, rebuild.
+- Every reported number must record: build profile, `num_threads`, upstream version (`lightgbm==4.7.0`), `OMP_WAIT_POLICY` for upstream runs, data shape, and the commit hash.
+
+### Comparing with upstream
+- Run bankai and `lightgbm==4.7.0` in the same venv, on the same data, with the same params and the same `num_threads`.
+- Compare only within one session. Numbers from different sessions or machine states are not comparable.
+
+### Measuring on a noisy machine
+- The development VM has 2 vCPUs and ±20–30% run-to-run noise.
+- Interleave the runs (A, B, A, B, …) over at least 7 rounds, and report medians. Best-of-N alone is not enough.
+- A single-run difference below about 3% is noise (the AGENTS.md CI threshold).
+- For micro-measurements, repeat the call many times per timed block so each block lasts at least a few milliseconds.
+
+### Where tests live
+- Unit: `#[cfg(test)]` modules next to the code, run with `cargo test --workspace`.
+- Integration: `crates/*/tests/`. Thread invariance (`crates/lgbm-core/tests/thread_invariance.rs`) must pass for 1, 2 and 3 threads. Compare only the tree section of the model text, because the trailing `parameters:` block echoes `num_threads`.
+- Parity: `pytest tests/parity` against `lightgbm==4.7.0`.
+- Criterion: `cargo bench -p lgbm-core`. For any hot-path change, record before and after results on the same machine, and the change must stay within the 5% gate.
+
+### Experiments
+- Throwaway timing tests live outside the repository (the session scratchpad). Do not commit them, and do not leave untracked files in the repo.
+- A test used only for investigation is marked `#[ignore]` and run with `cargo test --release -- --ignored --nocapture`. If it is worth keeping, convert it into a criterion benchmark or a proper test first.
+- Results from an experiment go into the PR or CHANGELOG notes with the commands used to reproduce them.
+
+## 12. How tests and benchmarks are run
+
+### Build profile (read this before any timing)
+- **Benchmarks use a release build only.** Python timings require `maturin develop -r`. Rust timings require `cargo bench` or `cargo test --release`.
+- `scripts/check.sh` installs a **debug** build of the Python package. After running it, rebuild with `maturin develop -r` before measuring anything.
+- Before reporting a Python timing, confirm the installed build: the `.so` under `python/bankai_lightgbm/` must be newer than `target/release`, and must not be newer than `target/debug` from a later check run. If in doubt, rebuild.
+- Every reported number must record: build profile, `num_threads`, upstream version (`lightgbm==4.7.0`), `OMP_WAIT_POLICY` for upstream runs, data shape, and the commit hash.
+
+### Comparing with upstream
+- Run bankai and `lightgbm==4.7.0` in the same venv, on the same data, with the same params and the same `num_threads`.
+- Compare only within one session. Numbers from different sessions or machine states are not comparable.
+
+### Measuring on a noisy machine
+- The development VM has 2 vCPUs and ±20–30% run-to-run noise.
+- Interleave the runs (A, B, A, B, …) over at least 7 rounds, and report medians. Best-of-N alone is not enough.
+- A single-run difference below about 3% is noise (the AGENTS.md CI threshold).
+- For micro-measurements, repeat the call many times per timed block so each block lasts at least a few milliseconds.
+
+### Where tests live
+- Unit: `#[cfg(test)]` modules next to the code, run with `cargo test --workspace`.
+- Integration: `crates/*/tests/`. Thread invariance (`crates/lgbm-core/tests/thread_invariance.rs`) must pass for 1, 2 and 3 threads. Compare only the tree section of the model text, because the trailing `parameters:` block echoes `num_threads`.
+- Parity: `pytest tests/parity` against `lightgbm==4.7.0`.
+- Criterion: `cargo bench -p lgbm-core`. For any hot-path change, record before and after results on the same machine, and the change must stay within the 5% gate.
+
+### Experiments
+- Throwaway timing tests live outside the repository (the session scratchpad). Do not commit them, and do not leave untracked files in the repo.
+- A test used only for investigation is marked `#[ignore]` and run with `cargo test --release -- --ignored --nocapture`. If it is worth keeping, convert it into a criterion benchmark or a proper test first.
+- Results from an experiment go into the PR or CHANGELOG notes with the commands used to reproduce them.
