@@ -1031,3 +1031,38 @@ def test_init_model_with_validation_callbacks_matches_upstream() -> None:
         )
         curves.append(record["valid"]["l2"])
     np.testing.assert_allclose(curves[1], curves[0], rtol=1e-12, atol=1e-15)
+
+
+@pytest.mark.parametrize("strategy", ["bagging", "goss"])
+def test_rollback_one_iter_matches_upstream(strategy: str) -> None:
+    # upstream: GBDT::RollbackOneIter subtracts the last iteration's shrunken trees from the
+    # training scores, drops them, and training continues from the rolled back scores.
+    rng = np.random.default_rng(51)
+    x = rng.normal(size=(120, 3))
+    y = x[:, 0] - 0.5 * x[:, 1] + rng.normal(scale=0.2, size=120)
+    params = {
+        **_init_score_params(),
+        "objective": "regression",
+        "data_sample_strategy": strategy,
+        "bagging_freq": 1 if strategy == "bagging" else 0,
+        "bagging_fraction": 0.7,
+        "bagging_seed": 3,
+        "seed": 7,
+    }
+    results = []
+    for library in (lightgbm, lgb):
+        booster = library.train(
+            params,
+            library.Dataset(x, label=y, params=params),
+            num_boost_round=4,
+            keep_training_booster=True,
+        )
+        booster.rollback_one_iter()
+        after_rollback = booster.predict(x, raw_score=True)
+        booster.update()
+        results.append(
+            (booster.current_iteration(), after_rollback, booster.predict(x, raw_score=True))
+        )
+    assert results[1][0] == results[0][0] == 4
+    np.testing.assert_allclose(results[1][1], results[0][1], rtol=1e-12, atol=1e-15)
+    np.testing.assert_allclose(results[1][2], results[0][2], rtol=1e-12, atol=1e-15)

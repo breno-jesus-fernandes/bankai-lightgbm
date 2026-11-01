@@ -223,6 +223,21 @@ impl NativeBooster {
         })
     }
 
+    /// Drop the last iteration (upstream `LGBM_BoosterRollbackOneIter`).
+    fn rollback_one_iter(&mut self, py: Python<'_>) -> PyResult<()> {
+        let Some(trainer) = self.trainer.as_mut() else {
+            return Err(LightGBMError::new_err(
+                "Cannot roll back a Booster loaded from a model; construct it with a training Dataset.",
+            ));
+        };
+        let model = py.allow_threads(|| -> lgbm_core::Result<Gbdt> {
+            trainer.rollback_one_iter()?;
+            Ok(trainer.snapshot())
+        });
+        self.model = model.map_err(to_py)?;
+        Ok(())
+    }
+
     fn update(&mut self, py: Python<'_>) -> PyResult<bool> {
         let Some(trainer) = self.trainer.as_mut() else {
             return Err(LightGBMError::new_err(

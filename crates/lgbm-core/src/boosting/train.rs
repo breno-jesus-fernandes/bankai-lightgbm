@@ -113,6 +113,12 @@ impl GbdtTrainer {
         Ok(trainer)
     }
 
+    /// Remove the last iteration's trees and their contribution to the training scores
+    /// (upstream `Booster::RollbackOneIter`).
+    pub fn rollback_one_iter(&mut self) -> Result<()> {
+        self.trainer.rollback_one_iter()
+    }
+
     /// One boosting iteration. Returns `true` when no tree could split any further.
     pub fn update_one_iter(&mut self) -> bool {
         self.trainer.train_one_iter()
@@ -466,14 +472,13 @@ impl Trainer {
                 tree.as_constant_tree(0.0, n as i32);
             }
             tree.finish_training();
-            if self.dart.is_some() {
-                let splits = if tree.num_leaves > 1 {
-                    self.learner.last_splits()
-                } else {
-                    Vec::new()
-                };
-                self.tree_splits.push(splits);
-            }
+            // Kept for every tree: DART replays them, and rollback subtracts them.
+            let splits = if tree.num_leaves > 1 {
+                self.learner.last_splits()
+            } else {
+                Vec::new()
+            };
+            self.tree_splits.push(splits);
             self.models.push(tree);
         }
         if !should_continue {
@@ -511,6 +516,46 @@ impl Trainer {
             &rows,
             &mut self.score[k * n..(k + 1) * n],
         );
+    }
+
+    /// upstream: `GBDT::RollbackOneIter`. Subtracts the last iteration's trees (leaf values
+    /// negated, as upstream's `Shrinkage(-1.0)`) from the training scores and drops them.
+    fn rollback_one_iter(&mut self) -> Result<()> {
+        if self.rf || self.dart.is_some() {
+            return Err(Error::Unsupported(format!(
+                "rollback_one_iter with boosting={}",
+                self.cfg.boosting
+            )));
+        }
+        let ntpi = self.num_tree_per_iteration;
+        if self.iter <= 0 || self.models.len() < ntpi {
+            return Ok(());
+        }
+        if self.tree_splits.len() != self.models.len() {
+            return Err(Error::Unsupported(
+                "rollback_one_iter of trees loaded from init_model".into(),
+            ));
+        }
+        let n = self.ds.num_data();
+        let rows: Vec<i32> = (0..n as i32).collect();
+        let first = self.models.len() - ntpi;
+        for k in 0..ntpi {
+            let idx = first + k;
+            let mut negated = self.models[idx].clone();
+            for value in &mut negated.leaf_value {
+                *value = -*value;
+            }
+            self.learner.add_prediction_for_rows(
+                &negated,
+                &self.tree_splits[idx],
+                &rows,
+                &mut self.score[k * n..(k + 1) * n],
+            );
+        }
+        self.models.truncate(first);
+        self.tree_splits.truncate(first);
+        self.iter -= 1;
+        Ok(())
     }
 
     /// upstream: `DART::DroppingTrees`. Chooses the trees to drop, removes them from the

@@ -97,7 +97,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] GOSS (`data_sample_strategy=goss`, byte-identical; both the subset and dense regimes)
 - [x] Early stopping (`early_stopping_round`, `first_metric_only`, `early_stopping_min_delta`; validation metrics and callback parity)
 - [ ] Continued training: `init_model` ✅ for gbdt/multiclass (file, Booster, validation and callbacks; DART rejected for now); `init_score` ✅ (byte-identical training, multiclass, validation metrics, subsets; RF rejects it like upstream)
-- [ ] Model merge/shuffle, `set_leaf_output`, `rollback_one_iter`
+- [ ] Model merge/shuffle, `set_leaf_output`; `rollback_one_iter` ✅ (gbdt, bagging and GOSS byte-identical scores; rejected for RF/DART and init_model trees)
 
 ## P6: Python package (drop-in)
 - [ ] `Dataset` (done: dense numpy and pandas incl. categoricals, weight, group, categorical_feature, subsets with source bin mapper reuse; pending: scipy.sparse, pyarrow, files, complete subset compatibility (unsorted/duplicate indices, weighted query metadata, and empty/out-of-range index errors covered), `set_init_score`/`get_init_score` methods; dense shared reference binning implemented)

@@ -460,6 +460,11 @@ class Booster:
         self._init_model = init._native()
         self.pandas_categorical = dataset.pandas_categorical
 
+    def rollback_one_iter(self) -> Booster:
+        """Remove the last iteration's trees and their effect on the training scores."""
+        self._native().rollback_one_iter()
+        return self
+
     def update(self, train_set: Dataset | None = None, fobj: Any = None) -> bool:
         """Train one additional iteration and return whether training has finished."""
         if fobj is not None:
