@@ -1155,3 +1155,28 @@ def test_dataset_setters_after_construct_match_upstream() -> None:
         booster = library.train({**params, "objective": "lambdarank"}, dataset, num_boost_round=2)
         predictions.append(booster.predict(x, raw_score=True))
     np.testing.assert_allclose(predictions[1], predictions[0], rtol=1e-12, atol=1e-15)
+
+
+@pytest.mark.parametrize("seed", [9, 10, 11])
+def test_extra_trees_matches_upstream(seed: int) -> None:
+    # upstream: FeatureHistogram random thresholds (rand.NextInt per feature), seeded by `seed`.
+    # Coverage for an already-ported path: this passes on the first run.
+    rng = np.random.default_rng(61)
+    x = rng.normal(size=(300, 4))
+    y = x[:, 0] - x[:, 1] + rng.normal(scale=0.2, size=300)
+    params = {
+        **_init_score_params(),
+        "objective": "regression",
+        "extra_trees": True,
+        "seed": seed,
+        "min_data_in_leaf": 5,
+        "num_leaves": 15,
+    }
+    results = []
+    for library in (lightgbm, lgb):
+        booster = library.train(
+            params, library.Dataset(x, label=y, params=params), num_boost_round=5
+        )
+        results.append((booster.model_to_string(), booster.predict(x)))
+    assert results[1][0] == results[0][0]
+    np.testing.assert_allclose(results[1][1], results[0][1], rtol=1e-12, atol=1e-15)
