@@ -331,6 +331,7 @@ def cv(
         for alias in ("metric", "metrics", "metric_types"):
             params.pop(alias, None)
         params["metric"] = metrics
+    train_set.params.update(params)
     folds_list = _make_cv_folds(
         train_set,
         folds=folds,

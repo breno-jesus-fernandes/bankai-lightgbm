@@ -504,3 +504,65 @@ def test_custom_regression_objective_matches_upstream(boosting: str) -> None:
     ours = lgb.train(params, lgb.Dataset(x, label=y), num_boost_round=3)
     theirs = lightgbm.train(params, lightgbm.Dataset(x, label=y), num_boost_round=3)
     np.testing.assert_allclose(ours.predict(x), theirs.predict(x), rtol=1e-12, atol=1e-15)
+
+
+def test_custom_multiclass_cv_matches_upstream() -> None:
+    rng = np.random.default_rng(812)
+    x = rng.normal(size=(90, 4))
+    y = np.argmax(x[:, :3], axis=1)
+
+    def objective(predictions: np.ndarray, dataset: Any) -> tuple[np.ndarray, np.ndarray]:
+        assert predictions.shape == (len(dataset.get_label()), 3)
+        probabilities = np.exp(predictions - predictions.max(axis=1, keepdims=True))
+        probabilities /= probabilities.sum(axis=1, keepdims=True)
+        targets = np.eye(3)[dataset.get_label().astype(int)]
+        return probabilities - targets, 1.5 * probabilities * (1 - probabilities)
+
+    def evaluate(predictions: np.ndarray, dataset: Any) -> tuple[str, float, bool]:
+        return "raw_mean", float(np.mean(predictions**2)), False
+
+    params = {
+        "objective": objective,
+        "num_class": 3,
+        "metric": "None",
+        "verbosity": -1,
+        "num_threads": 1,
+        "num_leaves": 5,
+        "min_data_in_leaf": 2,
+        "min_data_in_bin": 1,
+        "max_bin": 15,
+        "deterministic": True,
+        "force_col_wise": True,
+    }
+    ours = lgb.cv(
+        params,
+        lgb.Dataset(x, label=y),
+        num_boost_round=3,
+        nfold=3,
+        stratified=False,
+        seed=17,
+        feval=evaluate,
+        return_cvbooster=True,
+    )
+    theirs = lightgbm.cv(
+        params,
+        lightgbm.Dataset(x, label=y),
+        num_boost_round=3,
+        nfold=3,
+        stratified=False,
+        seed=17,
+        feval=evaluate,
+        return_cvbooster=True,
+    )
+    for key in theirs:
+        if key != "cvbooster":
+            np.testing.assert_allclose(ours[key], theirs[key], rtol=1e-12, atol=1e-15)
+    for our_fold, their_fold in zip(
+        ours["cvbooster"].boosters, theirs["cvbooster"].boosters, strict=True
+    ):
+        np.testing.assert_allclose(
+            our_fold.predict(x, raw_score=True),
+            their_fold.predict(x, raw_score=True),
+            rtol=1e-12,
+            atol=1e-15,
+        )
