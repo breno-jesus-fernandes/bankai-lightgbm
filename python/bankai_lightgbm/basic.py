@@ -176,6 +176,54 @@ def _is_scipy_sparse(data: Any) -> bool:
 _PredictReturnType = npt.NDArray[Any] | Any
 
 
+class _ConfigAliases:
+    """Parameter aliases from the table generated from upstream's ``config.h``.
+
+    upstream: python-package/lightgbm/basic.py (v4.7.0) ``_ConfigAliases``; aliases are
+    ordered like ``Config::DumpAliases`` (``SortAlias``: shorter first, then lexicographic),
+    after the main name.
+    """
+
+    aliases: dict[str, list[str]] | None = None
+
+    @classmethod
+    def get_sorted(cls, name: str) -> list[str]:
+        if cls.aliases is None:
+            from bankai_lightgbm._lib import param_aliases
+
+            cls.aliases = {
+                key: [key, *sorted(values, key=lambda a: (len(a), a))]
+                for key, values in param_aliases().items()
+            }
+        return cls.aliases.get(name, [name])
+
+
+def _choose_param_value(
+    main_param_name: str, params: dict[str, Any], default_value: Any
+) -> dict[str, Any]:
+    """One value for ``main_param_name`` with its aliases removed; the main name wins, then the
+    first alias found in sorted order, then ``default_value``.
+
+    upstream: python-package/lightgbm/basic.py (v4.7.0) ``_choose_param_value``.
+    """
+    params = deepcopy(params)
+    aliases = [a for a in _ConfigAliases.get_sorted(main_param_name) if a != main_param_name]
+    if main_param_name in params:
+        for alias in aliases:
+            params.pop(alias, None)
+        return params
+    for alias in aliases:
+        if alias in params:
+            params[main_param_name] = params[alias]
+            break
+    if main_param_name in params:
+        for alias in aliases:
+            params.pop(alias, None)
+        return params
+    params[main_param_name] = default_value
+    return params
+
+
 class _DummyLogger:
     """upstream's default logger: ``info`` prints, ``warning`` emits a ``UserWarning``."""
 
@@ -477,6 +525,7 @@ class Dataset:
         init_score = None
         if self.init_score is not None:
             init_score = _init_score_values(self.init_score, n)
+        reference = self.reference._handle_or_raise() if self.reference is not None else None
         return NativeDataset.from_dense(
             matrix,
             label.tolist(),
@@ -484,7 +533,7 @@ class Dataset:
             categorical,
             weight,
             group,
-            self.reference._handle_or_raise() if self.reference is not None else None,
+            reference,
             init_score,
         )
 

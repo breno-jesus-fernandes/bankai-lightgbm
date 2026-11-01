@@ -10,7 +10,15 @@ from typing import Any
 
 import numpy as np
 
-from bankai_lightgbm.basic import Booster, Dataset, LightGBMError, _to_bool
+from bankai_lightgbm.basic import (
+    Booster,
+    Dataset,
+    LightGBMError,
+    _choose_param_value,
+    _ConfigAliases,
+    _log_warning,
+    _to_bool,
+)
 from bankai_lightgbm.callback import (
     CallbackEnv,
     EarlyStopException,
@@ -39,8 +47,6 @@ def train(
 
     Validation metrics and early stopping callbacks are evaluated after each iteration.
     """
-    if num_boost_round <= 0:
-        raise ValueError("num_boost_round should be greater than zero.")
     params = dict(params)
     # upstream: engine.py::_choose_param_value, objective aliases (v4.7.0).
     objective_aliases = ("objective", "app", "loss", "application", "objective_type")
@@ -53,6 +59,12 @@ def train(
         for objective_key in objective_aliases:
             params.pop(objective_key, None)
         params["objective"] = "none"
+    params = _choose_num_iterations(num_boost_round_kwarg=num_boost_round, params=params)
+    num_boost_round = int(params["num_iterations"])
+    if num_boost_round <= 0:
+        raise ValueError(
+            f"Number of boosting rounds must be greater than 0. Got {num_boost_round}."
+        )
     if feature_name != "auto":
         train_set.feature_name = feature_name
     if categorical_feature != "auto":
@@ -306,6 +318,33 @@ def _make_cv_folds(
     return result
 
 
+def _choose_num_iterations(*, num_boost_round_kwarg: int, params: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the number of boosting rounds into ``params["num_iterations"]``.
+
+    ``num_iterations`` in ``params`` wins, then its aliases (in sorted order), then the
+    ``num_boost_round`` keyword; conflicting values in ``params`` log a warning.
+    upstream: python-package/lightgbm/engine.py (v4.7.0) ``_choose_num_iterations``.
+    """
+    provided = {
+        alias: params[alias]
+        for alias in _ConfigAliases.get_sorted("num_iterations")
+        if alias in params
+    }
+    params = _choose_param_value(
+        main_param_name="num_iterations", params=params, default_value=num_boost_round_kwarg
+    )
+    if len(provided) <= 1 or len(set(provided.values())) <= 1:
+        return params
+    value_string = ", ".join(f"{alias}={val}" for alias, val in provided.items())
+    _log_warning(
+        f"Found conflicting values for num_iterations provided via 'params': {value_string}. "
+        f"LightGBM will perform up to {params['num_iterations']} boosting rounds. "
+        "To be confident in the maximum number of boosting rounds LightGBM will perform and to "
+        "suppress this warning, modify 'params' so that only one of those is present."
+    )
+    return params
+
+
 def cv(
     params: dict[str, Any],
     train_set: Dataset,
@@ -326,8 +365,6 @@ def cv(
     """Perform seeded cross-validation and aggregate per-fold metrics."""
     if not isinstance(train_set, Dataset):
         raise TypeError("cv() only accepts a Dataset as train_set")
-    if num_boost_round <= 0:
-        raise ValueError("Number of boosting rounds must be greater than 0")
     for name, value in (("init_model", init_model), ("fpreproc", fpreproc)):
         if value is not None:
             raise NotImplementedError(f"{name} is not implemented yet")
@@ -343,6 +380,12 @@ def cv(
         for objective_key in objective_aliases:
             params.pop(objective_key, None)
         params["objective"] = "none"
+    params = _choose_num_iterations(num_boost_round_kwarg=num_boost_round, params=params)
+    num_boost_round = int(params["num_iterations"])
+    if num_boost_round <= 0:
+        raise ValueError(
+            f"Number of boosting rounds must be greater than 0. Got {num_boost_round}."
+        )
     if metrics is not None:
         for alias in ("metric", "metrics", "metric_types"):
             params.pop(alias, None)

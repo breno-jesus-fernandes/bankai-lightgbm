@@ -468,8 +468,12 @@ def test_train_rejects_unimplemented_options() -> None:
         lgb.train({"verbose": -1}, ds, init_model=object())
     referenced = lgb.Dataset(x, label=x[:, 0], reference=ds)
     assert referenced.construct().num_data() == len(x)
-    with pytest.raises(ValueError, match="greater than zero"):
+    # upstream: engine.py (v4.7.0) train() checks the resolved num_iterations.
+    with pytest.raises(ValueError) as want:
+        lightgbm.train({"verbose": -1}, lightgbm.Dataset(x, label=x[:, 0]), num_boost_round=0)
+    with pytest.raises(ValueError) as got:
         lgb.train({"verbose": -1}, ds, num_boost_round=0)
+    assert str(got.value) == str(want.value)
 
 
 @pytest.mark.parametrize("boosting", ["gbdt", "dart", "rf"])
@@ -1198,3 +1202,63 @@ def test_bagging_by_query_is_rejected_until_ported() -> None:
     dataset = lgb.Dataset(x, label=np.arange(12) % 3, group=[4, 4, 4], params=params)
     with pytest.raises(lgb.LightGBMError, match="bagging_by_query"):
         lgb.train(params, dataset, num_boost_round=1)
+
+
+def _num_iterations_line(model: str) -> str:
+    return next(line for line in model.splitlines() if line.startswith("[num_iterations:"))
+
+
+def test_model_records_num_boost_round_with_validation_sets() -> None:
+    """upstream: engine.py (v4.7.0) _choose_num_iterations puts it in params on every path."""
+    rng = np.random.default_rng(11)
+    x = rng.normal(size=(400, 4))
+    y = x[:, 0] + rng.normal(size=400) * 0.1
+    lines = []
+    for library in (lgb, lightgbm):
+        train = library.Dataset(x[:300], y[:300])
+        valid = library.Dataset(x[300:], y[300:], reference=train)
+        booster = library.train(
+            {"verbose": -1, "num_threads": 1, "deterministic": True},
+            train,
+            num_boost_round=7,
+            valid_sets=[valid],
+        )
+        lines.append(_num_iterations_line(booster.model_to_string()))
+    assert lines[0] == lines[1] == "[num_iterations: 7]"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"n_estimators": 5}, {"num_iterations": 4, "num_trees": 6}, {"num_round": 3}],
+)
+def test_num_iterations_in_params_overrides_num_boost_round(extra: dict[str, Any]) -> None:
+    rng = np.random.default_rng(12)
+    x = rng.normal(size=(300, 3))
+    y = x[:, 0]
+    results = []
+    for library in (lgb, lightgbm):
+        params = {"verbose": -1, "num_threads": 1, **extra}
+        booster = library.train(params, library.Dataset(x, y), num_boost_round=9)
+        results.append((booster.num_trees(), _num_iterations_line(booster.model_to_string())))
+    assert results[0] == results[1]
+
+
+def test_conflicting_num_iterations_aliases_warn_like_upstream() -> None:
+    rng = np.random.default_rng(13)
+    x = rng.normal(size=(200, 3))
+    params = {"verbose": -1, "n_estimators": 3, "num_rounds": 4}
+    messages = []
+    for library in (lgb, lightgbm):
+        with pytest.warns(UserWarning, match="Found conflicting values for num_iterations") as rec:
+            library.train(dict(params), library.Dataset(x, x[:, 0]), num_boost_round=2)
+        messages.append(next(str(w.message) for w in rec if "conflicting" in str(w.message)))
+    # upstream lists the aliases from ``_ConfigAliases.get`` (a set), so their order depends
+    # on Python's per-process string hashing; compare the pairs as a set, the rest exactly.
+    prefix = "Found conflicting values for num_iterations provided via 'params': "
+
+    def split(message: str) -> tuple[set[str], str]:
+        pairs, rest = message[len(prefix) :].split(". ", 1)
+        return set(pairs.split(", ")), rest
+
+    assert all(m.startswith(prefix) for m in messages)
+    assert split(messages[0]) == split(messages[1])

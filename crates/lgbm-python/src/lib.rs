@@ -655,6 +655,16 @@ fn predict_config(
     })
 }
 
+/// Every parameter's aliases (excluding the parameter itself), from the table generated
+/// from upstream's `config.h` (upstream `Config::parameter2aliases`).
+#[pyfunction]
+fn param_aliases() -> HashMap<&'static str, Vec<&'static str>> {
+    lgbm_core::config::PARAMETER_TO_ALIASES
+        .iter()
+        .map(|(name, aliases)| (*name, aliases.to_vec()))
+        .collect()
+}
+
 #[pymodule]
 fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("UPSTREAM_VERSION", lgbm_core::UPSTREAM_VERSION)?;
@@ -662,5 +672,6 @@ fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("LightGBMError", m.py().get_type::<LightGBMError>())?;
     m.add_class::<NativeBooster>()?;
     m.add_class::<NativeDataset>()?;
+    m.add_function(wrap_pyfunction!(param_aliases, m)?)?;
     Ok(())
 }
