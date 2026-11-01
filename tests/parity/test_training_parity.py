@@ -850,3 +850,113 @@ def test_negative_query_sizes_reject_ranking_with_clear_error(group: list[int]) 
     dataset = lgb.Dataset(x, label=labels, group=group, params=params)
     with pytest.raises(lgb.basic.LightGBMError, match="negative"):
         lgb.train({**params, "objective": "lambdarank"}, dataset, num_boost_round=1)
+
+
+def _init_score_params() -> dict[str, Any]:
+    return {"verbosity": -1, "num_threads": 1, "min_data_in_leaf": 2, "num_leaves": 5}
+
+
+@pytest.mark.parametrize("objective", ["regression", "binary"])
+def test_init_score_training_matches_upstream(objective: str) -> None:
+    # upstream: src/boosting/gbdt.cpp (v4.7.0) BoostFromAverage skips the automatic initial
+    # score when the training score updater has an init score; the trees start from it.
+    rng = np.random.default_rng(31)
+    x = rng.normal(size=(60, 3))
+    y = (x[:, 0] > 0).astype(float) if objective == "binary" else x[:, 0] - x[:, 1]
+    init = 0.3 * x[:, 1] + 0.5
+    params = {**_init_score_params(), "objective": objective}
+    results = []
+    for library in (lightgbm, lgb):
+        dataset = library.Dataset(x, label=y, init_score=init, params=params).construct()
+        booster = library.train(params, dataset, num_boost_round=4)
+        results.append((booster.model_to_string(), booster.predict(x, raw_score=True)))
+    assert results[1][0] == results[0][0]
+    np.testing.assert_allclose(results[1][1], results[0][1], rtol=1e-12, atol=1e-15)
+
+
+def test_multiclass_init_score_matches_upstream() -> None:
+    # Two-dimensional init scores are class-major after upstream's Fortran-order ravel.
+    rng = np.random.default_rng(32)
+    x = rng.normal(size=(90, 3))
+    y = np.argmax(x, axis=1).astype(float)
+    init = rng.normal(scale=0.5, size=(90, 3))
+    params = {**_init_score_params(), "objective": "multiclass", "num_class": 3}
+    results = []
+    for library in (lightgbm, lgb):
+        dataset = library.Dataset(x, label=y, init_score=init, params=params).construct()
+        booster = library.train(params, dataset, num_boost_round=3)
+        results.append(booster.predict(x, raw_score=True))
+    np.testing.assert_allclose(results[1], results[0], rtol=1e-12, atol=1e-15)
+
+
+def test_validation_init_score_changes_metrics_like_upstream() -> None:
+    rng = np.random.default_rng(33)
+    x = rng.normal(size=(80, 3))
+    y = x[:, 0] + rng.normal(scale=0.1, size=80)
+    x_valid = rng.normal(size=(30, 3))
+    y_valid = x_valid[:, 0]
+    valid_init = 0.2 * x_valid[:, 2]
+    params = {**_init_score_params(), "objective": "regression", "metric": "l2"}
+    curves = []
+    for library in (lightgbm, lgb):
+        train = library.Dataset(x, label=y, params=params)
+        valid = library.Dataset(
+            x_valid, label=y_valid, init_score=valid_init, reference=train, params=params
+        )
+        record: dict[str, Any] = {}
+        library.train(
+            params,
+            train,
+            num_boost_round=3,
+            valid_sets=[valid],
+            valid_names=["valid"],
+            callbacks=[library.record_evaluation(record)],
+        )
+        curves.append(record["valid"]["l2"])
+    np.testing.assert_allclose(curves[1], curves[0], rtol=1e-12, atol=1e-15)
+
+
+def test_subset_with_init_score_trains_like_upstream() -> None:
+    rng = np.random.default_rng(34)
+    x = rng.normal(size=(40, 3))
+    y = x[:, 0] - 0.5 * x[:, 1]
+    init = np.linspace(-1.0, 1.0, 40)
+    rows = [30, 2, 17, 2, 9, 39, 0, 11]
+    params = {**_init_score_params(), "objective": "regression"}
+    predictions = []
+    for library in (lightgbm, lgb):
+        source = library.Dataset(x, label=y, init_score=init, params=params).construct()
+        subset = source.subset(rows).construct()
+        booster = library.train(params, subset, num_boost_round=3)
+        predictions.append(booster.predict(x[rows], raw_score=True))
+    np.testing.assert_allclose(predictions[1], predictions[0], rtol=1e-12, atol=1e-15)
+
+
+def test_init_score_size_error_matches_upstream() -> None:
+    x = np.arange(36, dtype=float).reshape(12, 3)
+    messages = []
+    for library in (lightgbm, lgb):
+        with pytest.raises(library.basic.LightGBMError) as caught:
+            library.Dataset(
+                x, label=np.arange(12), init_score=np.ones(11), params={"verbosity": -1}
+            ).construct()
+        messages.append(str(caught.value).split(" at ")[0])
+    assert messages[0] == messages[1]
+
+
+def test_random_forest_rejects_init_score_like_upstream() -> None:
+    # upstream: src/boosting/rf.hpp (v4.7.0) RF::Init: CHECK_EQ(init_score, nullptr).
+    rng = np.random.default_rng(35)
+    x = rng.normal(size=(60, 3))
+    y = x[:, 0]
+    params = {
+        "verbosity": -1,
+        "objective": "regression",
+        "boosting": "rf",
+        "bagging_freq": 1,
+        "bagging_fraction": 0.5,
+        "num_threads": 1,
+    }
+    dataset = lgb.Dataset(x, label=y, init_score=np.ones(60), params=params)
+    with pytest.raises(lgb.LightGBMError, match="init_score"):
+        lgb.train(params, dataset, num_boost_round=1)

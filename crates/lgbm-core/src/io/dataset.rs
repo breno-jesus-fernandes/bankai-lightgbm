@@ -605,6 +605,23 @@ impl Dataset {
         Ok(())
     }
 
+    /// upstream: `Metadata::SetInitScore` (class-major; an empty slice clears the scores).
+    /// Non-finite values are clamped like upstream's `Common::AvoidInf`.
+    pub fn set_init_score(&mut self, scores: &[f64]) -> Result<()> {
+        if scores.is_empty() {
+            self.metadata.init_score.clear();
+            return Ok(());
+        }
+        let num_data = self.num_data();
+        if num_data == 0 || !scores.len().is_multiple_of(num_data) {
+            return Err(Error::InvalidParameter(
+                "Initial score size doesn't match data size".into(),
+            ));
+        }
+        self.metadata.init_score = scores.iter().map(|&s| crate::tree::avoid_inf(s)).collect();
+        Ok(())
+    }
+
     /// upstream: `Metadata::SetWeights` (an empty slice clears the weights).
     pub fn set_weights(&mut self, weights: &[f32]) -> Result<()> {
         if weights.is_empty() {
@@ -745,10 +762,6 @@ impl Dataset {
                 "Dataset subset row index is out of range".into(),
             ));
         }
-        if !self.metadata.init_score.is_empty() {
-            return Err(Error::Unsupported("Dataset subset with init_score".into()));
-        }
-
         fn subset_bin(source: &BinData, rows: &[usize], num_bins: u32) -> BinData {
             match source {
                 BinData::Dense(source) => {
@@ -802,6 +815,19 @@ impl Dataset {
         } else {
             rows.iter().map(|&row| self.metadata.weights[row]).collect()
         };
+        // Class-major: each class block is selected with the same rows.
+        let init_score = if self.metadata.init_score.is_empty() {
+            Vec::new()
+        } else {
+            let num_data = self.num_data();
+            let num_classes = self.metadata.init_score.len() / num_data;
+            (0..num_classes)
+                .flat_map(|class| {
+                    let block = &self.metadata.init_score[class * num_data..(class + 1) * num_data];
+                    rows.iter().map(|&row| block[row]).collect::<Vec<_>>()
+                })
+                .collect()
+        };
         let query_boundaries = if self.metadata.query_boundaries.is_empty() {
             Vec::new()
         } else {
@@ -841,7 +867,7 @@ impl Dataset {
                 label,
                 weights,
                 query_boundaries,
-                init_score: Vec::new(),
+                init_score,
             },
             feature_names: self.feature_names.clone(),
             label_idx: self.label_idx,
@@ -1018,6 +1044,53 @@ mod subset_tests {
         let mut dataset = Dataset::from_dense(&values, 12, 2, &labels, &cfg, &[])?;
         dataset.set_group(&[-1, 13])?;
         assert_eq!(dataset.metadata.query_boundaries, vec![0, -1, 12]);
+        Ok(())
+    }
+
+    fn dataset_with_rows(rows: usize) -> crate::Result<Dataset> {
+        let values: Vec<f64> = (0..rows * 2).map(|v| v as f64).collect();
+        let labels: Vec<f64> = (0..rows).map(|v| v as f64).collect();
+        let cfg = Config::from_params(&HashMap::new())?;
+        Dataset::from_dense(&values, rows, 2, &labels, &cfg, &[])
+    }
+
+    #[test]
+    fn init_score_size_must_be_a_multiple_of_num_data() -> crate::Result<()> {
+        // upstream: src/io/metadata.cpp (v4.7.0) SetInitScoresFromIterator
+        let mut dataset = dataset_with_rows(12)?;
+        let result = dataset.set_init_score(&[1.0; 11]);
+        assert!(matches!(
+            result,
+            Err(Error::InvalidParameter(ref message))
+                if message == "Initial score size doesn't match data size"
+        ));
+        assert!(dataset.metadata.init_score.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn init_score_is_stored_class_major_with_avoid_inf() -> crate::Result<()> {
+        // upstream: Common::AvoidInf(double): NaN -> 0, +-inf -> +-1e300
+        let mut dataset = dataset_with_rows(3)?;
+        let scores = [f64::NAN, f64::INFINITY, -f64::INFINITY, 0.5, 1.5, 2.5];
+        dataset.set_init_score(&scores)?;
+        assert_eq!(
+            dataset.metadata.init_score,
+            vec![0.0, 1e300, -1e300, 0.5, 1.5, 2.5]
+        );
+        dataset.set_init_score(&[])?;
+        assert!(dataset.metadata.init_score.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn subset_selects_init_score_rows_for_every_class() -> crate::Result<()> {
+        // upstream: Metadata::Init(fullset, used_indices) copies init_score per class.
+        let mut dataset = dataset_with_rows(4)?;
+        // Two classes, class-major: class 0 = [0,1,2,3], class 1 = [10,11,12,13].
+        dataset.set_init_score(&[0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0])?;
+        let subset = dataset.subset(&[2, 0])?;
+        assert_eq!(subset.metadata.init_score, vec![2.0, 0.0, 12.0, 10.0]);
         Ok(())
     }
 }

@@ -142,6 +142,19 @@ def _data_from_pandas(data: Any, pandas_categorical: list[list[Any]] | None) -> 
     return np.asarray(data.to_numpy(dtype=np.float64, na_value=np.nan))
 
 
+def _init_score_values(init_score: Any, num_data: int) -> list[float]:
+    """Flatten init scores class-major, as upstream's Python ``set_field`` does.
+
+    Two-dimensional ``(num_data, num_class)`` input is raveled in Fortran order.
+    """
+    values = np.asarray(init_score, dtype=np.float64)
+    flat = values.ravel(order="F")
+    # upstream: src/io/metadata.cpp (v4.7.0) SetInitScoresFromIterator.
+    if flat.size % num_data != 0:
+        raise LightGBMError("Initial score size doesn't match data size")
+    return flat.tolist()
+
+
 def _is_pandas_df(data: Any) -> bool:
     try:
         import pandas as pd
@@ -260,6 +273,7 @@ class Dataset:
             subset_data,
             label=take(self.label),
             weight=take(self.weight),
+            init_score=take(self.init_score),
             group=subset_group,
             feature_name=self.feature_name,
             categorical_feature=self.categorical_feature,
@@ -286,8 +300,6 @@ class Dataset:
     def _build(self, *, evaluation: bool = False) -> NativeDataset:
         if self.reference is not None:
             self.reference.construct()
-        if self.init_score is not None:
-            raise NotImplementedError("init_score is not implemented yet (roadmap P5)")
         if _is_scipy_sparse(self.data):
             raise NotImplementedError("sparse training input is not implemented yet (roadmap P2)")
         if self.data is None:
@@ -344,6 +356,9 @@ class Dataset:
                 raise LightGBMError(
                     f"Sum of query counts ({n}) differs from the length of #data ({sum(group)})"
                 )
+        init_score = None
+        if self.init_score is not None:
+            init_score = _init_score_values(self.init_score, n)
         return NativeDataset.from_dense(
             matrix,
             label.tolist(),
@@ -352,6 +367,7 @@ class Dataset:
             weight,
             group,
             self.reference._handle_or_raise() if self.reference is not None else None,
+            init_score,
         )
 
 

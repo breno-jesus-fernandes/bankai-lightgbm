@@ -61,7 +61,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] Dense, 4-bit dense, and sparse bins; multi-val (per-feature) bins
 - [ ] `MultiValBin` (row-wise training layout)
 - [x] Exclusive Feature Bundling (`enable_bundle`), sampling identical to upstream
-- [ ] Metadata: label, weight, and group/query implemented; weight/query length errors and nested subsets covered; init_score and position pending
+- [ ] Metadata: label, weight, and group/query implemented; weight/query length errors and nested subsets covered; position pending; init_score done (class-major storage, training, validation metrics, subsets)
 - [ ] Parsers: CSV/TSV/LibSVM, header, `label_column`, `weight_column`, `group_column`, `ignore_column`, `two_round`
 - [x] Binary dataset file (`save_binary`) byte-identical to upstream (20 fixtures); reader for upstream files
 - [ ] Load a `Dataset` from an upstream `.bin` file (decode bin data)
@@ -96,11 +96,11 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] RF (`boosting=rf`, byte-identical; known gap: a first tree with no split is scored on out-of-bag rows only, matching upstream's non-subset path, the subset path is not modelled)
 - [x] GOSS (`data_sample_strategy=goss`, byte-identical; both the subset and dense regimes)
 - [x] Early stopping (`early_stopping_round`, `first_metric_only`, `early_stopping_min_delta`; validation metrics and callback parity)
-- [ ] Continued training (`init_model`), `init_score`
+- [ ] Continued training (`init_model`); `init_score` ✅ (byte-identical training, multiclass, validation metrics, subsets; RF rejects it like upstream)
 - [ ] Model merge/shuffle, `set_leaf_output`, `rollback_one_iter`
 
 ## P6: Python package (drop-in)
-- [ ] `Dataset` (done: dense numpy and pandas incl. categoricals, weight, group, categorical_feature, subsets with source bin mapper reuse; pending: scipy.sparse, pyarrow, files, complete subset compatibility (unsorted/duplicate indices, weighted query metadata, and empty/out-of-range index errors covered), init_score; dense shared reference binning implemented)
+- [ ] `Dataset` (done: dense numpy and pandas incl. categoricals, weight, group, categorical_feature, subsets with source bin mapper reuse; pending: scipy.sparse, pyarrow, files, complete subset compatibility (unsorted/duplicate indices, weighted query metadata, and empty/out-of-range index errors covered), `set_init_score`/`get_init_score` methods; dense shared reference binning implemented)
 - [ ] `Booster` (training works: `lgb.train` gives byte-identical model text; Rust `GbdtTrainer` and Python `Booster.update()` support incremental training; `cv` supports seeded/custom folds, metric aggregation, custom evaluation, callbacks, and `CVBooster`; pending: `cv` preprocessing/continued training and the remaining Booster methods)
 - [ ] Callbacks: `early_stopping`, `log_evaluation`, `record_evaluation` ✅; `reset_parameter` supports learning-rate schedules; pending resets for other parameters
 - [ ] sklearn API: `LGBMModel`, `LGBMClassifier`, `LGBMRegressor`, `LGBMRanker`

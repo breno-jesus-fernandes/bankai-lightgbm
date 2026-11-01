@@ -39,7 +39,7 @@ impl NativeDataset {
     /// Bin a dense row-major `float64` matrix (`LGBM_DatasetCreateFromMat`). `params` are
     /// the dataset parameters as strings; `categorical` are column indices.
     #[staticmethod]
-    #[pyo3(signature = (data, label, params, categorical, weight=None, group=None, reference=None))]
+    #[pyo3(signature = (data, label, params, categorical, weight=None, group=None, reference=None, init_score=None))]
     #[allow(clippy::too_many_arguments)] // Python Dataset constructor arguments.
     fn from_dense(
         py: Python<'_>,
@@ -50,6 +50,7 @@ impl NativeDataset {
         weight: Option<Vec<f32>>,
         group: Option<Vec<i32>>,
         reference: Option<PyRef<'_, NativeDataset>>,
+        init_score: Option<Vec<f64>>,
     ) -> PyResult<Self> {
         let shape = data.shape().to_vec();
         let values = Arc::new(
@@ -79,6 +80,9 @@ impl NativeDataset {
                 }
                 if let Some(g) = group {
                     ds.set_group(&g)?;
+                }
+                if let Some(init) = init_score {
+                    ds.set_init_score(&init)?;
                 }
                 Ok(ds)
             })
@@ -281,6 +285,18 @@ impl NativeBooster {
             } else {
                 row_scores
             };
+            // upstream: the validation ScoreUpdater starts from the init score.
+            let mut scores = scores;
+            if !ds.metadata.init_score.is_empty() {
+                if ds.metadata.init_score.len() != scores.len() {
+                    return Err(lgbm_core::Error::InvalidParameter(
+                        "Number of class for initial score error".into(),
+                    ));
+                }
+                for (score, init) in scores.iter_mut().zip(&ds.metadata.init_score) {
+                    *score += init;
+                }
+            }
             let mut results = Vec::new();
             for metric_name in &cfg.metric {
                 if let Some(metric) = create_metric(metric_name, &cfg, &ds.metadata)? {

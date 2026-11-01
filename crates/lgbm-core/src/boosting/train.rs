@@ -215,6 +215,23 @@ impl Trainer {
         let learner = SerialTreeLearner::new(Arc::clone(&cfg), Arc::clone(&ds), constant_hessian)?;
         let class_need_train = (0..ntpi).map(|k| objective.class_need_train(k)).collect();
         let rf = cfg.boosting == "rf";
+        // upstream: ScoreUpdater ctor starts from the init score (class-major).
+        let init_scores = &ds.metadata.init_score;
+        let mut score = vec![0.0; n * ntpi];
+        if !init_scores.is_empty() {
+            if init_scores.len() != n * ntpi {
+                return Err(Error::InvalidParameter(
+                    "Number of class for initial score error".into(),
+                ));
+            }
+            if rf {
+                // upstream: src/boosting/rf.hpp (v4.7.0) RF::Init: CHECK_EQ(init_score, nullptr).
+                return Err(Error::InvalidParameter(
+                    "random forest does not support init_score".into(),
+                ));
+            }
+            score.copy_from_slice(init_scores);
+        }
         let mut trainer = Trainer {
             cfg,
             ds,
@@ -224,7 +241,7 @@ impl Trainer {
             learner,
             num_tree_per_iteration: ntpi,
             class_need_train,
-            score: vec![0.0; n * ntpi],
+            score,
             gradients: vec![0.0; n * ntpi],
             hessians: vec![0.0; n * ntpi],
             models: Vec::new(),
@@ -275,7 +292,10 @@ impl Trainer {
     /// upstream: the value `GBDT::BoostFromAverage` returns (0 when not boosting from the
     /// average). Does not change the scores.
     fn automatic_init(&self, class_id: usize) -> f64 {
+        // upstream: GBDT::BoostFromAverage skips the automatic score when the training
+        // score updater has an init score.
         if self.models.is_empty()
+            && self.ds.metadata.init_score.is_empty()
             && (self.cfg.boost_from_average || self.ds.layout.num_features == 0)
         {
             let init = self.objective.boost_from_score(class_id);
