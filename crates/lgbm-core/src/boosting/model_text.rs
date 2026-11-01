@@ -268,7 +268,13 @@ impl Gbdt {
     }
 
     pub fn from_model_file(path: impl AsRef<Path>) -> Result<Gbdt> {
+        // upstream reads the file in text mode, which turns CRLF into LF. `tree_sizes` are byte
+        // offsets into the LF text, so a CRLF file (Windows checkout or editor) must be normalized
+        // before the offsets are used.
         let text = std::fs::read_to_string(path.as_ref())?;
+        if text.contains("\r\n") {
+            return Gbdt::from_model_string(&text.replace("\r\n", "\n"));
+        }
         Gbdt::from_model_string(&text)
     }
 

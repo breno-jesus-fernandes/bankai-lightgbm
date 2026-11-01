@@ -17,7 +17,7 @@ fn with_pandas_trailer(model: &Gbdt, s: String) -> String {
 #[test]
 fn load_then_save_is_byte_identical() {
     for case in cases() {
-        let text = std::fs::read_to_string(case.join("model.txt")).unwrap();
+        let text = read_model_text(case.join("model.txt"));
         let model = Gbdt::from_model_string(&text).unwrap();
         let out = with_pandas_trailer(&model, model.save_model_to_string(0, -1, 0).unwrap());
         if out != text {

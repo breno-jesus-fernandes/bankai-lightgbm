@@ -2,6 +2,7 @@
 
 import copy
 import pickle
+import sys
 from pathlib import Path
 
 import lightgbm
@@ -31,7 +32,13 @@ def test_save_model_file_matches(case_dir: Path, tmp_path: Path) -> None:
     ours, theirs = _pair(case_dir)
     ours.save_model(tmp_path / "ours.txt")
     theirs.save_model(tmp_path / "theirs.txt")
-    assert (tmp_path / "ours.txt").read_bytes() == (tmp_path / "theirs.txt").read_bytes()
+    got = (tmp_path / "ours.txt").read_bytes()
+    want = (tmp_path / "theirs.txt").read_bytes()
+    if sys.platform == "win32":
+        # upstream's Windows build writes model files in text mode (CRLF); bankai writes LF.
+        # The content is the same and both loaders accept either ending.
+        got, want = got.replace(b"\r\n", b"\n"), want.replace(b"\r\n", b"\n")
+    assert got == want
 
 
 def test_dump_model_matches(case_dir: Path) -> None:

@@ -93,6 +93,8 @@ def test_split_value_histogram_matches_upstream() -> None:
 
 
 def test_tree_digraph_source_matches_upstream() -> None:
+    # The graphviz package (not the `dot` binary) is needed to build the digraph source.
+    pytest.importorskip("graphviz")
     x, y = _data()
     want = _trained(up, x, y, {})
     got = _trained(bk, x, y, {})

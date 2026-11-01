@@ -31,7 +31,7 @@ struct Shared {
     done: Padded<AtomicUsize>,
     tasks: Padded<AtomicUsize>,
     /// The current region's task function, as the two words of a `&dyn Fn(usize)`.
-    job: Mutex<Option<[usize; 2]>>,
+    job: Mutex<Option<JobPtr>>,
     /// Set when a worker task panicked during the current region.
     panicked: AtomicBool,
     sleepers: AtomicUsize,
@@ -110,10 +110,12 @@ impl SpinPool {
         let s = &*self.shared;
         // SAFETY: a worker reads this pointer only after it sees the generation bump below,
         // and this function does not return before every worker has incremented `done`, so
-        // `f` is alive for every use. The transmute only changes the lifetime of the fat
-        // pointer, which has the same two-word layout.
-        let raw: [usize; 2] =
-            unsafe { std::mem::transmute::<&(dyn Fn(usize) + Sync), [usize; 2]>(f) };
+        // `f` is alive for every use. The transmute only erases the lifetime of the reference;
+        // a raw fat pointer keeps the data and vtable provenance (storing it as `[usize; 2]`
+        // would strip the vtable's provenance, which Miri reports as undefined behaviour).
+        let raw = JobPtr(unsafe {
+            std::mem::transmute::<&(dyn Fn(usize) + Sync), *const (dyn Fn(usize) + Sync)>(f)
+        });
         *lock(&s.job) = Some(raw);
         s.tasks.0.store(n, Ordering::Relaxed);
         s.done.0.store(0, Ordering::Relaxed);
@@ -190,6 +192,15 @@ impl SpinPool {
     }
 }
 
+/// The published task: a raw pointer to the `run` caller's closure. It is valid for every
+/// worker until `run` returns, which waits for all workers to finish.
+#[derive(Clone, Copy)]
+struct JobPtr(*const (dyn Fn(usize) + Sync));
+
+// SAFETY: the pointee is `Sync`, so it may be called from any thread, and `run` keeps it alive
+// until every worker is done with it.
+unsafe impl Send for JobPtr {}
+
 fn worker(s: &Shared, k: usize, threads: usize) {
     let mut seen = 0usize;
     loop {
@@ -226,8 +237,7 @@ fn worker(s: &Shared, k: usize, threads: usize) {
             let n = s.tasks.0.load(Ordering::Relaxed);
             // SAFETY: `raw` was made from a live `&dyn Fn(usize) + Sync` by `run`, which is
             // still blocked until this worker increments `done` below.
-            let f: &(dyn Fn(usize) + Sync) =
-                unsafe { std::mem::transmute::<[usize; 2], &(dyn Fn(usize) + Sync)>(raw) };
+            let f: &(dyn Fn(usize) + Sync) = unsafe { &*raw.0 };
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mut i = k;
                 while i < n {

@@ -68,18 +68,9 @@ fn trained_models_match_upstream() {
             "{}\npandas_categorical:null\n",
             model.save_model_to_string(0, -1, 0).unwrap()
         );
-        let want = std::fs::read_to_string(platform_fixture(&case, "model.txt")).unwrap();
-        if ours != want {
-            let (i, (a, b)) = ours
-                .lines()
-                .zip(want.lines())
-                .enumerate()
-                .find(|(_, (a, b))| a != b)
-                .unwrap_or((0, ("<len>", "<len>")));
-            failures.push(format!(
-                "{}: line {i}\n  ours {a}\n  want {b}",
-                case.display()
-            ));
+        let want = read_model_text(platform_fixture(&case, "model.txt"));
+        if let Some(mismatch) = model_text_mismatch(&case, &ours, &want) {
+            failures.push(mismatch);
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
