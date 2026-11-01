@@ -1,0 +1,4 @@
+# Golden fixtures are compared byte-for-byte with upstream output (and loaded by upstream's
+# C++ parser, which aborts on CRLF model text). Keep their bytes unchanged on every platform:
+# no end-of-line conversion on Windows checkouts.
+tests/fixtures/** -text

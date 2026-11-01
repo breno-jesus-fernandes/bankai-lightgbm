@@ -13,7 +13,7 @@ fn crlf_model_file_loads_like_the_lf_file() {
     let dir = std::env::temp_dir().join(format!("bankai-crlf-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     for case in cases() {
-        let lf = std::fs::read_to_string(case.join("model.txt")).unwrap();
+        let lf = read_model_text(case.join("model.txt"));
         let name = case.file_name().unwrap().to_string_lossy().into_owned();
         let crlf_path = dir.join(format!("{name}.txt"));
         std::fs::write(&crlf_path, lf.replace('\n', "\r\n")).unwrap();
