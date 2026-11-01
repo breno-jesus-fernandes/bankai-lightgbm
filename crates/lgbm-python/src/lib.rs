@@ -99,6 +99,31 @@ impl NativeDataset {
         self.ds.num_data()
     }
 
+    /// A copy with any given metadata field replaced (`None` keeps it; an empty list clears).
+    fn with_fields(
+        &self,
+        label: Option<Vec<f64>>,
+        weight: Option<Vec<f32>>,
+        group: Option<Vec<i32>>,
+    ) -> PyResult<Self> {
+        let mut ds = (*self.ds).clone();
+        if let Some(label) = label {
+            ds.set_label(&label).map_err(to_py)?;
+        }
+        if let Some(weight) = weight {
+            ds.set_weights(&weight).map_err(to_py)?;
+        }
+        if let Some(group) = group {
+            ds.set_group(&group).map_err(to_py)?;
+        }
+        Ok(NativeDataset {
+            ds: Arc::new(ds),
+            data: Arc::clone(&self.data),
+            nrow: self.nrow,
+            ncol: self.ncol,
+        })
+    }
+
     /// A copy of this dataset with the init score replaced (class-major; empty clears it).
     /// The binned data is copied; the raw matrix is shared.
     fn with_init_score(&self, init_score: Vec<f64>) -> PyResult<Self> {

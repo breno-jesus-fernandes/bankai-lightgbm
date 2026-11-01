@@ -1137,3 +1137,21 @@ def test_dataset_getters_match_upstream() -> None:
         )
     for ours, theirs in zip(values[1], values[0], strict=True):
         np.testing.assert_array_equal(ours, theirs)
+
+
+def test_dataset_setters_after_construct_match_upstream() -> None:
+    # upstream: set_label/set_weight/set_group update an already constructed Dataset.
+    x = np.random.default_rng(55).normal(size=(12, 3))
+    params = {"verbosity": -1, "min_data_in_leaf": 1, "num_threads": 1}
+    new_label = (np.arange(12) % 3).astype(float)
+    new_weight = np.linspace(0.5, 2.0, 12)
+    predictions = []
+    for library in (lightgbm, lgb):
+        dataset = library.Dataset(x, label=np.arange(12), params=params).construct()
+        dataset.set_label(new_label)
+        dataset.set_weight(new_weight)
+        dataset.set_group([6, 6])
+        np.testing.assert_array_equal(dataset.get_label(), new_label.astype(np.float32))
+        booster = library.train({**params, "objective": "lambdarank"}, dataset, num_boost_round=2)
+        predictions.append(booster.predict(x, raw_score=True))
+    np.testing.assert_allclose(predictions[1], predictions[0], rtol=1e-12, atol=1e-15)

@@ -622,6 +622,19 @@ impl Dataset {
         Ok(())
     }
 
+    /// upstream: `LGBM_DatasetSetField("label")` (labels are stored as `f32`).
+    pub fn set_label(&mut self, label: &[f64]) -> Result<()> {
+        if label.len() != self.num_data() {
+            return Err(Error::InvalidParameter(format!(
+                "Length of label ({}) is not same with #data ({})",
+                label.len(),
+                self.num_data()
+            )));
+        }
+        self.metadata.label = label.iter().map(|&v| v as f32).collect();
+        Ok(())
+    }
+
     /// upstream: `Metadata::SetWeights` (an empty slice clears the weights).
     pub fn set_weights(&mut self, weights: &[f32]) -> Result<()> {
         if weights.is_empty() {

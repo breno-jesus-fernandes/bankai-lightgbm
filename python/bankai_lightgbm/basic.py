@@ -313,6 +313,57 @@ class Dataset:
             return values.reshape((num_data, num_classes), order="F")
         return values
 
+    def _update_native_fields(
+        self,
+        *,
+        label: list[float] | None = None,
+        weight: list[float] | None = None,
+        group: list[int] | None = None,
+    ) -> None:
+        """Replace fields on the constructed handles; ``None`` leaves a field unchanged."""
+        for attribute in ("_handle", "_evaluation_handle"):
+            handle = getattr(self, attribute)
+            if handle is not None:
+                setattr(
+                    self,
+                    attribute,
+                    handle.with_fields(label=label, weight=weight, group=group),
+                )
+
+    def set_label(self, label: Any) -> Dataset:
+        """Set the label; a constructed Dataset is updated in place."""
+        self.label = label
+        if self._handle is not None or self._evaluation_handle is not None:
+            values = np.asarray(label, dtype=np.float64).reshape(-1).tolist()
+            self._update_native_fields(label=values)
+        return self
+
+    def set_weight(self, weight: Any) -> Dataset:
+        """Set the sample weights; a constructed Dataset is updated in place."""
+        self.weight = weight
+        if self._handle is not None or self._evaluation_handle is not None:
+            values = (
+                []
+                if weight is None
+                else [float(w) for w in np.asarray(weight, np.float32).reshape(-1)]
+            )
+            self._update_native_fields(weight=values)
+        return self
+
+    def set_group(self, group: Any) -> Dataset:
+        """Set query group sizes; a constructed Dataset is updated in place."""
+        self.group = group
+        if self._handle is not None or self._evaluation_handle is not None:
+            sizes = [int(g) for g in np.asarray(group).reshape(-1)] if group is not None else []
+            num_data = self.num_data()
+            if sizes and sum(sizes) != num_data:
+                raise LightGBMError(
+                    f"Sum of query counts ({num_data}) differs from the length of #data "
+                    f"({sum(sizes)})"
+                )
+            self._update_native_fields(group=sizes)
+        return self
+
     def set_init_score(self, init_score: Any) -> Dataset:
         """Set the init score; constructed handles are updated in place."""
         self.init_score = init_score
