@@ -109,8 +109,7 @@ _DARWIN_PATH_SMOOTH = pytest.mark.xfail(
 @pytest.mark.parametrize(
     "name",
     [
-        pytest.param(name, marks=_DARWIN_PATH_SMOOTH) if name == "path_smooth" else name
-        for name in CONFIGS
+        name for name in CONFIGS
     ],
 )
 def test_multi_value_training_matches_upstream(fmt: str, name: str) -> None:
