@@ -61,7 +61,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] Dense, 4-bit dense, and sparse bins; multi-val (per-feature) bins
 - [ ] `MultiValBin` (row-wise training layout)
 - [x] Exclusive Feature Bundling (`enable_bundle`), sampling identical to upstream
-- [ ] Metadata: label, weight, and group/query implemented; init_score and position pending
+- [ ] Metadata: label, weight, and group/query implemented; weight/query length errors and nested subsets covered; negative query-size compatibility, init_score and position pending
 - [ ] Parsers: CSV/TSV/LibSVM, header, `label_column`, `weight_column`, `group_column`, `ignore_column`, `two_round`
 - [x] Binary dataset file (`save_binary`) byte-identical to upstream (20 fixtures); reader for upstream files
 - [ ] Load a `Dataset` from an upstream `.bin` file (decode bin data)

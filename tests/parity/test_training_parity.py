@@ -785,3 +785,39 @@ def test_invalid_subset_indices_match_upstream(rows: list[int]) -> None:
         assert dataset.num_data() == 12
         assert dataset.subset([0, 1]).construct().num_data() == 2
     assert messages[0] == messages[1]
+
+
+@pytest.mark.parametrize("field,values", [("weight", [1.0] * 11), ("group", [4, 7])])
+def test_invalid_dataset_metadata_matches_upstream(field: str, values: list[float]) -> None:
+    x = np.arange(36, dtype=float).reshape(12, 3)
+    errors = []
+    for library in (lightgbm, lgb):
+        with pytest.raises(library.basic.LightGBMError) as caught:
+            library.Dataset(
+                x,
+                label=np.arange(12),
+                **{field: values},
+                params={"verbosity": -1, "min_data_in_leaf": 1},
+            ).construct()
+        errors.append(str(caught.value))
+    assert errors[0] == errors[1]
+
+
+def test_nested_subset_with_empty_query_matches_upstream() -> None:
+    x = np.random.default_rng(21).normal(size=(12, 3))
+    subsets = []
+    for library in (lightgbm, lgb):
+        source = library.Dataset(
+            x,
+            label=np.arange(12),
+            weight=np.arange(12) + 1,
+            group=[4, 0, 8],
+            params={"verbosity": -1, "min_data_in_leaf": 1},
+        )
+        subset = source.subset([10, 1, 4, 3, 6]).construct().subset([4, 0, 2]).construct()
+        subsets.append(subset)
+    np.testing.assert_array_equal(subsets[1].label, subsets[0].label)
+    np.testing.assert_array_equal(
+        np.asarray(subsets[1].weight, dtype=np.float32), subsets[0].get_weight()
+    )
+    np.testing.assert_array_equal(subsets[1].group, subsets[0].get_group())

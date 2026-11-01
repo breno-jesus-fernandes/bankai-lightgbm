@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Match upstream Python errors for invalid weight lengths and query-count sums; cover nested subsets with zero-sized query groups.
+
 - Match upstream errors for empty, negative, and out-of-range Dataset subset selections before converting indices to native unsigned values.
 
 - Sort Dataset subset indices like upstream, preserving label, weight, and query-group alignment for unsorted and duplicate selections.

@@ -334,9 +334,16 @@ class Dataset:
         weight = None
         if self.weight is not None:
             weight = [float(w) for w in np.asarray(self.weight, dtype=np.float32).reshape(-1)]
+            if weight and len(weight) != n:
+                raise LightGBMError("Length of weights differs from the length of #data")
         group = None
         if self.group is not None:
             group = [int(g) for g in np.asarray(self.group).reshape(-1)]
+            # upstream: src/io/metadata.cpp (v4.7.0) Metadata::SetQuery.
+            if group and sum(group) != n:
+                raise LightGBMError(
+                    f"Sum of query counts ({n}) differs from the length of #data ({sum(group)})"
+                )
         return NativeDataset.from_dense(
             matrix,
             label.tolist(),
