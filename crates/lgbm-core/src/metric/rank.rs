@@ -72,6 +72,12 @@ pub(crate) fn check_rank_labels(label: &[f32], label_gain_len: usize) -> Result<
 /// upstream: `DCGCalculator::CheckMetadata` (query size limit)
 pub(crate) fn check_label_range(boundaries: &[i32]) -> Result<()> {
     for b in boundaries.windows(2) {
+        // upstream aborts here (std::length_error); bankai reports it instead.
+        if b[1] < b[0] {
+            return Err(Error::InvalidParameter(
+                "ranking objectives do not support negative query sizes".into(),
+            ));
+        }
         let rows = (b[1] - b[0]) as usize;
         if rows > MAX_POSITION {
             return Err(Error::InvalidParameter(format!(

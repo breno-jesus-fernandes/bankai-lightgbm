@@ -583,15 +583,20 @@ impl Dataset {
             self.metadata.query_boundaries.clear();
             return Ok(());
         }
+        // Negative sizes are accepted like upstream; only ranking objectives reject them.
         let mut boundaries = Vec::with_capacity(sizes.len() + 1);
         boundaries.push(0i32);
+        let mut total = 0i64;
         for &s in sizes {
-            if s < 0 {
-                return Err(Error::InvalidParameter("Negative query size".into()));
-            }
-            boundaries.push(boundaries[boundaries.len() - 1] + s);
+            total += i64::from(s);
+            let last = boundaries[boundaries.len() - 1];
+            boundaries.push(
+                last.checked_add(s).ok_or_else(|| {
+                    Error::InvalidParameter("Sum of query counts overflows".into())
+                })?,
+            );
         }
-        if boundaries[boundaries.len() - 1] as usize != self.num_data() {
+        if total != self.num_data() as i64 {
             return Err(Error::InvalidParameter(
                 "Sum of query counts is not same with #data".into(),
             ));
@@ -1000,6 +1005,19 @@ mod subset_tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn negative_query_sizes_are_stored_like_upstream() -> crate::Result<()> {
+        // upstream: src/io/metadata.cpp (v4.7.0) SetQueriesFromIterator only checks that
+        // the sizes sum to #data, so `[-1, 13]` for 12 rows is accepted as-is.
+        let values: Vec<f64> = (0..24).map(f64::from).collect();
+        let labels: Vec<f64> = (0..12).map(f64::from).collect();
+        let cfg = Config::from_params(&HashMap::new())?;
+        let mut dataset = Dataset::from_dense(&values, 12, 2, &labels, &cfg, &[])?;
+        dataset.set_group(&[-1, 13])?;
+        assert_eq!(dataset.metadata.query_boundaries, vec![0, -1, 12]);
         Ok(())
     }
 }

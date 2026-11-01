@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Accept negative query sizes as upstream does (non-ranking objectives train normally); ranking objectives now raise a clear error instead of aborting.
+
 - Match upstream Python errors for invalid weight lengths and query-count sums; cover nested subsets with zero-sized query groups.
 
 - Match upstream errors for empty, negative, and out-of-range Dataset subset selections before converting indices to native unsigned values.

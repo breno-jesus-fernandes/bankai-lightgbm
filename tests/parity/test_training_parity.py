@@ -821,3 +821,32 @@ def test_nested_subset_with_empty_query_matches_upstream() -> None:
         np.asarray(subsets[1].weight, dtype=np.float32), subsets[0].get_weight()
     )
     np.testing.assert_array_equal(subsets[1].group, subsets[0].get_group())
+
+
+def test_negative_query_sizes_match_upstream_for_regression() -> None:
+    # upstream: src/io/metadata.cpp (v4.7.0) SetQueriesFromIterator only checks that the
+    # query sizes sum to #data; regression ignores the query boundaries.
+    x = np.random.default_rng(5).normal(size=(12, 3))
+    y = np.arange(12, dtype=float)
+    params = {"verbosity": -1, "min_data_in_leaf": 1, "num_threads": 1}
+    predictions = []
+    for library in (lightgbm, lgb):
+        dataset = library.Dataset(x, label=y, group=[-1, 13], params=params).construct()
+        booster = library.train({**params, "objective": "regression"}, dataset, num_boost_round=3)
+        predictions.append(booster.predict(x))
+    np.testing.assert_array_equal(
+        lightgbm.Dataset(x, label=y, group=[-1, 13]).construct().get_group(), [-1, 13]
+    )
+    np.testing.assert_allclose(predictions[1], predictions[0], rtol=1e-12, atol=1e-15)
+
+
+@pytest.mark.parametrize("group", [[-1, 13], [13, -1], [-1, 1, 12]])
+def test_negative_query_sizes_reject_ranking_with_clear_error(group: list[int]) -> None:
+    # Upstream aborts the process (std::length_error) here, so there is no upstream message
+    # to match; the Python layer must raise LightGBMError rather than crash or train silently.
+    x = np.random.default_rng(6).normal(size=(12, 3))
+    labels = np.random.default_rng(7).integers(0, 3, size=12).astype(float)
+    params = {"verbosity": -1, "min_data_in_leaf": 1, "num_threads": 1}
+    dataset = lgb.Dataset(x, label=labels, group=group, params=params)
+    with pytest.raises(lgb.basic.LightGBMError, match="negative"):
+        lgb.train({**params, "objective": "lambdarank"}, dataset, num_boost_round=1)
