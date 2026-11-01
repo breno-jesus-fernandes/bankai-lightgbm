@@ -1479,3 +1479,24 @@ def test_multiclass_custom_objective_input_shape_like_upstream() -> None:
     for got, want in zip(ours, theirs, strict=True):
         assert got.shape == want.shape == (90, 3)
         np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-15)
+
+
+def test_nested_interaction_constraints_keep_their_groups() -> None:
+    """upstream: basic.py (v4.7.0) _to_string writes inner lists as ``[a,b]``; flattening
+    them merged every group into one, which silently removed the constraint."""
+    rng = np.random.default_rng(69)
+    x = rng.normal(size=(600, 3))
+    y = x[:, 0] * x[:, 1] + 0.5 * x[:, 2]
+    params = {
+        "verbosity": -1,
+        "num_threads": 1,
+        "deterministic": True,
+        "interaction_constraints": [[0], [1, 2]],
+        "num_leaves": 8,
+    }
+    models = [
+        lib.train(params, lib.Dataset(x, label=y), num_boost_round=5).model_to_string()
+        for lib in (lgb, lightgbm)
+    ]
+    assert models[0] == models[1]
+    assert "[interaction_constraints: [0],[1,2]]" in models[0]

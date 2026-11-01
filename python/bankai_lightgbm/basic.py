@@ -36,12 +36,23 @@ def _custom_derivative(data: Any, name: str) -> npt.NDArray[np.float32]:
 
 
 def _param_value_str(value: Any) -> str:
-    """Parameter values as the C API takes them (``lightgbm`` formats them the same way)."""
+    """Parameter values as the C API takes them (``lightgbm`` formats them the same way).
+
+    Like upstream's ``_param_dict_to_str``/``_to_string`` (basic.py v4.7.0), a list inside a
+    list is written as ``[a,b]``, so ``interaction_constraints=[[0, 1], [2]]`` becomes
+    ``[0,1],[2]`` rather than one flattened group.
+    """
     if isinstance(value, bool | np.bool_):
         return "true" if value else "false"
     if isinstance(value, list | tuple | np.ndarray):
-        return ",".join(_param_value_str(v) for v in value)
+        return ",".join(_param_list_item_str(v) for v in value)
     return str(value)
+
+
+def _param_list_item_str(value: Any) -> str:
+    if isinstance(value, list):
+        return "[" + ",".join(str(v) for v in value) + "]"
+    return _param_value_str(value)
 
 
 def _params_to_strings(params: dict[str, Any]) -> dict[str, str]:

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Nested list parameters are passed like upstream (`interaction_constraints=[[0, 1], [2]]` becomes `[0,1],[2]`); they were flattened into a single group, which silently disabled interaction constraints given as Python lists.
+
 - Custom objectives (`fobj`) now receive upstream's internal training score instead of a fresh prediction on the training rows: the `init_score` is included, and with DART the trees dropped for that iteration are excluded (previously the drop happened after `fobj` ran, so DART with a custom objective trained differently from upstream).
 
 - `Dataset` accepts `scipy.sparse` CSR and CSC matrices (other sparse formats are converted with `csr_matrix`, as upstream does), for training, validation sets with `reference`, `cv` and custom objectives/metrics. Binning reproduces upstream's `LGBM_DatasetCreateFromCSR`/`FromCSC` exactly, without densifying the matrix. Training on data whose features bundle into multi-value groups is not supported yet (see ROADMAP P2 `MultiValBin`).
