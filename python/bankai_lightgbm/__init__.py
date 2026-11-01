@@ -12,6 +12,13 @@ from bankai_lightgbm.callback import (
     reset_parameter,
 )
 from bankai_lightgbm.engine import CVBooster, cv, train
+from bankai_lightgbm.plotting import (
+    create_tree_digraph,
+    plot_importance,
+    plot_metric,
+    plot_split_value_histogram,
+    plot_tree,
+)
 from bankai_lightgbm.sklearn import LGBMClassifier, LGBMModel, LGBMRanker, LGBMRegressor
 
 __all__ = [
@@ -25,9 +32,14 @@ __all__ = [
     "LGBMRegressor",
     "LightGBMError",
     "__version__",
+    "create_tree_digraph",
     "cv",
     "early_stopping",
     "log_evaluation",
+    "plot_importance",
+    "plot_metric",
+    "plot_split_value_histogram",
+    "plot_tree",
     "record_evaluation",
     "reset_parameter",
     "train",

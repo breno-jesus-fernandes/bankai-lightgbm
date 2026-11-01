@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Plotting helpers `plot_importance`, `plot_split_value_histogram`, `plot_metric`, `plot_tree` and `create_tree_digraph` are exported, ported from upstream `python-package/lightgbm/plotting.py` (MIT, see `THIRD_PARTY_NOTICES.md`). Their output (bar and line data, labels, graphviz source) is checked against `lightgbm==4.7.0`. Also: `Booster.get_split_value_histogram`.
+
 - `Dataset` built from a pandas DataFrame (or with `feature_name`) names the model's features after the columns, as upstream does; the names appear in the model text.
 - sklearn estimators `LGBMModel`, `LGBMRegressor`, `LGBMClassifier` and `LGBMRanker` are exported. They are ported from upstream `python-package/lightgbm/sklearn.py` (MIT, see `THIRD_PARTY_NOTICES.md`) with the same signatures and defaults; predictions match `lightgbm==4.7.0`. `narwhals` is a new dependency. Also: `Booster.free_dataset`, `record_evaluation` accepts an empty evaluation list (no validation sets) as upstream does.
 

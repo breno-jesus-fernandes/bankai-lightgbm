@@ -7,6 +7,7 @@ import json
 import warnings
 from collections.abc import Callable, Sequence
 from copy import deepcopy
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Union
 
@@ -16,6 +17,7 @@ import numpy.typing as npt
 import scipy.sparse
 
 from bankai_lightgbm._lib import LightGBMError, NativeBooster, NativeDataset
+from bankai_lightgbm.compat import PANDAS_INSTALLED
 from bankai_lightgbm.compat import pd_DataFrame as pd_DataFrame
 from bankai_lightgbm.compat import pd_Series as pd_Series
 
@@ -439,6 +441,16 @@ class LGBMDeprecationWarning(FutureWarning):
     """Custom deprecation warning."""
 
     pass
+
+
+def _is_zero(x: float) -> bool:
+    return -ZERO_THRESHOLD <= x <= ZERO_THRESHOLD
+
+
+class _MissingType(Enum):
+    NONE = "None"
+    NAN = "NaN"
+    ZERO = "Zero"
 
 
 class Dataset:
@@ -874,6 +886,84 @@ class Booster:
         """Remove the last iteration's trees and their effect on the training scores."""
         self._native().rollback_one_iter()
         return self
+
+    # upstream: python-package/lightgbm/basic.py (v4.7.0) Booster.get_split_value_histogram
+    def get_split_value_histogram(
+        self,
+        feature: int | str,
+        bins: int | str | None = None,
+        xgboost_style: bool = False,
+    ) -> tuple[npt.NDArray[Any], npt.NDArray[Any]] | npt.NDArray[Any] | pd_DataFrame:
+        """Get split value histogram for the specified feature.
+
+        Parameters
+        ----------
+        feature : int or str
+            The feature name or index the histogram is calculated for.
+            If int, interpreted as index.
+            If str, interpreted as name.
+
+            .. warning::
+
+                Categorical features are not supported.
+
+        bins : int, str or None, optional (default=None)
+            The maximum number of bins.
+            If None, or int and > number of unique split values and ``xgboost_style=True``,
+            the number of bins equals number of unique split values.
+            If str, it should be one from the list of the supported values by ``numpy.histogram()`` function.
+        xgboost_style : bool, optional (default=False)
+            Whether the returned result should be in the same form as it is in XGBoost.
+            If False, the returned value is tuple of 2 numpy arrays as it is in ``numpy.histogram()`` function.
+            If True, the returned value is matrix, in which the first column is the right edges of non-empty bins
+            and the second one is the histogram values.
+
+        Returns
+        -------
+        result_tuple : tuple of 2 numpy arrays
+            If ``xgboost_style=False``, the values of the histogram of used splitting values for the specified feature
+            and the bin edges.
+        result_array_like : numpy array or pandas DataFrame (if pandas is installed)
+            If ``xgboost_style=True``, the histogram of used splitting values for the specified feature.
+        """
+
+        model = self.dump_model()
+        feature_names: list[str] | None = model.get("feature_names")
+        tree_infos = model["tree_info"]
+        values: list[float] = []
+
+        def add(root: dict[str, Any]) -> None:
+            """Recursively add thresholds."""
+            if "split_index" in root:  # non-leaf
+                if feature_names is not None and isinstance(feature, str):
+                    split_feature = feature_names[root["split_feature"]]
+                else:
+                    split_feature = root["split_feature"]
+                if split_feature == feature:
+                    if isinstance(root["threshold"], str):
+                        raise LightGBMError(
+                            "Cannot compute split value histogram for the categorical feature"
+                        )
+                    values.append(root["threshold"])
+                add(root["left_child"])
+                add(root["right_child"])
+
+        for tree_info in tree_infos:
+            add(tree_info["tree_structure"])
+
+        if bins is None or (isinstance(bins, int) and xgboost_style):
+            n_unique = len(np.unique(values))
+            bins = max(min(n_unique, bins) if bins is not None else n_unique, 1)
+        hist, bin_edges = np.histogram(values, bins=bins)
+        if xgboost_style:
+            ret = np.column_stack((bin_edges[1:], hist))
+            ret = ret[ret[:, 1] > 0]
+            if PANDAS_INSTALLED:
+                return pd_DataFrame(ret, columns=["SplitValue", "Count"])
+            else:
+                return ret
+        else:
+            return hist, bin_edges
 
     def free_dataset(self) -> Booster:
         """Drop the references to the training and validation Datasets (upstream ``free_dataset``).
