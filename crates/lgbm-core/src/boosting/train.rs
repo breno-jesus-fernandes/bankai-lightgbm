@@ -113,6 +113,11 @@ impl GbdtTrainer {
         Ok(trainer)
     }
 
+    /// Edit one leaf output of the trainer's trees (upstream `GBDT::SetLeafValue`).
+    pub fn set_leaf_value(&mut self, tree_idx: usize, leaf_idx: usize, value: f64) -> Result<()> {
+        super::gbdt::set_leaf_in(&mut self.trainer.models, tree_idx, leaf_idx, value)
+    }
+
     /// Remove the last iteration's trees and their contribution to the training scores
     /// (upstream `Booster::RollbackOneIter`).
     pub fn rollback_one_iter(&mut self) -> Result<()> {

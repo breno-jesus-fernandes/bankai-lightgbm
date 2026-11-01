@@ -223,6 +223,20 @@ impl NativeBooster {
         })
     }
 
+    /// Edit one leaf output in the model and in the trainer's copy (upstream
+    /// `LGBM_BoosterSetLeafValue`), so continued training sees the edit.
+    fn set_leaf_output(&mut self, tree_idx: usize, leaf_idx: usize, value: f64) -> PyResult<()> {
+        self.model
+            .set_leaf_value(tree_idx, leaf_idx, value)
+            .map_err(to_py)?;
+        if let Some(trainer) = self.trainer.as_mut() {
+            trainer
+                .set_leaf_value(tree_idx, leaf_idx, value)
+                .map_err(to_py)?;
+        }
+        Ok(())
+    }
+
     /// Drop the last iteration (upstream `LGBM_BoosterRollbackOneIter`).
     fn rollback_one_iter(&mut self, py: Python<'_>) -> PyResult<()> {
         let Some(trainer) = self.trainer.as_mut() else {

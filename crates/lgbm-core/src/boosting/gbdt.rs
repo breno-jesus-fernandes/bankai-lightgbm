@@ -1,5 +1,6 @@
 //! Gradient boosted decision trees. upstream: src/boosting/gbdt.{h,cpp}, gbdt_prediction.cpp
 
+use crate::error::{Error, Result};
 use crate::objective::LoadedObjective;
 use crate::tree::Tree;
 
@@ -24,6 +25,30 @@ pub struct Gbdt {
     /// Trailing `pandas_categorical:` line value, if present.
     pub(crate) pandas_categorical: Option<String>,
     pub(crate) version: String,
+}
+
+/// upstream: `GBDT::SetLeafValue` (`models_[tree_idx]->SetLeafOutput`), indices checked.
+pub(crate) fn set_leaf_in(
+    models: &mut [Tree],
+    tree_idx: usize,
+    leaf_idx: usize,
+    value: f64,
+) -> Result<()> {
+    let tree = models
+        .get_mut(tree_idx)
+        .ok_or_else(|| Error::InvalidParameter("tree index out of range".into()))?;
+    if leaf_idx >= tree.num_leaves {
+        return Err(Error::InvalidParameter("leaf index out of range".into()));
+    }
+    tree.leaf_value[leaf_idx] = value;
+    Ok(())
+}
+
+impl Gbdt {
+    /// Edit one leaf output of the model (upstream `LGBM_BoosterSetLeafValue`).
+    pub fn set_leaf_value(&mut self, tree_idx: usize, leaf_idx: usize, value: f64) -> Result<()> {
+        set_leaf_in(&mut self.models, tree_idx, leaf_idx, value)
+    }
 }
 
 impl Gbdt {

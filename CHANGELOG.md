@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `Booster.set_leaf_output(tree, leaf, value)`, which edits the model and the trees continued training uses, like upstream's `SetLeafValue`.
+
 - Add `Booster.rollback_one_iter()`: removes the last iteration's trees and their training-score contribution like upstream, so training continues identically.
 
 - Support `init_model` continued training for gbdt (file path or Booster, including multiclass and validation callbacks), matching upstream trees and predictions. DART with `init_model` is rejected explicitly; non-Booster, non-path objects raise `TypeError` where upstream silently ignores them.

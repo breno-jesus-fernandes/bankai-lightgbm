@@ -1066,3 +1066,27 @@ def test_rollback_one_iter_matches_upstream(strategy: str) -> None:
     assert results[1][0] == results[0][0] == 4
     np.testing.assert_allclose(results[1][1], results[0][1], rtol=1e-12, atol=1e-15)
     np.testing.assert_allclose(results[1][2], results[0][2], rtol=1e-12, atol=1e-15)
+
+
+def test_set_leaf_output_matches_upstream() -> None:
+    # upstream: GBDT::SetLeafValue changes the model's leaf output; later iterations keep
+    # training from the trained scores, not from the edited leaf.
+    rng = np.random.default_rng(52)
+    x = rng.normal(size=(100, 3))
+    y = x[:, 0] - 0.5 * x[:, 1]
+    params = {**_init_score_params(), "objective": "regression"}
+    results = []
+    for library in (lightgbm, lgb):
+        booster = library.train(
+            params,
+            library.Dataset(x, label=y, params=params),
+            num_boost_round=3,
+            keep_training_booster=True,
+        )
+        booster.set_leaf_output(1, 2, 0.75)
+        edited = booster.predict(x, raw_score=True)
+        booster.update()
+        results.append((edited, booster.predict(x, raw_score=True), booster.get_leaf_output(1, 2)))
+    np.testing.assert_allclose(results[1][0], results[0][0], rtol=1e-12, atol=1e-15)
+    np.testing.assert_allclose(results[1][1], results[0][1], rtol=1e-12, atol=1e-15)
+    assert results[1][2] == results[0][2] == 0.75
