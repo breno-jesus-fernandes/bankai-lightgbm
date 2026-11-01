@@ -10,6 +10,7 @@ use super::feature_histogram::{
 };
 use super::histogram;
 use super::split_info::{K_MIN_SCORE, SplitInfo, argmax_split};
+use rayon::prelude::*;
 use std::sync::Arc;
 
 use crate::config::Config;
@@ -153,6 +154,10 @@ pub struct SerialTreeLearner {
     monotone_penalization: f64,
     monotone_bounds: Vec<(f64, f64)>,
     leaf_depth: Vec<i32>,
+    /// Threads for the split search and the multi-value histograms (upstream `num_threads_`).
+    num_threads: usize,
+    /// Pool that runs a tree when `num_threads` is set explicitly; `None` uses rayon's pool.
+    thread_pool: Option<Arc<rayon::ThreadPool>>,
 }
 
 impl SerialTreeLearner {
@@ -201,6 +206,20 @@ impl SerialTreeLearner {
             checked_bins.push(Some(checked));
         }
         let num_features = l.num_features;
+        let num_threads = if cfg.num_threads > 0 {
+            cfg.num_threads as usize
+        } else {
+            rayon::current_num_threads()
+        };
+        let thread_pool = if cfg.num_threads > 1 {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build()
+                .map_err(|e| Error::InvalidParameter(format!("num_threads: {e}")))?;
+            Some(Arc::new(pool))
+        } else {
+            None
+        };
         let mut metas = Vec::with_capacity(num_features);
         let mut feature_hist_offsets = Vec::with_capacity(num_features);
         let mut feature_hist_len = Vec::with_capacity(num_features);
@@ -277,12 +296,23 @@ impl SerialTreeLearner {
             monotone_penalization,
             monotone_bounds: vec![(-f64::MAX, f64::MAX); num_leaves],
             leaf_depth: vec![0; num_leaves],
+            num_threads,
+            thread_pool,
         })
     }
 
     /// upstream: `SerialTreeLearner::Train`
     /// `rows` restricts the tree to a bagged subset (ascending row ids); `None` uses all rows.
     pub fn train(&mut self, gradients: &[f32], hessians: &[f32], rows: Option<&[i32]>) -> Tree {
+        match self.thread_pool.clone() {
+            // Every parallel region of the tree then uses this learner's `num_threads`
+            // workers, not rayon's global pool.
+            Some(pool) => pool.install(|| self.grow_tree(gradients, hessians, rows)),
+            None => self.grow_tree(gradients, hessians, rows),
+        }
+    }
+
+    fn grow_tree(&mut self, gradients: &[f32], hessians: &[f32], rows: Option<&[i32]>) -> Tree {
         self.before_train(gradients, hessians, rows);
         self.splits.clear();
         let num_leaves = self.cfg.num_leaves as usize;
@@ -583,14 +613,20 @@ impl SerialTreeLearner {
     }
 
     /// upstream: `SerialTreeLearner::FindBestSplitsFromHistograms`
+    ///
+    /// Two phases. Phase 1 is sequential and cheap: each used feature's smaller-leaf
+    /// histogram is fixed and the larger leaf's is derived, touching only that feature's
+    /// bins. Phase 2 searches thresholds feature by feature, in parallel once the work is
+    /// large enough. A search reads histograms and mutates only its own `FeatureMeta`
+    /// (including its random stream), so each candidate is the same for any thread count.
+    /// The candidates are folded in feature order with upstream's `better_than`, so ties
+    /// keep the lowest feature, as `ArgMax` over features does.
     fn find_best_splits_from_histograms(
         &mut self,
         is_feature_used: &[bool],
         use_subtract: bool,
         tree: &Tree,
     ) {
-        let mut smaller_best = SplitInfo::default();
-        let mut larger_best = SplitInfo::default();
         // upstream draws the by-node sample for the smaller leaf, then the larger leaf.
         let smaller_mask = self
             .col_sampler
@@ -607,53 +643,121 @@ impl SerialTreeLearner {
         } else {
             0.0
         };
+        let larger = if self.larger.leaf_index >= 0 {
+            self.larger_slot
+        } else {
+            None
+        };
+        let (smaller_slot, smaller, larger_leaf) = (self.smaller_slot, self.smaller, self.larger);
+        let mc_smaller = self.mc_bounds(smaller.leaf_index);
+        let mc_larger = match larger {
+            Some(_) => self.mc_bounds(larger_leaf.leaf_index),
+            None => None,
+        };
+
+        // Phase 1 (sequential).
         for f in 0..self.num_features {
             if !is_feature_used[f] {
                 continue;
             }
-            let (sg, sh) = (self.smaller.sum_gradients, self.smaller.sum_hessians);
-            self.fix_histogram(self.smaller_slot, f, sg, sh);
-            let real = self.ds.layout.real_feature_idx[f];
-            let s = self.smaller;
-            self.compute_best_split_for_feature(
-                self.smaller_slot,
-                f,
-                real,
-                &s,
-                smaller_parent_output,
-                smaller_mask[f],
-                &mut smaller_best,
-            );
-
-            if self.larger.leaf_index < 0 {
-                continue;
-            }
-            let Some(ls) = self.larger_slot else { continue };
-            if use_subtract {
-                let start = self.feature_hist_offsets[f] * 2;
-                let len = self.feature_hist_len[f] * 2;
-                let (small, large) = two_slots(&mut self.pool.slots, self.smaller_slot, ls);
-                for i in start..start + len {
-                    large[i] -= small[i];
+            self.fix_histogram(smaller_slot, f, smaller.sum_gradients, smaller.sum_hessians);
+            if let Some(ls) = larger {
+                if use_subtract {
+                    let start = self.feature_hist_offsets[f] * 2;
+                    let len = self.feature_hist_len[f] * 2;
+                    let (small, large) = two_slots(&mut self.pool.slots, smaller_slot, ls);
+                    for i in start..start + len {
+                        large[i] -= small[i];
+                    }
+                } else {
+                    self.fix_histogram(ls, f, larger_leaf.sum_gradients, larger_leaf.sum_hessians);
                 }
-            } else {
-                let (lg, lh) = (self.larger.sum_gradients, self.larger.sum_hessians);
-                self.fix_histogram(ls, f, lg, lh);
             }
-            let lsplits = self.larger;
-            self.compute_best_split_for_feature(
-                ls,
-                f,
-                real,
-                &lsplits,
-                larger_parent_output,
-                larger_mask[f],
-                &mut larger_best,
-            );
         }
-        self.best_split_per_leaf[self.smaller.leaf_index as usize] = smaller_best;
-        if self.larger.leaf_index >= 0 {
-            self.best_split_per_leaf[self.larger.leaf_index as usize] = larger_best;
+
+        // Phase 2: threshold searches. Parallel only when the work outweighs a fork/join.
+        let searched_bins: usize = (0..self.num_features)
+            .filter(|&f| is_feature_used[f])
+            .map(|f| self.feature_hist_len[f])
+            .sum::<usize>()
+            * if larger.is_some() { 2 } else { 1 };
+        let parallel = self.num_threads > 1 && searched_bins >= PARALLEL_SEARCH_MIN_BINS;
+        let ctx = SearchCtx {
+            params: &self.params,
+            cat_params: &self.cat_params,
+            monotone_active: self.monotone_active,
+            monotone_penalization: self.monotone_penalization,
+            leaf_depth: &self.leaf_depth,
+        };
+        let slots = &self.pool.slots;
+        let offsets = &self.feature_hist_offsets;
+        let lens = &self.feature_hist_len;
+        let real_idx = &self.ds.layout.real_feature_idx;
+        let search = |f: usize, meta: &mut FeatureMeta| -> Option<FeatureOutcome> {
+            if !is_feature_used[f] {
+                return None;
+            }
+            let range = |slot: usize| {
+                let start = offsets[f] * 2;
+                &slots[slot][start..start + lens[f] * 2]
+            };
+            let real = real_idx[f];
+            let small = search_feature(
+                &ctx,
+                range(smaller_slot),
+                meta,
+                real,
+                &smaller,
+                smaller_parent_output,
+                mc_smaller,
+            );
+            let large = larger.map(|ls| {
+                search_feature(
+                    &ctx,
+                    range(ls),
+                    meta,
+                    real,
+                    &larger_leaf,
+                    larger_parent_output,
+                    mc_larger,
+                )
+            });
+            Some(FeatureOutcome { small, large })
+        };
+        let outcomes: Vec<Option<FeatureOutcome>> = if parallel {
+            self.metas
+                .par_iter_mut()
+                .enumerate()
+                .map(|(f, meta)| search(f, meta))
+                .collect()
+        } else {
+            self.metas
+                .iter_mut()
+                .enumerate()
+                .map(|(f, meta)| search(f, meta))
+                .collect()
+        };
+
+        // Fold in feature order, as the sequential search did.
+        let mut smaller_best = SplitInfo::default();
+        let mut larger_best = SplitInfo::default();
+        for (f, outcome) in outcomes.into_iter().enumerate() {
+            let Some(o) = outcome else { continue };
+            let (splittable, candidate) = o.small;
+            self.pool.splittable[smaller_slot][f] = splittable;
+            if smaller_mask[f] && candidate.better_than(&smaller_best) {
+                smaller_best = candidate;
+            }
+            if let (Some((splittable, candidate)), Some(ls)) = (o.large, larger) {
+                self.pool.splittable[ls][f] = splittable;
+                if larger_mask[f] && candidate.better_than(&larger_best) {
+                    larger_best = candidate;
+                }
+            }
+        }
+        self.best_split_per_leaf[smaller.leaf_index as usize] = smaller_best;
+        if larger_leaf.leaf_index >= 0 {
+            self.best_split_per_leaf[larger_leaf.leaf_index as usize] = larger_best;
         }
     }
 
@@ -668,64 +772,6 @@ impl SerialTreeLearner {
             )
         } else {
             ls.weight
-        }
-    }
-
-    /// upstream: `SerialTreeLearner::ComputeBestSplitForFeature`
-    /// `allowed` is the by-node mask: the threshold search always runs (it sets the
-    /// histogram's splittable flag, which children inherit), but only allowed features
-    /// may become the best split. upstream: `ComputeBestSplitForFeature` (`is_feature_used`)
-    #[allow(clippy::too_many_arguments)]
-    fn compute_best_split_for_feature(
-        &mut self,
-        slot: usize,
-        feature: usize,
-        real_fidx: i32,
-        ls: &LeafSplits,
-        parent_output: f64,
-        allowed: bool,
-        best: &mut SplitInfo,
-    ) {
-        let start = self.feature_hist_offsets[feature] * 2;
-        let len = self.feature_hist_len[feature] * 2;
-        let hist = &self.pool.slots[slot][start..start + len];
-        let mut new_split = SplitInfo::default();
-        let mc = self.mc_bounds(ls.leaf_index);
-        let splittable = if self.metas[feature].bin_type == BinType::Categorical {
-            find_best_threshold_categorical(
-                hist,
-                &mut self.metas[feature],
-                &self.params,
-                &self.cat_params,
-                ls.sum_gradients,
-                ls.sum_hessians,
-                ls.num_data_in_leaf,
-                parent_output,
-                mc,
-                &mut new_split,
-            )
-        } else {
-            find_best_threshold_numerical(
-                hist,
-                &mut self.metas[feature],
-                &self.params,
-                ls.sum_gradients,
-                ls.sum_hessians,
-                ls.num_data_in_leaf,
-                parent_output,
-                mc,
-                &mut new_split,
-            )
-        };
-        self.pool.splittable[slot][feature] = splittable;
-        // upstream: ComputeBestSplitForFeature, monotone_penalty (applied even at 0)
-        if self.monotone_active && self.metas[feature].monotone_type != 0 {
-            let depth = self.leaf_depth[ls.leaf_index as usize];
-            new_split.gain *= monotone_split_gain_penalty(depth, self.monotone_penalization);
-        }
-        new_split.feature = real_fidx;
-        if allowed && new_split.better_than(best) {
-            *best = new_split;
         }
     }
 
@@ -940,4 +986,73 @@ fn monotone_split_gain_penalty(depth: i32, penalization: f64) -> f64 {
         return 1.0 - penalization / 2f64.powf(d) + eps;
     }
     1.0 - 2f64.powf(penalization - 1.0 - d) + eps
+}
+
+/// Histogram bins one split search must cover before its feature searches run in parallel.
+/// Below this, the fork/join of a parallel region costs more than the searches themselves.
+const PARALLEL_SEARCH_MIN_BINS: usize = 1 << 13;
+
+/// Read-only settings shared by every feature of one split search.
+struct SearchCtx<'a> {
+    params: &'a SplitParams,
+    cat_params: &'a CatParams,
+    monotone_active: bool,
+    monotone_penalization: f64,
+    leaf_depth: &'a [i32],
+}
+
+/// One used feature's results: `(splittable, candidate)` for the smaller leaf and, when
+/// there is a larger leaf, for that leaf too.
+struct FeatureOutcome {
+    small: (bool, SplitInfo),
+    large: Option<(bool, SplitInfo)>,
+}
+
+/// upstream: `SerialTreeLearner::ComputeBestSplitForFeature`, without the best-split update.
+/// Returns whether the feature stays splittable for the children, and the candidate split.
+/// The caller keeps the candidate only when the by-node mask allows the feature; the
+/// threshold search always runs because it sets the splittable flag.
+fn search_feature(
+    ctx: &SearchCtx<'_>,
+    hist: &[f64],
+    meta: &mut FeatureMeta,
+    real_fidx: i32,
+    ls: &LeafSplits,
+    parent_output: f64,
+    mc: Option<(f64, f64)>,
+) -> (bool, SplitInfo) {
+    let mut new_split = SplitInfo::default();
+    let splittable = if meta.bin_type == BinType::Categorical {
+        find_best_threshold_categorical(
+            hist,
+            meta,
+            ctx.params,
+            ctx.cat_params,
+            ls.sum_gradients,
+            ls.sum_hessians,
+            ls.num_data_in_leaf,
+            parent_output,
+            mc,
+            &mut new_split,
+        )
+    } else {
+        find_best_threshold_numerical(
+            hist,
+            meta,
+            ctx.params,
+            ls.sum_gradients,
+            ls.sum_hessians,
+            ls.num_data_in_leaf,
+            parent_output,
+            mc,
+            &mut new_split,
+        )
+    };
+    // upstream: ComputeBestSplitForFeature, monotone_penalty (applied even at 0)
+    if ctx.monotone_active && meta.monotone_type != 0 {
+        let depth = ctx.leaf_depth[ls.leaf_index as usize];
+        new_split.gain *= monotone_split_gain_penalty(depth, ctx.monotone_penalization);
+    }
+    new_split.feature = real_fidx;
+    (splittable, new_split)
 }

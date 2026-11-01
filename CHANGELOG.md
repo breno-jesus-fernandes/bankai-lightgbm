@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Training with `num_threads > 1` runs each tree on a thread pool of that size and searches the split thresholds of the features in parallel when a node covers enough bins; models are unchanged. On a 2-vCPU machine a multi-value dataset trains about 20% faster with two threads.
+
 - Train on data whose features bundle into a multi-value group (typical once most values are zero, dense or sparse input): histograms are built from upstream's row-wise multi-value bins with the same offsets, block split and merge order, so models match upstream byte for byte (also with several threads). Previously training raised "not supported yet: training with multi-value (sparse) feature groups".
 
 - Labels are stored like upstream's `Metadata::SetLabel` (float32 through `AvoidInf`: NaN becomes 0, infinities are clamped to ±1e38); NaN labels used to poison the gradients so that no tree could split. `Dataset.get_label()`/`get_weight()` return the stored (sanitized) values once the Dataset is constructed, as upstream does.
