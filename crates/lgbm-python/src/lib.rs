@@ -39,7 +39,8 @@ impl NativeDataset {
     /// Bin a dense row-major `float64` matrix (`LGBM_DatasetCreateFromMat`). `params` are
     /// the dataset parameters as strings; `categorical` are column indices.
     #[staticmethod]
-    #[pyo3(signature = (data, label, params, categorical, weight=None, group=None))]
+    #[pyo3(signature = (data, label, params, categorical, weight=None, group=None, reference=None))]
+    #[allow(clippy::too_many_arguments)] // Python Dataset constructor arguments.
     fn from_dense(
         py: Python<'_>,
         data: PyReadonlyArray2<'_, f64>,
@@ -48,6 +49,7 @@ impl NativeDataset {
         categorical: Vec<i32>,
         weight: Option<Vec<f32>>,
         group: Option<Vec<i32>>,
+        reference: Option<PyRef<'_, NativeDataset>>,
     ) -> PyResult<Self> {
         let shape = data.shape().to_vec();
         let values = Arc::new(
@@ -57,11 +59,21 @@ impl NativeDataset {
         );
         let values_for_build = Arc::clone(&values);
         let (nrow, ncol) = (shape[0], shape[1]);
+        let reference = reference.map(|r| Arc::clone(&r.ds));
         let ds = py
             .allow_threads(|| -> lgbm_core::Result<Dataset> {
                 let cfg = Config::from_params(&params)?;
-                let mut ds =
-                    Dataset::from_dense(&values_for_build, nrow, ncol, &label, &cfg, &categorical)?;
+                let mut ds = if let Some(reference) = reference {
+                    Dataset::from_dense_reference(
+                        &values_for_build,
+                        nrow,
+                        ncol,
+                        &label,
+                        &reference,
+                    )?
+                } else {
+                    Dataset::from_dense(&values_for_build, nrow, ncol, &label, &cfg, &categorical)?
+                };
                 if let Some(w) = weight {
                     ds.set_weights(&w)?;
                 }

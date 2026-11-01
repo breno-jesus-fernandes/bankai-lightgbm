@@ -274,10 +274,6 @@ class Dataset:
 
     def _build(self, *, evaluation: bool = False) -> NativeDataset:
         if self.reference is not None:
-            if not evaluation:
-                raise NotImplementedError(
-                    "shared reference binning is not implemented yet (roadmap P2)"
-                )
             self.reference.construct()
         if self.init_score is not None:
             raise NotImplementedError("init_score is not implemented yet (roadmap P5)")
@@ -318,6 +314,8 @@ class Dataset:
             if label.shape[0] != n:
                 raise ValueError(f"Length of label ({label.shape[0]}) is not same with #data ({n})")
         categorical = _categorical_indices(self.categorical_feature, feature_names, pandas_cat_cols)
+        if self.reference is not None:
+            categorical = self.reference._categorical.copy()
         self._categorical = categorical
         params = _params_to_strings(self.params)
         if categorical:
@@ -328,7 +326,15 @@ class Dataset:
         group = None
         if self.group is not None:
             group = [int(g) for g in np.asarray(self.group).reshape(-1)]
-        return NativeDataset.from_dense(matrix, label.tolist(), params, categorical, weight, group)
+        return NativeDataset.from_dense(
+            matrix,
+            label.tolist(),
+            params,
+            categorical,
+            weight,
+            group,
+            self.reference._handle_or_raise() if self.reference is not None else None,
+        )
 
 
 class Booster:

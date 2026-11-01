@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Construct dense reference-backed datasets using the source bin mappers and feature groups, including weighted and categorical training.
+
 - Recognize callable objectives through all upstream objective aliases in training and CV. Complete multiclass, DART/GOSS switching, RF rejection, and raw-score custom evaluation acceptance coverage.
 
 - Support switching trained regression/binary boosters to custom objectives while retaining trees and scores; reject updates without derivatives after switching.

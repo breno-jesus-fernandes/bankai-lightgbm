@@ -681,6 +681,49 @@ impl Dataset {
         })
     }
 
+    /// Bin new rows using the reference layout and bin mappers.
+    /// upstream: src/io/dataset_loader.cpp (v4.7.0) LoadFromMat with reference.
+    pub fn from_dense_reference(
+        data: &[f64],
+        nrow: usize,
+        ncol: usize,
+        label: &[f64],
+        reference: &Dataset,
+    ) -> Result<Dataset> {
+        if ncol != reference.layout.num_total_features
+            || data.len() != nrow.saturating_mul(ncol)
+            || label.len() != nrow
+        {
+            return Err(Error::InvalidParameter(
+                "reference dataset dimensions do not match input".into(),
+            ));
+        }
+        let mut ds = reference.clone();
+        ds.layout.num_data = nrow;
+        ds.data = ds
+            .layout
+            .groups
+            .par_iter()
+            .map(|g| g.fill_dense(data, nrow, ncol))
+            .collect();
+        ds.metadata = Metadata {
+            label: label.iter().map(|&v| v as f32).collect(),
+            ..Metadata::default()
+        };
+        ds.raw_data = if reference.raw_data.is_empty() {
+            Vec::new()
+        } else {
+            (0..ds.layout.num_features)
+                .filter(|&f| ds.numeric_feature_map[f] >= 0)
+                .map(|f| {
+                    let real = ds.layout.real_feature_idx[f] as usize;
+                    (0..nrow).map(|r| data[r * ncol + real] as f32).collect()
+                })
+                .collect()
+        };
+        Ok(ds)
+    }
+
     pub fn num_data(&self) -> usize {
         self.layout.num_data
     }

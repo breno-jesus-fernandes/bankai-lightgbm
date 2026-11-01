@@ -466,8 +466,7 @@ def test_train_rejects_unimplemented_options() -> None:
     with pytest.raises(NotImplementedError, match="init_model"):
         lgb.train({"verbose": -1}, ds, init_model=object())
     referenced = lgb.Dataset(x, label=x[:, 0], reference=ds)
-    with pytest.raises(NotImplementedError, match="shared reference binning"):
-        referenced.construct()
+    assert referenced.construct().num_data() == len(x)
     with pytest.raises(ValueError, match="greater than zero"):
         lgb.train({"verbose": -1}, ds, num_boost_round=0)
 
@@ -710,3 +709,36 @@ def test_custom_objective_aliases(alias: str, entry: str) -> None:
             )
             results.append(result["valid raw_mean-mean"])
     np.testing.assert_allclose(results[1], results[0], rtol=1e-12, atol=1e-15)
+
+
+@pytest.mark.parametrize("categorical", [False, True])
+def test_reference_dataset_training_matches_upstream(categorical: bool) -> None:
+    rng = np.random.default_rng(911)
+    source = rng.normal(size=(120, 3))
+    x = rng.normal(loc=1.5, size=(70, 3))
+    y = x[:, 0] - x[:, 1]
+    if categorical:
+        source[:, 1] = np.arange(len(source)) % 4
+        x[:, 1] = np.arange(len(x)) % 5
+    params = {
+        "verbosity": -1,
+        "num_threads": 1,
+        "max_bin": 7,
+        "min_data_in_bin": 1,
+        "min_data_in_leaf": 2,
+        "num_leaves": 5,
+        "objective": "regression",
+    }
+    predictions = []
+    for library in (lightgbm, lgb):
+        reference = library.Dataset(
+            source,
+            label=source[:, 0],
+            params=params,
+            categorical_feature=[1] if categorical else [],
+        ).construct()
+        dataset = library.Dataset(
+            x, label=y, weight=np.linspace(0.5, 1.5, len(y)), reference=reference, params=params
+        ).construct()
+        predictions.append(library.train(params, dataset, num_boost_round=3).predict(x))
+    np.testing.assert_allclose(predictions[1], predictions[0], rtol=1e-12, atol=1e-15)
