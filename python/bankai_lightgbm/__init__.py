@@ -3,6 +3,7 @@
 Use ``import bankai_lightgbm as lgb`` wherever ``import lightgbm as lgb`` works.
 """
 
+from bankai_lightgbm import dask as dask
 from bankai_lightgbm._lib import UPSTREAM_VERSION, __version__
 from bankai_lightgbm.basic import Booster, Dataset, LightGBMError
 from bankai_lightgbm.callback import (

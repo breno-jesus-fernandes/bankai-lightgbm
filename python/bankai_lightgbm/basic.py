@@ -8,6 +8,7 @@ import warnings
 from collections.abc import Callable, Sequence
 from copy import deepcopy
 from enum import Enum
+from functools import cache
 from pathlib import Path
 from typing import Any, Literal, Union
 
@@ -22,6 +23,17 @@ from bankai_lightgbm.compat import pd_DataFrame as pd_DataFrame
 from bankai_lightgbm.compat import pd_Series as pd_Series
 
 __all__ = ["Booster", "Dataset", "LightGBMError"]
+
+
+def _list_to_1d_numpy(data: Any, dtype: npt.DTypeLike) -> npt.NDArray[Any]:
+    """Flatten a label- or weight-like field to 1-D (upstream ``_list_to_1d_numpy``, v4.7.0).
+
+    A column vector is flattened with the warning upstream logs; lists and pandas Series are
+    accepted as they are.
+    """
+    if isinstance(data, np.ndarray) and data.ndim == 2 and data.shape[1] == 1:
+        _log_warning("Converting column-vector to 1d array")
+    return np.asarray(data, dtype=dtype).reshape(-1)
 
 
 def _custom_derivative(data: Any, name: str) -> npt.NDArray[np.float32]:
@@ -51,7 +63,7 @@ def _param_value_str(value: Any) -> str:
     """
     if isinstance(value, bool | np.bool_):
         return "true" if value else "false"
-    if isinstance(value, list | tuple | np.ndarray):
+    if isinstance(value, list | tuple | set | frozenset | np.ndarray):
         return ",".join(_param_list_item_str(v) for v in value)
     return str(value)
 
@@ -64,6 +76,58 @@ def _param_list_item_str(value: Any) -> str:
 
 def _params_to_strings(params: dict[str, Any]) -> dict[str, str]:
     return {str(k): _param_value_str(v) for k, v in params.items() if v is not None}
+
+
+@cache
+def _known_parameter_names() -> frozenset[str]:
+    """Every parameter name and alias the native library accepts."""
+    from bankai_lightgbm._lib import param_aliases
+
+    aliases = param_aliases()
+    return frozenset(aliases) | frozenset(a for values in aliases.values() for a in values)
+
+
+def _log_unknown_params(params: dict[str, Any]) -> None:
+    """Warn about parameter names the library does not know.
+
+    upstream: src/io/config.cpp (v4.7.0) ``Config::Set`` logs ``Unknown parameter: <key>``; the
+    native log goes through ``_LOGGER.info`` and is printed only when ``verbosity >= 0``.
+    """
+    if int(params.get("verbosity", params.get("verbose", 1))) < 0:
+        return
+    known = _known_parameter_names()
+    for key in params:
+        if str(key) not in known:
+            _LOGGER.info(f"[LightGBM] [Warning] Unknown parameter: {key}")
+
+
+def _validate_feature_names(booster_names: list[str], data_names: list[str]) -> None:
+    """Check prediction data's column names against the model's (upstream ``validate_features``).
+
+    upstream: src/c_api.cpp (v4.7.0) ``LGBM_BoosterValidateFeatureNames``.
+    """
+    if len(booster_names) != len(data_names):
+        raise LightGBMError(
+            f"Model was trained on {len(booster_names)} features, "
+            f"but got {len(data_names)} input features to predict."
+        )
+    for i, (expected, found) in enumerate(zip(booster_names, data_names, strict=True)):
+        if expected != found:
+            raise LightGBMError(f"Expected '{expected}' at position {i} but found '{found}'")
+
+
+def _typed_param_value(text: str) -> Any:
+    """Type a value from the model text's ``parameters:`` block (bool, int, float, list or str)."""
+    if text in ("true", "false"):
+        return text == "true"
+    for cast in (int, float):
+        try:
+            return cast(text)
+        except ValueError:
+            pass
+    if "," in text and "[" not in text:
+        return [_typed_param_value(v) for v in text.split(",")]
+    return text
 
 
 def _categorical_indices(
@@ -690,6 +754,8 @@ class Dataset:
             raise ValueError("Cannot construct a Dataset without data")
         feature_names: list[str] | None = None
         pandas_cat_cols: list[int] = []
+        # upstream: _data_from_pandas (v4.7.0) takes only the unordered columns for 'auto'.
+        pandas_auto_cat_cols: list[int] = []
         sparse = _dataset_sparse(self.data)
         matrix: npt.NDArray[np.float64] | None = None
         if sparse is not None:
@@ -702,6 +768,9 @@ class Dataset:
                 i
                 for i, dtype in enumerate(self.data.dtypes)
                 if isinstance(dtype, pd.CategoricalDtype)
+            ]
+            pandas_auto_cat_cols = [
+                i for i in pandas_cat_cols if not self.data.dtypes.iloc[i].ordered
             ]
             observed_categorical = [
                 list(self.data[self.data.columns[i]].cat.categories) for i in pandas_cat_cols
@@ -722,10 +791,15 @@ class Dataset:
         if self.label is None:
             label = np.zeros(n, dtype=np.float64)
         else:
-            label = np.asarray(self.label, dtype=np.float64).reshape(-1)
+            label = _list_to_1d_numpy(self.label, np.float64)
             if label.shape[0] != n:
                 raise ValueError(f"Length of label ({label.shape[0]}) is not same with #data ({n})")
-        categorical = _categorical_indices(self.categorical_feature, feature_names, pandas_cat_cols)
+        if isinstance(self.feature_name, list):
+            # An explicit ``feature_name`` names the columns, so ``categorical_feature`` may use it.
+            feature_names = [str(name) for name in self.feature_name]
+        categorical = _categorical_indices(
+            self.categorical_feature, feature_names, pandas_auto_cat_cols
+        )
         self._has_non_default_feature_names = (
             feature_names is not None or self.feature_name != "auto"
         )
@@ -737,7 +811,7 @@ class Dataset:
             params["categorical_feature"] = ",".join(str(c) for c in categorical)
         weight = None
         if self.weight is not None:
-            weight = [float(w) for w in np.asarray(self.weight, dtype=np.float32).reshape(-1)]
+            weight = [float(w) for w in _list_to_1d_numpy(self.weight, np.float32)]
             if weight and len(weight) != n:
                 raise LightGBMError("Length of weights differs from the length of #data")
         group = None
@@ -810,10 +884,12 @@ class Booster:
         self._handle: NativeBooster | None = None
         # Trees of the model that continued training starts from (``init_model``).
         self._init_model: NativeBooster | None = None
-        self.valid_sets: list[tuple[Dataset, str]] = []
         if train_set is not None:
+            # Validation Datasets are tracked only for a booster that trains (see free_dataset).
+            self.valid_sets: list[tuple[Dataset, str]] = []
             if model_file is not None or model_str is not None:
                 raise TypeError("Booster cannot take both a training set and a model")
+            _log_unknown_params({**getattr(train_set, "params", {}), **self.params})
             self.pandas_categorical = None
             return
         if model_file is not None:
@@ -965,6 +1041,25 @@ class Booster:
         else:
             return hist, bin_edges
 
+    def _get_loaded_param(self) -> dict[str, Any]:
+        """Parameters of the ``parameters:`` block of the model text (upstream ``GetLoadedParam``).
+
+        upstream: src/boosting/gbdt.h (v4.7.0) ``GetLoadedParam`` returns the same block as a
+        JSON object typed by ``Config::ParameterTypes``; here the types are read from the text.
+        """
+        text = self.model_to_string()
+        header = "\nparameters:\n"
+        start = text.find(header)
+        if start < 0:
+            return {}
+        block = text[start + len(header) : text.find("\nend of parameters", start)]
+        out: dict[str, Any] = {}
+        for line in block.splitlines():
+            if line.startswith("[") and line.endswith("]") and ": " in line:
+                key, _, value = line[1:-1].partition(": ")
+                out[key] = _typed_param_value(value)
+        return out
+
     def free_dataset(self) -> Booster:
         """Drop the references to the training and validation Datasets (upstream ``free_dataset``).
 
@@ -974,7 +1069,7 @@ class Booster:
             Booster without Datasets.
         """
         self._train_set = None
-        self.valid_sets = []
+        self.__dict__.pop("valid_sets", None)
         return self
 
     def update(self, train_set: Dataset | None = None, fobj: Any = None) -> bool:
@@ -1028,7 +1123,7 @@ class Booster:
 
     def add_valid(self, data: Dataset, name: str) -> None:
         """Register a validation dataset for :meth:`eval_valid`."""
-        self.valid_sets.append((data, name))
+        self.__dict__.setdefault("valid_sets", []).append((data, name))
 
     def eval_valid(self, feval: Any = None) -> list[tuple[str, str, float, bool]]:
         """Evaluate configured and custom metrics on registered validation data."""
@@ -1041,7 +1136,7 @@ class Booster:
         else:
             raise TypeError("feval should be a callable or a list of callables")
         results: list[tuple[str, str, float, bool]] = []
-        for dataset, name in self.valid_sets:
+        for dataset, name in self.__dict__.get("valid_sets", []):
             native_dataset = dataset._construct_for_eval()
             params = {**dataset.params, **self.params}
             results.extend(self._native().eval(native_dataset, _params_to_strings(params), name))
@@ -1244,11 +1339,7 @@ class Booster:
             )
         if _is_pandas_df(data):
             if validate_features:
-                names = [str(c) for c in data.columns]
-                if names != self.feature_name():
-                    raise LightGBMError(
-                        f"Expected '{self.feature_name()}' but got '{names}' as feature names"
-                    )
+                _validate_feature_names(self.feature_name(), [str(c) for c in data.columns])
             mat = _data_from_pandas(data, self.pandas_categorical)
         else:
             mat = self._to_dense(data)

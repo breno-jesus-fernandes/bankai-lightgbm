@@ -38,6 +38,9 @@ xfail_strict = true
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+# Ported verbatim from upstream LightGBM (MIT, see THIRD_PARTY_NOTICES.md); kept byte-close to
+# upstream so the files can be diffed and re-synced, so they are not linted or reformatted.
+extend-exclude = ["tests/python_package_test"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]

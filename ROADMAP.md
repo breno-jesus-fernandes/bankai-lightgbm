@@ -18,6 +18,10 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
       Still missing: `LightGBMError` cases beyond the input-length check, and `set_params`/`get_params` edge cases.
 - [x] Plotting helpers: `plot_importance`, `plot_split_value_histogram`, `plot_metric`, `plot_tree`, `create_tree_digraph`
 - [ ] Port upstream `tests/python_package_test` and run it green against `bankai_lightgbm`
+      Done: `test_plotting.py` and `test_sklearn.py` (ported verbatim with the import changed; the same
+      results as upstream's run on the same suite). Pending: `test_basic.py`, `test_engine.py`,
+      `test_callback.py`, `test_utilities.py`, `test_consistency.py`, `test_pandas.py`, `test_arrow.py`,
+      `test_polars.py`, `test_dual.py`. `test_dask.py` belongs to P7 (distributed).
 - Gate: the ported upstream suite passes for everything the step names; unsupported parts raise `NotImplementedError`.
 
 ### Step 2: Text input and file prediction (P2/P1)

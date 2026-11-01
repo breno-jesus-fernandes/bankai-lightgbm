@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Upstream's `test_sklearn.py` and `test_plotting.py` are ported to `tests/python_package_test` and pass. Behavior fixed along the way, as upstream: set-valued `metric` parameters are passed (they were dropped); `categorical_feature` accepts names from an explicit `feature_name`; pandas `auto` categoricals skip ordered columns; `label`/`weight` column vectors are flattened with upstream's warning; unknown parameters print `[LightGBM] [Warning] Unknown parameter` when `verbosity >= 0`; `validate_features` reports upstream's messages; `fit()` no longer leaves `valid_sets` on the Booster; `Booster._get_loaded_param`; `lgb.dask` exposes only the import-error types (Dask estimators are not implemented, P7).
+
 - Plotting helpers `plot_importance`, `plot_split_value_histogram`, `plot_metric`, `plot_tree` and `create_tree_digraph` are exported, ported from upstream `python-package/lightgbm/plotting.py` (MIT, see `THIRD_PARTY_NOTICES.md`). Their output (bar and line data, labels, graphviz source) is checked against `lightgbm==4.7.0`. Also: `Booster.get_split_value_histogram`.
 
 - `Dataset` built from a pandas DataFrame (or with `feature_name`) names the model's features after the columns, as upstream does; the names appear in the model text.

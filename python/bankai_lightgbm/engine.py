@@ -169,8 +169,7 @@ def _finish_training(booster: Booster, keep_training_booster: bool) -> Booster:
     ``keep_training_booster``: the returned model is the reparsed text, truncated to
     ``best_iteration`` (a one-leaf tree, for example, loses its ``leaf_weight``)."""
     if not keep_training_booster:
-        booster.model_from_string(booster.model_to_string())
-        booster.valid_sets = []
+        booster.model_from_string(booster.model_to_string()).free_dataset()
     return booster
 
 
