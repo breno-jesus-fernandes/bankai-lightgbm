@@ -11,6 +11,9 @@ from typing import Any
 EvaluationResult = tuple[str, str, float, bool] | tuple[str, str, float, bool, float]
 
 
+_EvalResultDict = dict[str, dict[str, list[Any]]]
+
+
 @dataclass
 class CallbackEnv:
     """State passed to callbacks after each boosting iteration."""
@@ -279,7 +282,8 @@ class _RecordEvaluationCallback:
         return model
 
     def __call__(self, env: CallbackEnv) -> None:
-        if not env.evaluation_result_list:
+        # upstream: an empty list is valid (no validation sets); only a missing list is a bug.
+        if env.evaluation_result_list is None:
             raise RuntimeError(
                 "record_evaluation() callback enabled but no evaluation results were found"
             )

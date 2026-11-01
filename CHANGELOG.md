@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- sklearn estimators `LGBMModel`, `LGBMRegressor`, `LGBMClassifier` and `LGBMRanker` are exported. They are ported from upstream `python-package/lightgbm/sklearn.py` (MIT, see `THIRD_PARTY_NOTICES.md`) with the same signatures and defaults; predictions match `lightgbm==4.7.0`. `narwhals` is a new dependency. Also: `Booster.free_dataset`, `record_evaluation` accepts an empty evaluation list (no validation sets) as upstream does.
+
 - Split search with `num_threads > 1` fixes and derives each feature's histogram in the same task as its threshold search, so phase 1 runs in parallel and the histogram is not handed between cores. Models are unchanged; on the 2-vCPU benchmark machine training is about 1.35x faster on sparse data and 1.1x on dense data at two threads.
 
 - Training with `num_threads > 1` runs its parallel regions (split search, data partition, dense histograms, multi-value histograms) on a persistent pool of spinning workers instead of rayon, which cuts the per-region overhead on small trees. Models are unchanged; the speedup on two threads is modest on the 2-vCPU benchmark machine (see ROADMAP P3).

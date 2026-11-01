@@ -9,7 +9,7 @@ description = "LightGBM rewritten in Rust, with a drop-in Python API"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
-dependencies = ["numpy>=1.24", "scipy>=1.10"]
+dependencies = ["numpy>=1.24", "scipy>=1.10", "narwhals>=1.0"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3 :: Only",
@@ -42,6 +42,15 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 
+# Ported from upstream LightGBM (MIT, see THIRD_PARTY_NOTICES.md): these keep upstream's
+# docstring lines, and their module-level type aliases stay `Union[...]` because they hold
+# string forward references that Python 3.11 evaluates at runtime (`X | "str"` fails).
+[tool.ruff.lint.per-file-ignores]
+"python/bankai_lightgbm/sklearn.py" = ["E501", "UP007", "SIM102", "SIM108"]
+"python/bankai_lightgbm/compat.py" = ["E501", "UP007", "SIM108"]
+"python/bankai_lightgbm/basic.py" = ["UP007"]
+"python/bankai_lightgbm/callback.py" = ["UP007"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["bankai_lightgbm"]
 
@@ -51,5 +60,18 @@ strict = true
 files = ["python/bankai_lightgbm", "scripts"]
 
 [[tool.mypy.overrides]]
-module = ["pandas", "pandas.*", "scipy", "scipy.*", "sklearn", "sklearn.*", "lightgbm", "lightgbm.*"]
+module = ["pandas", "pandas.*", "scipy", "scipy.*", "sklearn", "sklearn.*", "lightgbm", "lightgbm.*", "joblib", "joblib.*", "psutil"]
 ignore_missing_imports = true
+
+# Ported from upstream LightGBM (MIT, see THIRD_PARTY_NOTICES.md). Its annotations are looser than
+# strict mode (bare `dict`/`Callable`, `Any` returns), its base classes come from the untyped
+# scikit-learn, and some `type: ignore` comments were written for another mypy version. The
+# behavior is covered by the parity tests; the rest of the package stays under full strict checks.
+[[tool.mypy.overrides]]
+module = ["bankai_lightgbm.sklearn"]
+disallow_any_generics = false
+warn_return_any = false
+warn_unused_ignores = false
+disallow_subclassing_any = false
+disallow_untyped_calls = false
+

@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Union
 
+import narwhals.typing as nwt
 import numpy as np
 import numpy.typing as npt
+import scipy.sparse
 
 from bankai_lightgbm._lib import LightGBMError, NativeBooster, NativeDataset
+from bankai_lightgbm.compat import pd_DataFrame as pd_DataFrame
+from bankai_lightgbm.compat import pd_Series as pd_Series
 
 __all__ = ["Booster", "Dataset", "LightGBMError"]
 
@@ -238,6 +243,7 @@ class _ConfigAliases:
     """
 
     aliases: dict[str, list[str]] | None = None
+    raw_aliases: dict[str, list[str]] | None = None
 
     @classmethod
     def get_sorted(cls, name: str) -> list[str]:
@@ -249,6 +255,29 @@ class _ConfigAliases:
                 for key, values in param_aliases().items()
             }
         return cls.aliases.get(name, [name])
+
+    @classmethod
+    def get_by_alias(cls, *args: str) -> set[str]:
+        """The given names plus every parameter they are an alias of (upstream ``get_by_alias``)."""
+        if cls.raw_aliases is None:
+            from bankai_lightgbm._lib import param_aliases
+
+            cls.raw_aliases = param_aliases()
+        ret = set(args)
+        for arg in args:
+            for aliases in cls.raw_aliases.values():
+                if arg in aliases:
+                    ret.update(aliases)
+                    break
+        return ret
+
+    @classmethod
+    def get(cls, *args: str) -> set[str]:
+        """All names and aliases of the given parameters (upstream ``_ConfigAliases.get``)."""
+        ret: set[str] = set()
+        for arg in args:
+            ret.update(cls.get_sorted(arg))
+        return ret
 
 
 def _choose_param_value(
@@ -310,6 +339,108 @@ def _c_int_dtype_check(data: npt.NDArray[Any]) -> None:
         raise TypeError(f"Expected np.int32 or np.int64, met type({data.dtype})")
 
 
+# Type aliases and constants, as upstream python-package/lightgbm/basic.py (v4.7.0, MIT).
+_ctypes_float_ptr = Union[
+    "ctypes._Pointer[ctypes.c_float]",
+    "ctypes._Pointer[ctypes.c_double]",
+]
+_ctypes_float_array = Union[
+    "ctypes.Array[ctypes._Pointer[ctypes.c_float]]",
+    "ctypes.Array[ctypes._Pointer[ctypes.c_double]]",
+]
+_LGBM_EvalFunctionResultType = tuple[str, float, bool]
+_LGBM_BoosterBestScoreType = dict[str, dict[str, float]]
+_LGBM_CategoricalFeatureConfiguration = Union[list[str], list[int], "Literal['auto']"]
+_LGBM_FeatureNameConfiguration = Union[list[str], "Literal['auto']"]
+_LGBM_GroupType = Union[
+    list[float],
+    list[int],
+    np.ndarray,
+    pd_Series,
+    nwt.IntoSeries,
+]
+# 'position' intentionally does not support 'list' inputs
+# ref: https://github.com/lightgbm-org/LightGBM/pull/5929#discussion_r1262646998
+_LGBM_PositionType = Union[
+    np.ndarray,
+    pd_Series,
+    nwt.IntoSeries,
+]
+_LGBM_InitScoreType = Union[
+    list[float],
+    list[list[float]],
+    np.ndarray,
+    pd_Series,
+    pd_DataFrame,
+    nwt.IntoSeries,
+    nwt.IntoDataFrame,
+]
+_LGBM_TrainDataType = Union[
+    str,
+    Path,
+    np.ndarray,
+    pd_DataFrame,
+    scipy.sparse.spmatrix,
+    "Sequence[Any]",
+    list["Sequence[Any]"],
+    list[np.ndarray],
+    nwt.IntoDataFrame,
+]
+_LGBM_LabelType = Union[
+    list[float],
+    list[int],
+    np.ndarray,
+    pd_Series,
+    pd_DataFrame,
+    nwt.IntoSeries,
+    nwt.IntoDataFrame,
+]
+_LGBM_PredictDataType = Union[
+    str,
+    Path,
+    np.ndarray,
+    pd_DataFrame,
+    scipy.sparse.spmatrix,
+    nwt.IntoDataFrame,
+]
+_LGBM_PredictReturnType = Union[
+    np.ndarray,
+    scipy.sparse.spmatrix,
+    list[scipy.sparse.spmatrix],
+]
+_LGBM_PredictSparseReturnType = Union[
+    scipy.sparse.spmatrix,
+    list[scipy.sparse.spmatrix],
+]
+_LGBM_WeightType = Union[
+    list[float],
+    list[int],
+    np.ndarray,
+    pd_Series,
+    nwt.IntoSeries,
+]
+_LGBM_SetFieldType = Union[
+    list[list[float]],
+    list[list[int]],
+    list[float],
+    list[int],
+    np.ndarray,
+    pd_Series,
+    pd_DataFrame,
+    nwt.IntoDataFrame,
+]
+
+ZERO_THRESHOLD = 1e-35
+
+_MULTICLASS_OBJECTIVES = {"multiclass", "multiclassova", "multiclass_ova", "ova", "ovr", "softmax"}
+
+
+class LGBMDeprecationWarning(FutureWarning):
+    """Custom deprecation warning."""
+
+    pass
+
+
 class Dataset:
     """Training data. API-compatible with ``lightgbm.Dataset`` for dense inputs.
 
@@ -325,7 +456,7 @@ class Dataset:
         group: Any = None,
         init_score: Any = None,
         feature_name: list[str] | str = "auto",
-        categorical_feature: list[int | str] | str = "auto",
+        categorical_feature: Sequence[int | str] | str = "auto",
         params: dict[str, Any] | None = None,
         free_raw_data: bool = True,
     ) -> None:
@@ -341,6 +472,8 @@ class Dataset:
         self.free_raw_data = free_raw_data
         self.pandas_categorical: list[list[Any]] | None = None
         self._categorical: list[int] = []
+        # upstream: True when feature names came from the data or `feature_name` (sklearn reads it).
+        self._has_non_default_feature_names: bool = False
         self._handle: NativeDataset | None = None
         self._evaluation_handle: NativeDataset | None = None
 
@@ -581,6 +714,9 @@ class Dataset:
             if label.shape[0] != n:
                 raise ValueError(f"Length of label ({label.shape[0]}) is not same with #data ({n})")
         categorical = _categorical_indices(self.categorical_feature, feature_names, pandas_cat_cols)
+        self._has_non_default_feature_names = (
+            feature_names is not None or self.feature_name != "auto"
+        )
         if self.reference is not None:
             categorical = self.reference._categorical.copy()
         self._categorical = categorical
@@ -729,6 +865,18 @@ class Booster:
     def rollback_one_iter(self) -> Booster:
         """Remove the last iteration's trees and their effect on the training scores."""
         self._native().rollback_one_iter()
+        return self
+
+    def free_dataset(self) -> Booster:
+        """Drop the references to the training and validation Datasets (upstream ``free_dataset``).
+
+        Returns
+        -------
+        self : Booster
+            Booster without Datasets.
+        """
+        self._train_set = None
+        self.valid_sets = []
         return self
 
     def update(self, train_set: Dataset | None = None, fobj: Any = None) -> bool:

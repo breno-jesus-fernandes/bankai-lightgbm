@@ -13,6 +13,8 @@ the steps) start after step 3.
 Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow.
 - [ ] sklearn estimators: `LGBMModel`, `LGBMClassifier`, `LGBMRegressor`, `LGBMRanker`
       (names, signatures, defaults, `fit`/`predict`/`predict_proba`, `LightGBMError` behavior as upstream)
+      Ported and parity-tested for regression, binary classification, and ranking (`tests/parity/test_sklearn_parity.py`).
+      Still missing tests: `eval_set` and early stopping, multiclass, `feature_importances_`, `LightGBMError` cases.
 - [ ] Plotting helpers: `plot_importance`, `plot_split_value_histogram`, `plot_metric`, `plot_tree`, `create_tree_digraph`
 - [ ] Port upstream `tests/python_package_test` and run it green against `bankai_lightgbm`
 - Gate: the ported upstream suite passes for everything the step names; unsupported parts raise `NotImplementedError`.

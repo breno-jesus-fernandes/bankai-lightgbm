@@ -12,12 +12,17 @@ from bankai_lightgbm.callback import (
     reset_parameter,
 )
 from bankai_lightgbm.engine import CVBooster, cv, train
+from bankai_lightgbm.sklearn import LGBMClassifier, LGBMModel, LGBMRanker, LGBMRegressor
 
 __all__ = [
     "UPSTREAM_VERSION",
     "Booster",
     "CVBooster",
     "Dataset",
+    "LGBMClassifier",
+    "LGBMModel",
+    "LGBMRanker",
+    "LGBMRegressor",
     "LightGBMError",
     "__version__",
     "cv",
