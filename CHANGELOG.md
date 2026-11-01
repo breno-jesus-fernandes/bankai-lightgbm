@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Validate custom gradient/Hessian dimensions and lengths in Python with upstream-compatible errors before native updates; rejected inputs preserve trained model state.
+
 - Apply CV training parameters before constructing dataset bins; verify custom multiclass objectives and CV fold predictions against upstream.
 
 - Add external gradient/Hessian updates and callable regression objectives for GBDT/DART training; reject custom RF objectives as upstream does. Broader custom-objective compatibility remains in progress.

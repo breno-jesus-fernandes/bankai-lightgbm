@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
@@ -14,6 +15,24 @@ import numpy.typing as npt
 from bankai_lightgbm._lib import LightGBMError, NativeBooster, NativeDataset
 
 __all__ = ["Booster", "Dataset", "LightGBMError"]
+
+
+def _custom_derivative(data: Any, name: str) -> npt.NDArray[np.float32]:
+    """Match upstream basic.py::_list_to_1d_numpy for custom derivatives (v4.7.0)."""
+    if isinstance(data, np.ndarray):
+        if data.ndim == 1:
+            return np.asarray(data, dtype=np.float32)
+        if data.ndim == 2 and data.shape[1] == 1:
+            warnings.warn("Converting column-vector to 1d array", UserWarning, stacklevel=3)
+            return np.asarray(data.ravel(), dtype=np.float32)
+    elif (isinstance(data, list) and all(np.isscalar(value) for value in data)) or type(
+        data
+    ).__name__ == "Series":
+        return np.asarray(data, dtype=np.float32)
+    raise TypeError(
+        f"Wrong type({type(data).__name__}) for {name}.\n"
+        "It should be list, numpy 1-D array or pandas Series"
+    )
 
 
 def _param_value_str(value: Any) -> str:
@@ -383,8 +402,23 @@ class Booster:
         if fobj is not None:
             predictions = self.predict(self._train_set.data, raw_score=True)
             gradients, hessians = fobj(predictions, self._train_set)
-            grad = np.asarray(gradients, dtype=np.float32).ravel(order="F")
-            hess = np.asarray(hessians, dtype=np.float32).ravel(order="F")
+            num_class = self.num_model_per_iteration()
+            if num_class > 1:
+                gradients = gradients.ravel(order="F")
+                hessians = hessians.ravel(order="F")
+            grad = _custom_derivative(gradients, "gradient")
+            hess = _custom_derivative(hessians, "hessian")
+            if len(grad) != len(hess):
+                raise ValueError(
+                    f"Lengths of gradient ({len(grad)}) and Hessian ({len(hess)}) don't match"
+                )
+            num_rows = self._train_set.num_data()
+            if len(grad) != num_rows * num_class:
+                raise ValueError(
+                    f"Lengths of gradient ({len(grad)}) and Hessian ({len(hess)}) "
+                    f"don't match training data length ({num_rows}) * "
+                    f"number of models per one iteration ({num_class})"
+                )
             return self._native().update_custom(grad.tolist(), hess.tolist())
         return self._native().update()
 

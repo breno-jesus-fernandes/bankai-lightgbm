@@ -566,3 +566,44 @@ def test_custom_multiclass_cv_matches_upstream() -> None:
             rtol=1e-12,
             atol=1e-15,
         )
+
+
+@pytest.mark.parametrize("invalid", ["unequal", "short", "matrix", "tensor"])
+def test_invalid_custom_gradients_match_upstream(invalid: str) -> None:
+    x = np.random.default_rng(91).normal(size=(40, 3))
+    params = {
+        "objective": "none",
+        "verbosity": -1,
+        "min_data_in_leaf": 2,
+        "num_threads": 1,
+        "metric": "None",
+    }
+    errors = []
+    for library in (lightgbm, lgb):
+        booster = library.Booster(
+            params=params, train_set=library.Dataset(x, label=x[:, 0], params=params)
+        )
+
+        def valid(predictions: np.ndarray, dataset: Any) -> tuple[np.ndarray, np.ndarray]:
+            return predictions - dataset.get_label(), np.ones_like(predictions)
+
+        booster.update(fobj=valid)
+        before = booster.predict(x, raw_score=True)
+        iteration = booster.current_iteration()
+
+        def objective(predictions: np.ndarray, dataset: Any) -> tuple[np.ndarray, np.ndarray]:
+            if invalid == "unequal":
+                return np.ones(40), np.ones(39)
+            if invalid == "short":
+                return np.ones(39), np.ones(39)
+            shape = (20, 2) if invalid == "matrix" else (40, 1, 1)
+            return np.ones(shape), np.ones(shape)
+
+        with pytest.raises((ValueError, TypeError)) as caught:
+            booster.update(fobj=objective)
+        errors.append((type(caught.value), str(caught.value)))
+        assert booster.current_iteration() == iteration
+        np.testing.assert_array_equal(booster.predict(x, raw_score=True), before)
+        booster.update(fobj=valid)
+        assert booster.current_iteration() == iteration + 1
+    assert errors[0] == errors[1]
