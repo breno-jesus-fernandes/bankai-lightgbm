@@ -8,6 +8,7 @@ use super::bin::{BinMapper, BinType, K_SPARSE_THRESHOLD};
 use super::bin_data::{BinData, DenseBin, SparseBin};
 use super::binary::{BINARY_FILE_TOKEN, aligned};
 use super::sample::SampleSet;
+use super::sparse::CsrMatrix;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::utils::random::Random;
@@ -454,6 +455,125 @@ pub enum GroupData {
     Multi(Vec<BinData>),
 }
 
+/// One `FeatureGroup::PushData` call: a value for sub-feature `sub` of a group in `row`.
+#[derive(Debug, Clone, Copy)]
+struct PushEvent {
+    row: u32,
+    sub: u32,
+    value: f64,
+}
+
+/// Rows per parallel chunk when turning CSR rows into push events.
+const CSR_CHUNK_ROWS: usize = 4096;
+
+/// The push events of every group for a CSR matrix, in upstream's push order: per row,
+/// stored pairs in storage order (columns past the dataset width or unused are skipped),
+/// then a `0.0` for each "need push zeros" feature the row did not set, in inner feature
+/// order (upstream: `Dataset::PushOneRow` + `FinishOneRow`, `feature_need_push_zeros_`).
+/// Returned per row chunk (in row order), then per group, so no event is copied twice.
+fn csr_push_events(layout: &DatasetLayout, m: &CsrMatrix<'_>) -> Vec<Vec<Vec<PushEvent>>> {
+    let num_groups = layout.groups.len();
+    let num_total = layout.num_total_features;
+    let need_zeros: Vec<usize> = (0..layout.num_features)
+        .filter(|&f| {
+            let g = &layout.groups[layout.feature2group[f] as usize];
+            let mapper = &g.bin_mappers[layout.feature2subfeature[f] as usize];
+            mapper.default_bin != mapper.most_freq_bin
+        })
+        .collect();
+    let nrow = m.nrow();
+    let chunks: Vec<Vec<Vec<PushEvent>>> = (0..nrow.div_ceil(CSR_CHUNK_ROWS))
+        .into_par_iter()
+        .map(|ci| {
+            let mut out: Vec<Vec<PushEvent>> = vec![Vec::new(); num_groups];
+            // Row stamp per inner feature (row + 1 when the row set it): avoids clearing.
+            let mut added = vec![0u32; layout.num_features];
+            let rows = ci * CSR_CHUNK_ROWS..((ci + 1) * CSR_CHUNK_ROWS).min(nrow);
+            for r in rows {
+                let stamp = r as u32 + 1;
+                let (cols, vals) = m.row(r);
+                for (&c, &value) in cols.iter().zip(vals) {
+                    let c = c as usize;
+                    if c >= num_total {
+                        continue;
+                    }
+                    let f = layout.used_feature_map[c];
+                    if f < 0 {
+                        continue;
+                    }
+                    let f = f as usize;
+                    added[f] = stamp;
+                    out[layout.feature2group[f] as usize].push(PushEvent {
+                        row: r as u32,
+                        sub: layout.feature2subfeature[f] as u32,
+                        value,
+                    });
+                }
+                for &f in &need_zeros {
+                    if added[f] != stamp {
+                        out[layout.feature2group[f] as usize].push(PushEvent {
+                            row: r as u32,
+                            sub: layout.feature2subfeature[f] as u32,
+                            value: 0.0,
+                        });
+                    }
+                }
+            }
+            out
+        })
+        .collect();
+    chunks
+}
+
+/// Raw float32 values of the numeric used features for linear trees, column-major. Absent
+/// entries stay `0.0`; each stored pair overwrites in storage order (upstream `PushOneRow`
+/// writes `raw_data_` for every stored pair, and `FinishOneRow` does not touch it).
+fn csr_raw_data(
+    layout: &DatasetLayout,
+    numeric_feature_map: &[i32],
+    m: &CsrMatrix<'_>,
+) -> Vec<Vec<f32>> {
+    let num_numeric = numeric_feature_map.iter().filter(|&&i| i >= 0).count();
+    let mut raw = vec![vec![0.0f32; m.nrow()]; num_numeric];
+    for r in 0..m.nrow() {
+        let (cols, vals) = m.row(r);
+        for (&c, &v) in cols.iter().zip(vals) {
+            let Some(&f) = layout.used_feature_map.get(c as usize) else {
+                continue;
+            };
+            if f >= 0 && numeric_feature_map[f as usize] >= 0 {
+                raw[numeric_feature_map[f as usize] as usize][r] = v as f32;
+            }
+        }
+    }
+    raw
+}
+
+/// Index of each used feature among the numerical ones (`-1` for categorical), as
+/// upstream's `numeric_feature_map_`.
+fn numeric_feature_map(layout: &DatasetLayout) -> Vec<i32> {
+    let mut map = vec![-1i32; layout.num_features];
+    let mut num_numeric = 0;
+    for (f, slot) in map.iter_mut().enumerate() {
+        let g = &layout.groups[layout.feature2group[f] as usize];
+        if g.bin_mappers[layout.feature2subfeature[f] as usize].bin_type == BinType::Numerical {
+            *slot = num_numeric;
+            num_numeric += 1;
+        }
+    }
+    map
+}
+
+fn check_label_len(label: &[f64], nrow: usize) -> Result<()> {
+    if label.len() != nrow {
+        return Err(Error::InvalidParameter(format!(
+            "Length of label ({}) is not same with #data ({nrow})",
+            label.len()
+        )));
+    }
+    Ok(())
+}
+
 /// Labels, weights and query boundaries. upstream: `Metadata`
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Metadata {
@@ -540,6 +660,66 @@ impl FeatureGroupLayout {
                 }
                 d.set(r, bin + self.bin_offsets[sub]);
             }
+        }
+        GroupData::Single(BinData::Dense(d))
+    }
+
+    /// Fill this group's bins from its push events (`(row, sub_feature, value)` in push
+    /// order, rows ascending), applying `FeatureGroup::PushData` to each: values that bin to
+    /// the most frequent bin are not stored. Dense bins keep the last stored push of a row;
+    /// sparse bins keep the first, as upstream's `SparseBin::LoadFromPair` does.
+    fn fill_events<'e>(
+        &self,
+        nrow: usize,
+        events: impl Iterator<Item = &'e PushEvent>,
+    ) -> GroupData {
+        if self.is_multi_val {
+            let mut per_sub: Vec<Vec<(usize, f64)>> = vec![Vec::new(); self.features.len()];
+            for e in events {
+                per_sub[e.sub as usize].push((e.row as usize, e.value));
+            }
+            let cols = per_sub
+                .iter()
+                .zip(&self.bin_mappers)
+                .map(|(pushes, m)| {
+                    let addi = u32::from(m.most_freq_bin != 0);
+                    let num_bin = m.num_bin as u32 + addi;
+                    let stored = pushes.iter().filter_map(|&(r, v)| {
+                        let mut bin = m.value_to_bin(v);
+                        if bin == m.most_freq_bin {
+                            return None;
+                        }
+                        if m.most_freq_bin == 0 {
+                            bin -= 1;
+                        }
+                        Some((r, bin + 1))
+                    });
+                    if m.sparse_rate >= K_SPARSE_THRESHOLD {
+                        let pairs: Vec<(usize, u32)> = stored.collect();
+                        BinData::Sparse(SparseBin::from_sorted_pairs(nrow, num_bin, &pairs))
+                    } else {
+                        let mut d = DenseBin::new(nrow, num_bin);
+                        for (r, b) in stored {
+                            d.set(r, b);
+                        }
+                        BinData::Dense(d)
+                    }
+                })
+                .collect();
+            return GroupData::Multi(cols);
+        }
+        let mut d = DenseBin::new(nrow, self.num_total_bin);
+        for e in events {
+            let sub = e.sub as usize;
+            let m = &self.bin_mappers[sub];
+            let mut bin = m.value_to_bin(e.value);
+            if bin == m.most_freq_bin {
+                continue;
+            }
+            if m.most_freq_bin == 0 {
+                bin -= 1;
+            }
+            d.set(e.row as usize, bin + self.bin_offsets[sub]);
         }
         GroupData::Single(BinData::Dense(d))
     }
@@ -663,27 +843,14 @@ impl Dataset {
         cfg: &Config,
         categorical: &[i32],
     ) -> Result<Dataset> {
-        if label.len() != nrow {
-            return Err(Error::InvalidParameter(format!(
-                "Length of label ({}) is not same with #data ({nrow})",
-                label.len()
-            )));
-        }
+        check_label_len(label, nrow)?;
         let layout = DatasetLayout::construct_dense(data, nrow, ncol, cfg, categorical)?;
         let group_data: Vec<GroupData> = layout
             .groups
             .par_iter()
             .map(|g| g.fill_dense(data, nrow, ncol))
             .collect();
-        let mut numeric_feature_map = vec![-1i32; layout.num_features];
-        let mut num_numeric = 0;
-        for (f, slot) in numeric_feature_map.iter_mut().enumerate() {
-            let g = &layout.groups[layout.feature2group[f] as usize];
-            if g.bin_mappers[layout.feature2subfeature[f] as usize].bin_type == BinType::Numerical {
-                *slot = num_numeric;
-                num_numeric += 1;
-            }
-        }
+        let numeric_feature_map = numeric_feature_map(&layout);
         let raw_data = if cfg.linear_tree {
             (0..layout.num_features)
                 .filter(|&f| numeric_feature_map[f] >= 0)
@@ -757,6 +924,87 @@ impl Dataset {
                 .collect()
         };
         Ok(ds)
+    }
+
+    /// Build a binned dataset from a CSR matrix and labels
+    /// (upstream `LGBM_DatasetCreateFromCSR` + `LGBM_DatasetSetField("label")`).
+    ///
+    /// Bins are found from the sampled stored values ([`SampleSet::from_csr`]); then each
+    /// row's stored pairs are pushed in storage order, followed by an explicit `0.0` for
+    /// every feature whose default bin is not its most frequent bin and that the row did
+    /// not set (upstream: `Dataset::PushOneRow` + `FinishOneRow`). Works in O(nnz) without
+    /// densifying the matrix.
+    pub fn from_csr(
+        m: &CsrMatrix<'_>,
+        label: &[f64],
+        cfg: &Config,
+        categorical: &[i32],
+    ) -> Result<Dataset> {
+        let nrow = m.nrow();
+        check_label_len(label, nrow)?;
+        let mut sample = SampleSet::from_csr(m, cfg)?;
+        let mappers = sample.find_bins(cfg, categorical)?;
+        let layout = DatasetLayout::construct(mappers, &sample, cfg);
+        let numeric_feature_map = numeric_feature_map(&layout);
+        let mut ds = Dataset {
+            feature_names: (0..m.ncol()).map(|i| format!("Column_{i}")).collect(),
+            label_idx: 0,
+            max_bin: cfg.max_bin,
+            bin_construct_sample_cnt: cfg.bin_construct_sample_cnt,
+            min_data_in_bin: cfg.min_data_in_bin,
+            use_missing: cfg.use_missing,
+            zero_as_missing: cfg.zero_as_missing,
+            max_bin_by_feature: cfg.max_bin_by_feature.clone(),
+            forced_bin_bounds: vec![Vec::new(); m.ncol()],
+            metadata: Metadata {
+                label: label.iter().map(|&v| v as f32).collect(),
+                ..Metadata::default()
+            },
+            data: Vec::new(),
+            layout,
+            raw_data: Vec::new(),
+            numeric_feature_map,
+        };
+        ds.push_csr(m, cfg.linear_tree);
+        Ok(ds)
+    }
+
+    /// Bin CSR rows with the reference layout and bin mappers (upstream
+    /// `LGBM_DatasetCreateFromCSR` with a reference: `CreateValid` + `PushOneRow`).
+    pub fn from_csr_reference(
+        m: &CsrMatrix<'_>,
+        label: &[f64],
+        reference: &Dataset,
+    ) -> Result<Dataset> {
+        let nrow = m.nrow();
+        check_label_len(label, nrow)?;
+        let mut ds = reference.clone();
+        ds.layout.num_data = nrow;
+        ds.metadata = Metadata {
+            label: label.iter().map(|&v| v as f32).collect(),
+            ..Metadata::default()
+        };
+        let has_raw = !reference.raw_data.is_empty();
+        ds.push_csr(m, has_raw);
+        Ok(ds)
+    }
+
+    /// Push every CSR row into freshly allocated bins (and raw values when `has_raw`).
+    fn push_csr(&mut self, m: &CsrMatrix<'_>, has_raw: bool) {
+        let nrow = m.nrow();
+        let chunks = csr_push_events(&self.layout, m);
+        self.data = self
+            .layout
+            .groups
+            .par_iter()
+            .enumerate()
+            .map(|(gi, g)| g.fill_events(nrow, chunks.iter().flat_map(|c| c[gi].iter())))
+            .collect();
+        self.raw_data = if has_raw {
+            csr_raw_data(&self.layout, &self.numeric_feature_map, m)
+        } else {
+            Vec::new()
+        };
     }
 
     pub fn num_data(&self) -> usize {
@@ -985,7 +1233,15 @@ impl Dataset {
         out
     }
 
+    /// Write [`Self::to_binary_bytes`] to `path`. Like upstream, an existing file is never
+    /// overwritten: a warning is logged and the file is left as it is
+    /// (upstream: src/io/dataset.cpp (v4.7.0) `Dataset::SaveBinaryFile`).
     pub fn save_binary(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        let path = path.as_ref();
+        if path.exists() {
+            log::warn!("File {} exists, cannot save binary to it", path.display());
+            return Ok(());
+        }
         std::fs::write(path, self.to_binary_bytes())?;
         Ok(())
     }
@@ -1057,6 +1313,103 @@ mod subset_tests {
         let mut dataset = Dataset::from_dense(&values, 12, 2, &labels, &cfg, &[])?;
         dataset.set_group(&[-1, 13])?;
         assert_eq!(dataset.metadata.query_boundaries, vec![0, -1, 12]);
+        Ok(())
+    }
+
+    /// Row-major values with zeros, NaNs, a categorical-like column and a mostly-constant
+    /// column whose default bin is not its most frequent bin (needs zero pushes).
+    fn sparse_like(rows: usize) -> Vec<f64> {
+        let mut rng = Random::new(5);
+        let mut x = Vec::with_capacity(rows * 4);
+        for r in 0..rows {
+            let u = rng.next_float();
+            x.push(if u < 0.6 {
+                0.0
+            } else {
+                f64::from(u) * 10.0 - 7.0
+            });
+            x.push(if r % 17 == 0 {
+                f64::NAN
+            } else if r % 3 == 0 {
+                1.5
+            } else {
+                0.0
+            });
+            x.push(if r % 10 == 0 { 0.0 } else { 2.5 });
+            x.push(f64::from(rng.next_short(0, 5)));
+        }
+        x
+    }
+
+    fn to_csr(x: &[f64], ncol: usize) -> (Vec<i64>, Vec<i32>, Vec<f64>) {
+        let mut indptr = vec![0i64];
+        let (mut idx, mut val) = (Vec::new(), Vec::new());
+        for row in x.chunks(ncol) {
+            for (c, &v) in row.iter().enumerate() {
+                if v != 0.0 {
+                    idx.push(c as i32);
+                    val.push(v);
+                }
+            }
+            indptr.push(idx.len() as i64);
+        }
+        (indptr, idx, val)
+    }
+
+    #[test]
+    fn canonical_csr_bins_exactly_like_dense() -> crate::Result<()> {
+        let rows = 3000;
+        let x = sparse_like(rows);
+        let labels: Vec<f64> = (0..rows).map(|r| (r % 7) as f64).collect();
+        let (ip, ix, v) = to_csr(&x, 4);
+        let m = CsrMatrix::new(&ip, &ix, &v, 4)?;
+        for params in [
+            vec![],
+            vec![("linear_tree", "true")],
+            vec![("enable_bundle", "false")],
+        ] {
+            let params: HashMap<String, String> = params
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect();
+            let cfg = Config::from_params(&params)?;
+            let dense = Dataset::from_dense(&x, rows, 4, &labels, &cfg, &[3])?;
+            let sparse = Dataset::from_csr(&m, &labels, &cfg, &[3])?;
+            assert!(
+                dense
+                    .layout
+                    .groups
+                    .iter()
+                    .flat_map(|g| &g.bin_mappers)
+                    .any(|b| b.default_bin != b.most_freq_bin),
+                "the data must exercise zero pushes"
+            );
+            assert_eq!(
+                sparse.to_binary_bytes(),
+                dense.to_binary_bytes(),
+                "{params:?}"
+            );
+            let bits = |raw: &[Vec<f32>]| -> Vec<Vec<u32>> {
+                raw.iter()
+                    .map(|c| c.iter().map(|v| v.to_bits()).collect())
+                    .collect()
+            };
+            assert_eq!(bits(&sparse.raw_data), bits(&dense.raw_data), "{params:?}");
+            let valid_dense = Dataset::from_dense_reference(&x, rows, 4, &labels, &dense)?;
+            let valid_sparse = Dataset::from_csr_reference(&m, &labels, &dense)?;
+            assert_eq!(
+                valid_sparse.to_binary_bytes(),
+                valid_dense.to_binary_bytes()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn csr_column_past_width_is_rejected_while_sampling() -> crate::Result<()> {
+        let cfg = Config::from_params(&HashMap::new())?;
+        let m = CsrMatrix::new(&[0, 1], &[3], &[1.0], 2)?;
+        assert!(Dataset::from_csr(&m, &[0.0], &cfg, &[]).is_err());
         Ok(())
     }
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `Dataset` accepts `scipy.sparse` CSR and CSC matrices (other sparse formats are converted with `csr_matrix`, as upstream does), for training, validation sets with `reference`, `cv` and custom objectives/metrics. Binning reproduces upstream's `LGBM_DatasetCreateFromCSR`/`FromCSC` exactly, without densifying the matrix. Training on data whose features bundle into multi-value groups is not supported yet (see ROADMAP P2 `MultiValBin`).
+
+- Add `Dataset.save_binary(filename)`, writing upstream's binary format byte for byte; like upstream it never overwrites an existing file (it warns and keeps the file).
+
 - Training with `linear_tree=true` (or `linear_trees`) now raises an error instead of silently training constant-leaf trees; linear-tree models still load and predict.
 
 - `early_stopping` now follows upstream exactly: metrics are checked in order and the first one that stops improving decides, `best_score` holds that iteration's full evaluation list, the best iteration is also reported when training ends without stopping, `min_delta` accepts a list, `stopping_rounds <= 0` disables it (non-integers raise `TypeError`), and DART or training-set-only evaluation disable it with upstream's warnings. `train` sets `best_iteration = 0` and names a training set passed in `valid_sets` `"training"` (evaluated first), like upstream.

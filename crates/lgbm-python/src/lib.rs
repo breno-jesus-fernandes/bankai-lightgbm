@@ -7,6 +7,7 @@ use std::sync::Arc;
 use lgbm_core::boosting::{Gbdt, GbdtTrainer};
 use lgbm_core::config::Config;
 use lgbm_core::io::dataset::Dataset;
+use lgbm_core::io::sparse::{CsrMatrix, csc_to_csr};
 use lgbm_core::metric::create_metric;
 use lgbm_core::predictor::{PredictConfig, PredictKind, Predictor};
 use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
@@ -29,9 +30,57 @@ fn to_py(err: lgbm_core::Error) -> PyErr {
 #[pyclass(module = "bankai_lightgbm._lib", frozen)]
 struct NativeDataset {
     ds: Arc<Dataset>,
-    data: Arc<Vec<f64>>,
+    data: Arc<RawRows>,
     nrow: usize,
     ncol: usize,
+}
+
+/// The raw feature rows a dataset was built from, kept to score validation sets.
+enum RawRows {
+    /// Row-major `nrow x ncol`.
+    Dense(Vec<f64>),
+    /// CSR arrays (`indptr`, `indices`, `values`), in the caller's storage order.
+    Csr(Vec<i64>, Vec<i32>, Vec<f64>),
+}
+
+impl RawRows {
+    /// The rows `indices`, in that order.
+    fn select(&self, indices: &[usize], ncol: usize) -> RawRows {
+        match self {
+            RawRows::Dense(data) => {
+                let mut out = Vec::with_capacity(indices.len() * ncol);
+                for &row in indices {
+                    out.extend_from_slice(&data[row * ncol..(row + 1) * ncol]);
+                }
+                RawRows::Dense(out)
+            }
+            RawRows::Csr(indptr, cols, vals) => {
+                let mut out_ptr = Vec::with_capacity(indices.len() + 1);
+                out_ptr.push(0i64);
+                let (mut out_cols, mut out_vals) = (Vec::new(), Vec::new());
+                for &row in indices {
+                    let (lo, hi) = (indptr[row] as usize, indptr[row + 1] as usize);
+                    out_cols.extend_from_slice(&cols[lo..hi]);
+                    out_vals.extend_from_slice(&vals[lo..hi]);
+                    out_ptr.push(out_cols.len() as i64);
+                }
+                RawRows::Csr(out_ptr, out_cols, out_vals)
+            }
+        }
+    }
+
+    /// Raw scores for every row, row-major (`nrow x num_class`).
+    fn predict(
+        &self,
+        predictor: &Predictor<'_>,
+        nrow: usize,
+        ncol: usize,
+    ) -> lgbm_core::Result<Vec<f64>> {
+        match self {
+            RawRows::Dense(data) => predictor.predict_dense(data, nrow, ncol),
+            RawRows::Csr(indptr, cols, vals) => predictor.predict_csr(indptr, cols, vals),
+        }
+    }
 }
 
 #[pymethods]
@@ -53,43 +102,82 @@ impl NativeDataset {
         init_score: Option<Vec<f64>>,
     ) -> PyResult<Self> {
         let shape = data.shape().to_vec();
-        let values = Arc::new(
-            data.as_slice()
-                .map_err(|_| LightGBMError::new_err("data must be C-contiguous"))?
-                .to_vec(),
-        );
-        let values_for_build = Arc::clone(&values);
+        let values = data
+            .as_slice()
+            .map_err(|_| LightGBMError::new_err("data must be C-contiguous"))?
+            .to_vec();
         let (nrow, ncol) = (shape[0], shape[1]);
         let reference = reference.map(|r| Arc::clone(&r.ds));
         let ds = py
             .allow_threads(|| -> lgbm_core::Result<Dataset> {
                 let cfg = Config::from_params(&params)?;
-                let mut ds = if let Some(reference) = reference {
-                    Dataset::from_dense_reference(
-                        &values_for_build,
-                        nrow,
-                        ncol,
-                        &label,
-                        &reference,
-                    )?
+                let ds = if let Some(reference) = reference {
+                    Dataset::from_dense_reference(&values, nrow, ncol, &label, &reference)?
                 } else {
-                    Dataset::from_dense(&values_for_build, nrow, ncol, &label, &cfg, &categorical)?
+                    Dataset::from_dense(&values, nrow, ncol, &label, &cfg, &categorical)?
                 };
-                if let Some(w) = weight {
-                    ds.set_weights(&w)?;
-                }
-                if let Some(g) = group {
-                    ds.set_group(&g)?;
-                }
-                if let Some(init) = init_score {
-                    ds.set_init_score(&init)?;
-                }
-                Ok(ds)
+                with_metadata(ds, weight, group, init_score)
             })
             .map_err(to_py)?;
         Ok(NativeDataset {
             ds: Arc::new(ds),
-            data: values,
+            data: Arc::new(RawRows::Dense(values)),
+            nrow,
+            ncol,
+        })
+    }
+
+    /// Bin a scipy CSR (`is_csc=false`) or CSC (`is_csc=true`) matrix of shape
+    /// `nrow x ncol` (`LGBM_DatasetCreateFromCSR`/`FromCSC`). CSC input is gathered into CSR
+    /// rows in column order first. Other arguments are as for `from_dense`.
+    #[staticmethod]
+    #[pyo3(signature = (indptr, indices, data, nrow, ncol, is_csc, label, params, categorical,
+        weight=None, group=None, reference=None, init_score=None))]
+    #[allow(clippy::too_many_arguments)] // Python Dataset constructor arguments.
+    fn from_sparse(
+        py: Python<'_>,
+        indptr: PyReadonlyArray1<'_, i64>,
+        indices: PyReadonlyArray1<'_, i32>,
+        data: PyReadonlyArray1<'_, f64>,
+        nrow: usize,
+        ncol: usize,
+        is_csc: bool,
+        label: Vec<f64>,
+        params: HashMap<String, String>,
+        categorical: Vec<i32>,
+        weight: Option<Vec<f32>>,
+        group: Option<Vec<i32>>,
+        reference: Option<PyRef<'_, NativeDataset>>,
+        init_score: Option<Vec<f64>>,
+    ) -> PyResult<Self> {
+        let contiguous = |e: numpy::NotContiguousError| LightGBMError::new_err(e.to_string());
+        let (indptr, indices, values) = (
+            indptr.as_slice().map_err(contiguous)?.to_vec(),
+            indices.as_slice().map_err(contiguous)?.to_vec(),
+            data.as_slice().map_err(contiguous)?.to_vec(),
+        );
+        let reference = reference.map(|r| Arc::clone(&r.ds));
+        let (ds, raw) = py
+            .allow_threads(|| -> lgbm_core::Result<(Dataset, RawRows)> {
+                let (indptr, indices, values) = if is_csc {
+                    csc_to_csr(&indptr, &indices, &values, nrow)?
+                } else {
+                    (indptr, indices, values)
+                };
+                let cfg = Config::from_params(&params)?;
+                let m = CsrMatrix::new(&indptr, &indices, &values, ncol)?;
+                let ds = if let Some(reference) = reference {
+                    Dataset::from_csr_reference(&m, &label, &reference)?
+                } else {
+                    Dataset::from_csr(&m, &label, &cfg, &categorical)?
+                };
+                let ds = with_metadata(ds, weight, group, init_score)?;
+                Ok((ds, RawRows::Csr(indptr, indices, values)))
+            })
+            .map_err(to_py)?;
+        Ok(NativeDataset {
+            ds: Arc::new(ds),
+            data: Arc::new(raw),
             nrow,
             ncol,
         })
@@ -141,16 +229,17 @@ impl NativeDataset {
         self.ds.layout.num_total_features
     }
 
+    /// Write the binned dataset in upstream's binary format (`LGBM_DatasetSaveBinary`).
+    fn save_binary(&self, py: Python<'_>, path: String) -> PyResult<()> {
+        let ds = Arc::clone(&self.ds);
+        py.allow_threads(|| ds.save_binary(&path)).map_err(to_py)
+    }
+
     fn subset(&self, indices: Vec<usize>) -> PyResult<Self> {
         let ds = self.ds.subset(&indices).map_err(to_py)?;
-        let mut data = Vec::with_capacity(indices.len() * self.ncol);
-        for &row in &indices {
-            let start = row * self.ncol;
-            data.extend_from_slice(&self.data[start..start + self.ncol]);
-        }
         Ok(NativeDataset {
             ds: Arc::new(ds),
-            data: Arc::new(data),
+            data: Arc::new(self.data.select(&indices, self.ncol)),
             nrow: indices.len(),
             ncol: self.ncol,
         })
@@ -360,7 +449,7 @@ impl NativeBooster {
                 ..PredictConfig::default()
             };
             let predictor = Predictor::new(model, &pred_cfg)?;
-            let row_scores = predictor.predict_dense(&data, nrow, ncol)?;
+            let row_scores = data.predict(&predictor, nrow, ncol)?;
             let nclass = model.num_class();
             let scores = if nclass > 1 {
                 let mut class_major = vec![0.0; row_scores.len()];
@@ -621,6 +710,25 @@ impl NativeBooster {
         }
         Ok(())
     }
+}
+
+/// Attach optional weights, query sizes and init scores to a freshly built dataset.
+fn with_metadata(
+    mut ds: Dataset,
+    weight: Option<Vec<f32>>,
+    group: Option<Vec<i32>>,
+    init_score: Option<Vec<f64>>,
+) -> lgbm_core::Result<Dataset> {
+    if let Some(w) = weight {
+        ds.set_weights(&w)?;
+    }
+    if let Some(g) = group {
+        ds.set_group(&g)?;
+    }
+    if let Some(init) = init_score {
+        ds.set_init_score(&init)?;
+    }
+    Ok(ds)
 }
 
 /// Build a [`PredictConfig`] from the `C_API_PREDICT_*` code and prediction parameters.

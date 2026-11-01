@@ -176,6 +176,48 @@ def _is_scipy_sparse(data: Any) -> bool:
 _PredictReturnType = npt.NDArray[Any] | Any
 
 
+def _dataset_sparse(data: Any) -> Any:
+    """The CSR/CSC matrix a Dataset is built from, or ``None`` for dense inputs.
+
+    Mirrors upstream ``Dataset._lazy_init``: ``csr_matrix``/``csc_matrix`` are used as-is
+    after upstream's dtype and length checks (``__init_from_csr``/``__init_from_csc``);
+    other scipy.sparse inputs are converted with ``csr_matrix`` (no warning, unlike
+    prediction), failures raising ``TypeError("Cannot initialize Dataset from ...")``.
+    """
+    if not _is_scipy_sparse(data):
+        return None
+    import scipy.sparse
+
+    if not isinstance(data, (scipy.sparse.csr_matrix, scipy.sparse.csc_matrix)):
+        try:
+            converted = scipy.sparse.csr_matrix(data)
+            _check_sparse_arrays(converted)
+        except BaseException as err:
+            raise TypeError(f"Cannot initialize Dataset from {type(data).__name__}") from err
+        return converted
+    _check_sparse_arrays(data)
+    return data
+
+
+def _check_sparse_arrays(cs: Any) -> None:
+    if len(cs.indices) != len(cs.data):
+        raise ValueError(f"Length mismatch: {len(cs.indices)} vs {len(cs.data)}")
+    _c_int_dtype_check(cs.indptr)
+    _c_float_dtype_check(cs.data)
+
+
+def _internal_rows(data: Any) -> Any:
+    """Rows to re-predict where upstream reads its internal scores (custom objectives and
+    metrics): other scipy.sparse formats become ``csr_matrix`` silently, since upstream
+    never converts (or warns) there."""
+    if _is_scipy_sparse(data):
+        import scipy.sparse
+
+        if not isinstance(data, (scipy.sparse.csr_matrix, scipy.sparse.csc_matrix)):
+            return scipy.sparse.csr_matrix(data)
+    return data
+
+
 class _ConfigAliases:
     """Parameter aliases from the table generated from upstream's ``config.h``.
 
@@ -371,6 +413,14 @@ class Dataset:
         subset._handle = native
         return subset
 
+    def save_binary(self, filename: str | Path) -> Dataset:
+        """Save the constructed Dataset to a binary file (upstream ``LGBM_DatasetSaveBinary``).
+
+        The file is byte-identical to the one upstream writes for the same data and params.
+        """
+        self.construct()._handle_or_raise().save_binary(str(filename))
+        return self
+
     def _handle_or_raise(self) -> NativeDataset:
         if self._handle is None:  # pragma: no cover - construct() always sets it
             raise LightGBMError("Dataset is not constructed")
@@ -470,13 +520,15 @@ class Dataset:
     def _build(self, *, evaluation: bool = False) -> NativeDataset:
         if self.reference is not None:
             self.reference.construct()
-        if _is_scipy_sparse(self.data):
-            raise NotImplementedError("sparse training input is not implemented yet (roadmap P2)")
         if self.data is None:
             raise ValueError("Cannot construct a Dataset without data")
         feature_names: list[str] | None = None
         pandas_cat_cols: list[int] = []
-        if _is_pandas_df(self.data):
+        sparse = _dataset_sparse(self.data)
+        matrix: npt.NDArray[np.float64] | None = None
+        if sparse is not None:
+            n = int(sparse.shape[0])
+        elif _is_pandas_df(self.data):
             import pandas as pd
 
             feature_names = [str(c) for c in self.data.columns]
@@ -496,10 +548,11 @@ class Dataset:
             matrix = _data_from_pandas(self.data, self.pandas_categorical)
         else:
             matrix = np.asarray(self.data, dtype=np.float64)
-        if matrix.ndim != 2:
-            raise ValueError("Input data must be 2-dimensional")
-        matrix = np.ascontiguousarray(matrix, dtype=np.float64)
-        n = matrix.shape[0]
+        if matrix is not None:
+            if matrix.ndim != 2:
+                raise ValueError("Input data must be 2-dimensional")
+            matrix = np.ascontiguousarray(matrix, dtype=np.float64)
+            n = matrix.shape[0]
         if self.label is None:
             label = np.zeros(n, dtype=np.float64)
         else:
@@ -530,6 +583,25 @@ class Dataset:
         if self.init_score is not None:
             init_score = _init_score_values(self.init_score, n)
         reference = self.reference._handle_or_raise() if self.reference is not None else None
+        if sparse is not None:
+            import scipy.sparse
+
+            return NativeDataset.from_sparse(
+                np.ascontiguousarray(sparse.indptr, dtype=np.int64),
+                np.ascontiguousarray(sparse.indices, dtype=np.int32),
+                np.ascontiguousarray(sparse.data, dtype=np.float64),
+                int(sparse.shape[0]),
+                int(sparse.shape[1]),
+                isinstance(sparse, scipy.sparse.csc_matrix),
+                label.tolist(),
+                params,
+                categorical,
+                weight,
+                group,
+                reference,
+                init_score,
+            )
+        assert matrix is not None
         return NativeDataset.from_dense(
             matrix,
             label.tolist(),
@@ -660,7 +732,7 @@ class Booster:
             )
             self.pandas_categorical = dataset.pandas_categorical
         if fobj is not None:
-            predictions = self.predict(self._train_set.data, raw_score=True)
+            predictions = self.predict(_internal_rows(self._train_set.data), raw_score=True)
             gradients, hessians = fobj(predictions, self._train_set)
             num_class = self.num_model_per_iteration()
             if num_class > 1:
@@ -702,7 +774,7 @@ class Booster:
             params = {**dataset.params, **self.params}
             results.extend(self._native().eval(native_dataset, _params_to_strings(params), name))
             if custom_metrics:
-                predictions = self.predict(dataset.data)
+                predictions = self.predict(_internal_rows(dataset.data))
                 for custom_metric in custom_metrics:
                     if custom_metric is None:
                         continue

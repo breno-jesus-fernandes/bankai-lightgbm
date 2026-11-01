@@ -20,6 +20,22 @@ class NativeDataset:
         reference: NativeDataset | None = None,
         init_score: list[float] | None = None,
     ) -> NativeDataset: ...
+    @staticmethod
+    def from_sparse(
+        indptr: npt.NDArray[np.int64],
+        indices: npt.NDArray[np.int32],
+        data: npt.NDArray[np.float64],
+        nrow: int,
+        ncol: int,
+        is_csc: bool,
+        label: list[float],
+        params: dict[str, str],
+        categorical: list[int],
+        weight: list[float] | None = None,
+        group: list[int] | None = None,
+        reference: NativeDataset | None = None,
+        init_score: list[float] | None = None,
+    ) -> NativeDataset: ...
     def with_init_score(self, init_score: list[float]) -> NativeDataset: ...
     def with_fields(
         self,
@@ -29,6 +45,7 @@ class NativeDataset:
     ) -> NativeDataset: ...
     def num_data(self) -> int: ...
     def num_feature(self) -> int: ...
+    def save_binary(self, path: str) -> None: ...
     def subset(self, indices: list[int]) -> NativeDataset: ...
 
 class NativeBooster:

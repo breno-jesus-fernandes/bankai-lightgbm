@@ -5,6 +5,7 @@
 use rayon::prelude::*;
 
 use super::bin::{BinMapper, BinType, FindBinParams};
+use super::sparse::CsrMatrix;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::meta::K_ZERO_THRESHOLD;
@@ -50,6 +51,34 @@ impl SampleSet {
         }
         Ok(SampleSet {
             num_data: nrow,
+            sample_cnt: rows.len(),
+            values,
+            indices,
+        })
+    }
+
+    /// Sample a CSR matrix the way `LGBM_DatasetCreateFromCSR` does: each sampled row's
+    /// stored pairs are visited in storage order and kept when `|v| > kZeroThreshold` or
+    /// NaN (a duplicated column contributes one sample value per stored entry). Absent
+    /// entries are zeros, which upstream never samples (dense rows drop them too).
+    pub fn from_csr(m: &CsrMatrix<'_>, cfg: &Config) -> Result<SampleSet> {
+        m.check_columns()?;
+        let total =
+            i32::try_from(m.nrow()).map_err(|_| Error::InvalidParameter("too many rows".into()))?;
+        let rows = create_sample_indices(total, cfg);
+        let mut values: Vec<Vec<f64>> = vec![Vec::new(); m.ncol()];
+        let mut indices: Vec<Vec<i32>> = vec![Vec::new(); m.ncol()];
+        for (i, &idx) in rows.iter().enumerate() {
+            let (cols, vals) = m.row(idx as usize);
+            for (&c, &v) in cols.iter().zip(vals) {
+                if v.abs() > K_ZERO_THRESHOLD || v.is_nan() {
+                    values[c as usize].push(v);
+                    indices[c as usize].push(i as i32);
+                }
+            }
+        }
+        Ok(SampleSet {
+            num_data: m.nrow(),
             sample_cnt: rows.len(),
             values,
             indices,
