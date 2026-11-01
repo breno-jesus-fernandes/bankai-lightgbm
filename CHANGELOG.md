@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Recognize callable objectives through all upstream objective aliases in training and CV. Complete multiclass, DART/GOSS switching, RF rejection, and raw-score custom evaluation acceptance coverage.
+
 - Support switching trained regression/binary boosters to custom objectives while retaining trees and scores; reject updates without derivatives after switching.
 
 - Validate custom gradient/Hessian dimensions and lengths in Python with upstream-compatible errors before native updates; rejected inputs preserve trained model state.

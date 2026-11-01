@@ -609,8 +609,9 @@ def test_invalid_custom_gradients_match_upstream(invalid: str) -> None:
     assert errors[0] == errors[1]
 
 
-@pytest.mark.parametrize("initial_objective", ["regression", "binary"])
-def test_switch_to_custom_objective_matches_upstream(initial_objective: str) -> None:
+@pytest.mark.parametrize("initial_objective", ["regression", "binary", "multiclass"])
+@pytest.mark.parametrize("variant", ["gbdt", "dart", "goss", "rf"])
+def test_switch_to_custom_objective_matches_upstream(initial_objective: str, variant: str) -> None:
     x = np.random.default_rng(415).normal(size=(80, 3))
     y = (x[:, 0] > 0).astype(float) if initial_objective == "binary" else x[:, 0]
     params = {
@@ -621,6 +622,15 @@ def test_switch_to_custom_objective_matches_upstream(initial_objective: str) -> 
         "num_leaves": 5,
         "min_data_in_bin": 1,
     }
+    if initial_objective == "multiclass":
+        y = np.argmax(x, axis=1)
+        params["num_class"] = 3
+    if variant == "goss":
+        params["data_sample_strategy"] = "goss"
+    else:
+        params["boosting"] = variant
+    if variant == "rf":
+        params.update(bagging_fraction=0.8, bagging_freq=1)
     models = []
     for library in (lightgbm, lgb):
         booster = library.train(
@@ -629,8 +639,16 @@ def test_switch_to_custom_objective_matches_upstream(initial_objective: str) -> 
 
         def objective(predictions: np.ndarray, dataset: Any) -> tuple[np.ndarray, np.ndarray]:
             hessian = np.linspace(0.5, 1.5, len(predictions))
+            if initial_objective == "multiclass":
+                return predictions - np.eye(3)[dataset.get_label().astype(int)], np.repeat(
+                    hessian[:, None], 3, axis=1
+                )
             return predictions - dataset.get_label(), hessian
 
+        if variant == "rf":
+            with pytest.raises(library.basic.LightGBMError, match="RF mode do not support custom"):
+                booster.update(fobj=objective)
+            continue
         booster.update(fobj=objective)
         before = booster.predict(x, raw_score=True)
         iteration = booster.current_iteration()
@@ -642,4 +660,53 @@ def test_switch_to_custom_objective_matches_upstream(initial_objective: str) -> 
         np.testing.assert_array_equal(booster.predict(x, raw_score=True), before)
         booster.update(fobj=objective)
         models.append(booster)
-    np.testing.assert_allclose(models[1].predict(x), models[0].predict(x), rtol=1e-12, atol=1e-15)
+    if variant != "rf":
+        np.testing.assert_allclose(
+            models[1].predict(x), models[0].predict(x), rtol=1e-12, atol=1e-15
+        )
+
+
+@pytest.mark.parametrize("alias", ["objective", "application", "app", "objective_type", "loss"])
+@pytest.mark.parametrize("entry", ["train", "cv"])
+def test_custom_objective_aliases(alias: str, entry: str) -> None:
+    x = np.random.default_rng(31).normal(size=(80, 3))
+    y = x[:, 0]
+
+    def objective(predictions: np.ndarray, dataset: Any) -> tuple[np.ndarray, np.ndarray]:
+        return predictions - dataset.get_label(), np.ones_like(predictions)
+
+    def evaluate(predictions: np.ndarray, dataset: Any) -> tuple[str, float, bool]:
+        return "raw_mean", float(np.mean(predictions)), False
+
+    params = {
+        alias: objective,
+        "metric": "None",
+        "verbosity": -1,
+        "num_threads": 1,
+        "min_data_in_leaf": 2,
+    }
+    results = []
+    for library in (lightgbm, lgb):
+        dataset = library.Dataset(x, label=y)
+        if entry == "train":
+            values: dict[str, Any] = {}
+            model = library.train(
+                params,
+                dataset,
+                num_boost_round=3,
+                valid_sets=[dataset],
+                feval=evaluate,
+                callbacks=[library.record_evaluation(values)],
+            )
+            np.testing.assert_allclose(
+                next(iter(values.values()))["raw_mean"][-1],
+                np.mean(model.predict(x, raw_score=True)),
+                rtol=1e-12,
+            )
+            results.append(model.predict(x))
+        else:
+            result = library.cv(
+                params, dataset, num_boost_round=3, nfold=2, stratified=False, feval=evaluate
+            )
+            results.append(result["valid raw_mean-mean"])
+    np.testing.assert_allclose(results[1], results[0], rtol=1e-12, atol=1e-15)

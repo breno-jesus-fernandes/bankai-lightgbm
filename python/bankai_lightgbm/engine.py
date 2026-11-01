@@ -44,8 +44,16 @@ def train(
     if init_model is not None:
         raise NotImplementedError("init_model is not implemented yet (roadmap P5)")
     params = dict(params)
-    fobj = params.get("objective") if callable(params.get("objective")) else None
+    # upstream: engine.py::_choose_param_value, objective aliases (v4.7.0).
+    objective_aliases = ("objective", "app", "loss", "application", "objective_type")
+    objective = next(
+        (params[objective_key] for objective_key in objective_aliases if objective_key in params),
+        None,
+    )
+    fobj = objective if callable(objective) else None
     if fobj is not None:
+        for objective_key in objective_aliases:
+            params.pop(objective_key, None)
         params["objective"] = "none"
     if feature_name != "auto":
         train_set.feature_name = feature_name
@@ -324,8 +332,16 @@ def cv(
         if value is not None:
             raise NotImplementedError(f"{name} is not implemented yet")
     params = dict(params)
-    fobj = params.get("objective") if callable(params.get("objective")) else None
+    # upstream: engine.py::_choose_param_value, objective aliases (v4.7.0).
+    objective_aliases = ("objective", "app", "loss", "application", "objective_type")
+    objective = next(
+        (params[objective_key] for objective_key in objective_aliases if objective_key in params),
+        None,
+    )
+    fobj = objective if callable(objective) else None
     if fobj is not None:
+        for objective_key in objective_aliases:
+            params.pop(objective_key, None)
         params["objective"] = "none"
     if metrics is not None:
         for alias in ("metric", "metrics", "metric_types"):
