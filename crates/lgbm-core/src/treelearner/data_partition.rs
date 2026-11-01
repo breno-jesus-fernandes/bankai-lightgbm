@@ -2,14 +2,22 @@
 //! src/io/dense_bin.hpp (`SplitInner`), include/LightGBM/feature_group.h (`Split`)
 
 use crate::io::bin::{BinMapper, BinType};
-use crate::io::bin_data::{BinData, DenseBin};
+use crate::io::bin_data::{BinData, DenseBin, SparseBin};
 use crate::io::dataset::{Dataset, GroupData};
 use crate::meta::MissingType;
 use crate::utils::common::find_in_bitset;
 
-/// The dense bin column of a feature with its bin range inside the group:
+/// A feature's stored bin column: a dense group column, or a sparse multi-value column
+/// (read through `SparseBin::cursor`, as upstream's `SparseBin::SplitInner` iterates).
+#[derive(Clone, Copy)]
+enum Column<'a> {
+    Dense(&'a DenseBin),
+    Sparse(&'a SparseBin),
+}
+
+/// The bin column of a feature with its bin range inside the group:
 /// `(column, min_bin, max_bin, use_min_bin)`.
-fn group_view(ds: &Dataset, inner_feature: usize) -> (&DenseBin, u32, u32, bool) {
+fn group_view(ds: &Dataset, inner_feature: usize) -> (Column<'_>, u32, u32, bool) {
     let l = &ds.layout;
     let g = &l.groups[l.feature2group[inner_feature] as usize];
     let sub = l.feature2subfeature[inner_feature] as usize;
@@ -20,19 +28,31 @@ fn group_view(ds: &Dataset, inner_feature: usize) -> (&DenseBin, u32, u32, bool)
             let min_bin = g.bin_offsets[sub];
             let max_bin = g.bin_offsets[sub + 1] - 1;
             if g.bin_mappers.len() == 1 {
-                (d, 1, max_bin, false)
+                (Column::Dense(d), 1, max_bin, false)
             } else {
-                (d, min_bin, max_bin, true)
+                (Column::Dense(d), min_bin, max_bin, true)
             }
         }
-        GroupData::Multi(cols) => match &cols[sub] {
-            BinData::Dense(d) => {
-                let addi = u32::from(most_freq_bin != 0);
-                (d, 1, m.num_bin as u32 - 1 + addi, false)
+        GroupData::Multi(cols) => {
+            // upstream: multi_bin_data_[sub] has bins 1..=num_bin - 1 + addi, 0 = most freq.
+            let addi = u32::from(most_freq_bin != 0);
+            let max_bin = m.num_bin as u32 - 1 + addi;
+            match &cols[sub] {
+                BinData::Dense(d) => (Column::Dense(d), 1, max_bin, false),
+                BinData::Sparse(sb) => (Column::Sparse(sb), 1, max_bin, false),
             }
-            BinData::Sparse(_) => unreachable!("sparse bins are densified before training"),
-        },
-        GroupData::Single(BinData::Sparse(_)) => unreachable!("single-value groups are dense"),
+        }
+        // Single-value groups are built dense; the learner rejects anything else.
+        GroupData::Single(BinData::Sparse(sb)) => {
+            let min_bin = g.bin_offsets[sub];
+            let max_bin = g.bin_offsets[sub + 1] - 1;
+            (
+                Column::Sparse(sb),
+                min_bin,
+                max_bin,
+                g.bin_mappers.len() > 1,
+            )
+        }
     }
 }
 
@@ -96,7 +116,14 @@ impl DataPartition {
         self.right_buf.clear();
         let idx = &self.indices[begin..begin + cnt];
         // Monomorphize the routing loop per bin width (upstream: templated DenseBin).
-        match rule.bin {
+        let bin = match rule.col {
+            Column::Dense(d) => d,
+            Column::Sparse(sb) => {
+                partition_sparse(idx, sb, rule, &mut self.left_buf, &mut self.right_buf);
+                return self.finish_split(leaf, right_leaf, begin, cnt);
+            }
+        };
+        match bin {
             DenseBin::U4(d) => partition(
                 idx,
                 |i| u32::from((d[i >> 1] >> ((i & 1) << 2)) & 0xf),
@@ -122,12 +149,38 @@ impl DataPartition {
                 partition(idx, |i| d[i], rule, &mut self.left_buf, &mut self.right_buf)
             }
         }
+        self.finish_split(leaf, right_leaf, begin, cnt);
+    }
+
+    /// Write back the routed rows: left rows stay in `leaf`, right rows form `right_leaf`.
+    #[inline]
+    fn finish_split(&mut self, leaf: usize, right_leaf: usize, begin: usize, cnt: usize) {
         let left_cnt = self.left_buf.len();
         self.indices[begin..begin + left_cnt].copy_from_slice(&self.left_buf);
         self.indices[begin + left_cnt..begin + cnt].copy_from_slice(&self.right_buf);
         self.leaf_count[leaf] = left_cnt;
         self.leaf_begin[right_leaf] = begin + left_cnt;
         self.leaf_count[right_leaf] = cnt - left_cnt;
+    }
+}
+
+/// Route rows through a sparse column with a forward cursor (rows of a leaf ascend).
+/// Kept out of line so the dense routing loops in `split` compile as before.
+#[inline(never)]
+fn partition_sparse(
+    idx: &[i32],
+    sb: &SparseBin,
+    rule: &SplitRule<'_>,
+    left: &mut Vec<i32>,
+    right: &mut Vec<i32>,
+) {
+    let mut cur = sb.cursor();
+    for &i in idx {
+        if matches!(rule.route_bin(cur.get(i as usize)), Route::Left) {
+            left.push(i);
+        } else {
+            right.push(i);
+        }
     }
 }
 
@@ -157,7 +210,6 @@ enum Route {
 
 /// A numerical split rule over a dense bin column (upstream `DenseBin::SplitInner`).
 pub struct SplitRule<'a> {
-    bin: &'a DenseBin,
     use_min_bin: bool,
     minb: u32,
     maxb: u32,
@@ -174,6 +226,9 @@ pub struct SplitRule<'a> {
     max_bin_route: Route,
     /// Categorical: bitset over bins
     cat_bitset: Option<(&'a [u32], u32, u32)>,
+    /// The feature's stored bin column (last: the routing fields stay where the hot loop
+    /// reads them).
+    col: Column<'a>,
 }
 
 impl<'a> SplitRule<'a> {
@@ -184,7 +239,7 @@ impl<'a> SplitRule<'a> {
         let g = &l.groups[l.feature2group[inner_feature] as usize];
         let sub = l.feature2subfeature[inner_feature] as usize;
         let most_freq_bin = g.bin_mappers[sub].most_freq_bin;
-        let (bin, min_bin, max_bin, use_min_bin) = group_view(ds, inner_feature);
+        let (col, min_bin, max_bin, use_min_bin) = group_view(ds, inner_feature);
         let offset = u32::from(most_freq_bin == 0);
         // upstream checks the most frequent bin directly in the bitset (no `min_bin` shift).
         let default_route = if most_freq_bin > 0 && find_in_bitset(bins, most_freq_bin) {
@@ -193,7 +248,7 @@ impl<'a> SplitRule<'a> {
             Route::Right
         };
         SplitRule {
-            bin,
+            col,
             use_min_bin,
             minb: min_bin,
             maxb: max_bin,
@@ -224,7 +279,7 @@ impl<'a> SplitRule<'a> {
         let m: &BinMapper = &g.bin_mappers[sub];
         let default_bin = m.default_bin;
         let most_freq_bin = m.most_freq_bin;
-        let (bin, min_bin, max_bin, use_min_bin) = group_view(ds, inner_feature);
+        let (col, min_bin, max_bin, use_min_bin) = group_view(ds, inner_feature);
         let missing_type = m.missing_type;
         let (miss_is_zero, miss_is_na, mfb_is_zero, mfb_is_na) = match missing_type {
             MissingType::None => (false, false, false, false),
@@ -260,7 +315,7 @@ impl<'a> SplitRule<'a> {
             Route::Right
         };
         SplitRule {
-            bin,
+            col,
             use_min_bin,
             minb: min_bin,
             maxb: max_bin,
@@ -327,7 +382,11 @@ impl<'a> SplitRule<'a> {
 
     #[inline]
     pub fn goes_left(&self, idx: usize) -> bool {
-        matches!(self.route_bin(self.bin.get(idx)), Route::Left)
+        let bin = match self.col {
+            Column::Dense(d) => d.get(idx),
+            Column::Sparse(sb) => sb.cursor().get(idx),
+        };
+        matches!(self.route_bin(bin), Route::Left)
     }
 
     /// Only numerical bins are handled by this rule constructor.

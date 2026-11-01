@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Train on data whose features bundle into a multi-value group (typical once most values are zero, dense or sparse input): histograms are built from upstream's row-wise multi-value bins with the same offsets, block split and merge order, so models match upstream byte for byte (also with several threads). Previously training raised "not supported yet: training with multi-value (sparse) feature groups".
+
 - Labels are stored like upstream's `Metadata::SetLabel` (float32 through `AvoidInf`: NaN becomes 0, infinities are clamped to ±1e38); NaN labels used to poison the gradients so that no tree could split. `Dataset.get_label()`/`get_weight()` return the stored (sanitized) values once the Dataset is constructed, as upstream does.
 
 - `train()` now returns the reparsed model unless `keep_training_booster=True`, like upstream (`model_from_string(model_to_string())`): the model text matches upstream's byte for byte in every case (e.g. a one-leaf tree's empty `leaf_weight`), and, as upstream, such a booster cannot continue training.

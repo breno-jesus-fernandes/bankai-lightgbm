@@ -60,7 +60,8 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] `BinMapper`: numerical/categorical, `max_bin`, `max_bin_by_feature`, `min_data_in_bin`, `bin_construct_sample_cnt`
 - [x] Missing handling: `use_missing`, `zero_as_missing`, NaN/zero bins
 - [x] Dense, 4-bit dense, and sparse bins; multi-val (per-feature) bins
-- [ ] `MultiValBin` (row-wise training layout). Multi-value groups are *built* byte-identically (dense and sparse input, `save_binary` parity), but the learner rejects them, so training with EFB on sparse-ish data fails until this lands (strict xfail `test_sparse_training_with_multi_value_groups`)
+- [x] `MultiValBin` for col-wise training: the multi-value group's histograms come from row-wise sparse/dense multi-value bins with upstream's offsets, kernels, data blocks and merge order (byte-identical model text vs upstream across objectives, sampling, constraints, categorical, multiclass, ranking, CSR/CSC/dense input, and with 2 threads; `tests/parity/test_multi_val_training_parity.py`). Sparse multi-value columns are partitioned with a forward `SparseBin` cursor, without densifying
+- [ ] Row-wise training layout (`force_row_wise`; upstream `GetMultiBinFromAllFeatures`)
 - [x] Exclusive Feature Bundling (`enable_bundle`), sampling identical to upstream
 - [ ] Metadata: label, weight, and group/query implemented; weight/query length errors and nested subsets covered; position pending; init_score done (class-major storage, training, validation metrics, subsets)
 - [x] Sparse CSR/CSC input (`LGBM_DatasetCreateFromCSR`/`FromCSC`): sampling, push order (stored pairs then `FinishOneRow` zero pushes), reference datasets and linear-tree raw values, O(nnz) without densifying; `save_binary` byte-identical to upstream incl. bundles, unsorted indices and multi-value groups. Known gap: a duplicated column within a row that lands in a *sparse* multi-value column (upstream keeps whichever entry its unstable `std::sort` leaves first, which is stdlib-dependent; bankai keeps the first). Construction speed (`benches/bench_dataset.py`, linux/x86_64 2 vCPU): CSR 0.8–1.05x, CSC 0.75–4x upstream; dense construction measured 0.32–0.82x (pre-existing, profile `value_to_bin`/`find_groups`)
@@ -84,6 +85,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [ ] Quantized training (`use_quantized_grad`, `num_grad_quant_bins`, ...)
 - [ ] `refit`, `deterministic`
 - **Gate:** identical trees on fixed seeds; training as fast as upstream
+- Bench note (`benches/bench_train.py`, linux/x86_64 2 vCPU, training only, 50 rounds): 1 thread at parity (dense 1.04x, multi-value group 0.95–0.97x); no thread scaling yet (0.47–0.68x at 2 threads): split finding, sparse partition and single-group histograms run serially, while upstream parallelizes them. Benchmark a release build (`maturin develop -r`); `scripts/check.sh` installs a debug build.
 
 ## P4: Objectives + metrics
 - [x] Regression: `l2`, `l1`, `huber`, `fair`, `poisson`, `quantile`, `mape`, `gamma`, `tweedie` (byte-identical training, weighted and unweighted)

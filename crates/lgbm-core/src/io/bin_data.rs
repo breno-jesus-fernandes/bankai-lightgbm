@@ -212,6 +212,32 @@ impl SparseBin {
         pad(out, start);
     }
 
+    /// A forward cursor for reading bins by row (upstream `SparseBinIterator`).
+    pub fn cursor(&self) -> SparseCursor<'_> {
+        SparseCursor {
+            bin: self,
+            i_delta: 0,
+            cur_pos: self.deltas.first().map_or(self.num_data, |&d| d as usize),
+            lower: 0,
+        }
+    }
+
+    /// Every stored `(row, bin)` with a non-zero bin, rows ascending (continuation
+    /// entries of long gaps hold `0` and are skipped).
+    pub fn for_each_nonzero(&self, mut f: impl FnMut(usize, u32)) {
+        let mut pos = 0usize;
+        for i in 0..self.num_vals() {
+            pos += self.deltas[i] as usize;
+            if pos >= self.num_data {
+                break;
+            }
+            let v = self.val(i);
+            if v != 0 {
+                f(pos, v);
+            }
+        }
+    }
+
     /// Decode to a dense vector of bins (0 where no value is stored).
     pub fn to_dense(&self) -> Vec<u32> {
         let mut out = vec![0u32; self.num_data];
@@ -223,6 +249,64 @@ impl SparseBin {
             }
         }
         out
+    }
+}
+
+/// Reads a [`SparseBin`] by row. Rows read in ascending order cost O(1) amortized; a read
+/// before the cursor re-seeks through the fast index, as upstream's
+/// `SparseBinIterator::Reset` + `InnerRawGet` do (src/io/sparse_bin.hpp (v4.7.0)).
+///
+/// Invariant: every entry before `i_delta` lies at a row `< lower`, and `cur_pos` is the
+/// row of entry `i_delta` (or at least `num_data` once past the last entry).
+pub struct SparseCursor<'a> {
+    bin: &'a SparseBin,
+    i_delta: usize,
+    cur_pos: usize,
+    lower: usize,
+}
+
+impl SparseCursor<'_> {
+    /// The bin stored for `row` (0 when none is stored).
+    #[inline]
+    pub fn get(&mut self, row: usize) -> u32 {
+        let b = self.bin;
+        let num_vals = b.num_vals();
+        if row < self.lower {
+            self.seek(row);
+        }
+        while self.cur_pos < row {
+            self.lower = self.cur_pos + 1;
+            self.i_delta += 1;
+            if self.i_delta >= num_vals {
+                self.cur_pos = b.num_data;
+                break;
+            }
+            self.cur_pos += b.deltas[self.i_delta] as usize;
+        }
+        if self.cur_pos == row && self.i_delta < num_vals {
+            b.val(self.i_delta)
+        } else {
+            0
+        }
+    }
+
+    /// Restart at the fast-index entry covering `row`: the first entry at or after the
+    /// slot's first row, so every earlier entry lies before that row.
+    fn seek(&mut self, row: usize) {
+        let b = self.bin;
+        let slot = row >> b.fast_index_shift;
+        match b.fast_index.get(slot) {
+            Some(&(i_delta, cur_pos)) if i_delta < b.num_vals() => {
+                self.i_delta = i_delta;
+                self.cur_pos = cur_pos;
+                self.lower = slot << b.fast_index_shift;
+            }
+            _ => {
+                self.i_delta = 0;
+                self.cur_pos = b.deltas.first().map_or(b.num_data, |&d| d as usize);
+                self.lower = 0;
+            }
+        }
     }
 }
 
@@ -264,6 +348,67 @@ mod tests {
         d.set(1, 2);
         assert_eq!(d.get(0), 3);
         assert_eq!(d.get(1), 2);
+    }
+
+    /// Seeded sparse columns: densities, long gaps (> 255 rows) and fast-index shifts vary.
+    fn sparse_cases() -> Vec<(SparseBin, Vec<u32>)> {
+        let mut rng = crate::utils::random::Random::new(11);
+        let mut out = Vec::new();
+        for &(num_data, density, num_bin) in &[
+            (0usize, 0.0f32, 4u32),
+            (1, 1.0, 4),
+            (7, 0.5, 4),
+            (300, 0.01, 4),
+            (1000, 0.0, 4),
+            (5000, 0.002, 300),
+            (20_000, 0.05, 70_000),
+            (20_000, 0.6, 16),
+        ] {
+            let mut pairs = Vec::new();
+            for row in 0..num_data {
+                if rng.next_float() < density {
+                    pairs.push((row, 1 + rng.next_short(0, (num_bin - 1) as i32) as u32));
+                }
+            }
+            let mut dense = vec![0u32; num_data];
+            for &(r, v) in &pairs {
+                dense[r] = v;
+            }
+            out.push((
+                SparseBin::from_sorted_pairs(num_data, num_bin, &pairs),
+                dense,
+            ));
+        }
+        out
+    }
+
+    #[test]
+    fn sparse_cursor_matches_decoded_bins_in_any_access_order() {
+        let mut rng = crate::utils::random::Random::new(12);
+        for (bin, dense) in sparse_cases() {
+            assert_eq!(bin.to_dense(), dense);
+            let mut cur = bin.cursor();
+            for (row, &want) in dense.iter().enumerate() {
+                assert_eq!(cur.get(row), want, "ascending row {row}");
+            }
+            let mut cur = bin.cursor();
+            for row in (0..dense.len()).rev() {
+                assert_eq!(cur.get(row), dense[row], "descending row {row}");
+            }
+            let mut cur = bin.cursor();
+            for _ in 0..dense.len().min(3000) {
+                let row = rng.next_short(0, dense.len() as i32) as usize;
+                assert_eq!(cur.get(row), dense[row], "random row {row}");
+            }
+            let mut seen = vec![0u32; dense.len()];
+            let mut last = None;
+            bin.for_each_nonzero(|row, v| {
+                assert!(last.is_none_or(|l| l < row), "rows ascend");
+                last = Some(row);
+                seen[row] = v;
+            });
+            assert_eq!(seen, dense);
+        }
     }
 
     #[test]

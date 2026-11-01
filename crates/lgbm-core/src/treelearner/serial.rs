@@ -18,6 +18,7 @@ use crate::io::bin::BinType;
 use crate::io::bin_data::BinData;
 use crate::io::dataset::{Dataset, GroupData};
 use crate::tree::Tree;
+use crate::treelearner::multi_val::MultiValBin;
 use crate::utils::common::construct_bitset;
 use crate::utils::random::Random;
 
@@ -125,8 +126,13 @@ pub struct SerialTreeLearner {
     /// Length in bins of each feature's histogram slice (`num_bin - offset`).
     feature_hist_len: Vec<usize>,
     pool: HistogramPool,
-    /// One verified dense column per feature group (see `histogram::CheckedBins`).
-    checked_bins: Vec<histogram::BinsCheck>,
+    /// One verified dense column per single-value feature group (see
+    /// `histogram::CheckedBins`); `None` for the multi-value group.
+    checked_bins: Vec<Option<histogram::BinsCheck>>,
+    /// The multi-value group (at most one) and its row-wise bins.
+    multi_val: Option<(usize, MultiValBin)>,
+    /// Per-block histograms of the multi-value group, reused across leaves.
+    multi_val_scratch: Vec<f64>,
     col_sampler: ColSampler,
     splits: Vec<SplitRecord>,
     pub partition: DataPartition,
@@ -158,18 +164,31 @@ impl SerialTreeLearner {
     /// upstream: `SerialTreeLearner::Init` (col-wise histogram layout).
     pub fn new(cfg: Arc<Config>, ds: Arc<Dataset>, is_constant_hessian: bool) -> Result<Self> {
         let l = &ds.layout;
-        if l.groups.iter().any(|g| g.is_multi_val) {
-            return Err(Error::Unsupported(
-                "training with multi-value (sparse) feature groups".into(),
-            ));
-        }
         if cfg.histogram_pool_size > 0.0 {
             return Err(Error::Unsupported(
                 "histogram_pool_size > 0 (LRU histogram cache)".into(),
             ));
         }
         let mut checked_bins = Vec::with_capacity(l.groups.len());
+        let mut multi_val = None;
         for (gi, g) in l.groups.iter().enumerate() {
+            if g.is_multi_val {
+                // upstream: GetMultiBinFromSparseFeatures ("There should be only one
+                // multi-val group").
+                let GroupData::Multi(cols) = &ds.data[gi] else {
+                    return Err(Error::Parse(format!(
+                        "feature group {gi} is multi-value but has no per-feature columns"
+                    )));
+                };
+                if multi_val.is_some() {
+                    return Err(Error::Parse(
+                        "more than one multi-value feature group".into(),
+                    ));
+                }
+                multi_val = Some((gi, MultiValBin::from_group(g, cols, ds.num_data())));
+                checked_bins.push(None);
+                continue;
+            }
             let GroupData::Single(BinData::Dense(bin)) = &ds.data[gi] else {
                 return Err(Error::Unsupported("sparse single-value group".into()));
             };
@@ -179,17 +198,21 @@ impl SerialTreeLearner {
                     "feature group {gi} has a bin outside its range"
                 )));
             };
-            checked_bins.push(checked);
+            checked_bins.push(Some(checked));
         }
         let num_features = l.num_features;
         let mut metas = Vec::with_capacity(num_features);
         let mut feature_hist_offsets = Vec::with_capacity(num_features);
         let mut feature_hist_len = Vec::with_capacity(num_features);
-        // upstream TrainingShareStates::CalcBinOffsets (col-wise, single-value groups)
+        // upstream TrainingShareStates::CalcBinOffsets (col-wise). A dense multi-value
+        // group keeps bin 0 of features whose most frequent bin is 0, so their histograms
+        // start one bin later.
         let mut hist_cur_num_bin = 0usize;
         for g in &l.groups {
             for i in 0..g.bin_mappers.len() {
-                feature_hist_offsets.push(hist_cur_num_bin + g.bin_offsets[i] as usize);
+                let skip_zero =
+                    usize::from(g.is_dense_multi_val && g.bin_mappers[i].most_freq_bin == 0);
+                feature_hist_offsets.push(hist_cur_num_bin + g.bin_offsets[i] as usize + skip_zero);
             }
             hist_cur_num_bin += *g.bin_offsets.last().unwrap_or(&0) as usize;
         }
@@ -234,6 +257,8 @@ impl SerialTreeLearner {
             feature_hist_len,
             pool: HistogramPool::new(num_leaves, hist_cur_num_bin.max(1), num_features),
             checked_bins,
+            multi_val,
+            multi_val_scratch: Vec::new(),
             col_sampler,
             splits: Vec::new(),
             partition: DataPartition::new(num_data, num_leaves),
@@ -473,17 +498,24 @@ impl SerialTreeLearner {
         );
         let hist = &mut self.pool.slots[slot];
         let mut group_start = 0usize;
+        let mut multi_val_start = None;
         for (gi, g) in l.groups.iter().enumerate() {
             let num_bin = *g.bin_offsets.last().unwrap_or(&0) as usize;
             let fs = l.group_feature_start[gi] as usize;
             let fc = l.group_feature_cnt[gi] as usize;
-            if (fs..fs + fc).any(|f| is_feature_used[f]) {
+            if g.is_multi_val {
+                if (fs..fs + fc).any(|f| is_feature_used[f]) {
+                    multi_val_start = Some(group_start);
+                }
+            } else if (fs..fs + fc).any(|f| is_feature_used[f]) {
                 let out = &mut hist[group_start * 2..(group_start + num_bin) * 2];
                 out.fill(0.0);
-                let GroupData::Single(BinData::Dense(bin)) = &ds.data[gi] else {
+                let (GroupData::Single(BinData::Dense(bin)), Some(check)) =
+                    (&ds.data[gi], self.checked_bins[gi])
+                else {
                     unreachable!("checked in new()")
                 };
-                let checked = histogram::CheckedBins::with(bin, self.checked_bins[gi]);
+                let checked = histogram::CheckedBins::with(bin, check);
                 histogram::construct(&checked, rows.as_ref(), og, oh, const_hess, out);
                 if const_hess {
                     let h0 = f64::from(hessians[0]);
@@ -493,6 +525,30 @@ impl SerialTreeLearner {
                 }
             }
             group_start += num_bin;
+        }
+        // upstream: ConstructHistogramsMultiVal after the dense groups. Values are the same
+        // whether upstream reads gathered (`ORDERED`) or indexed derivatives, so position
+        // `i` of the gathered arrays is used. It always accumulates the actual hessians:
+        // unlike dense groups there is no count-times-`hessians[0]` path.
+        if let (Some(start), Some((_, mv))) = (multi_val_start, self.multi_val.as_ref()) {
+            let num_threads = if self.cfg.num_threads > 0 {
+                self.cfg.num_threads as usize
+            } else {
+                rayon::current_num_threads()
+            };
+            let h0 = hessians.first().copied().unwrap_or(0.0);
+            let grad_at = |i: usize, _row: usize| og[i];
+            let hess_at = |i: usize, _row: usize| if const_hess { h0 } else { oh[i] };
+            let out = &mut hist[start * 2..];
+            mv.construct(
+                indices,
+                leaf_cnt,
+                num_threads,
+                &grad_at,
+                &hess_at,
+                out,
+                &mut self.multi_val_scratch,
+            );
         }
     }
 

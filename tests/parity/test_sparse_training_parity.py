@@ -194,11 +194,6 @@ def test_sparse_bundled_features_match_upstream(fmt: str) -> None:
         assert ours == theirs, params
 
 
-@pytest.mark.xfail(
-    raises=lgb.LightGBMError,
-    strict=True,
-    reason="ROADMAP P2: MultiValBin (training with multi-value feature groups)",
-)
 def test_sparse_training_with_multi_value_groups() -> None:
     x, y = _data()
     ours, theirs = _both(scipy.sparse.csr_matrix(x), y, {"enable_bundle": True})
