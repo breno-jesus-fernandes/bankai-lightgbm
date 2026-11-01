@@ -168,7 +168,15 @@ impl GbdtTrainer {
         }
         t.gradients.copy_from_slice(gradients);
         t.hessians.copy_from_slice(hessians);
-        Ok(t.train_one_iter())
+        Ok(t.train_one_iter_with(true))
+    }
+
+    /// The raw training score, class-major (`num_class * num_data`), including the init
+    /// score, as a custom objective receives it (upstream `LGBM_BoosterGetPredict(0)`). With
+    /// DART this applies the current iteration's drop first, once; [`Self::update_custom`]
+    /// then trains on that dropped score.
+    pub fn training_score(&mut self) -> &[f64] {
+        self.trainer.training_score()
     }
 
     /// Completed iterations.
@@ -235,6 +243,9 @@ struct DartState {
     sum_weight: f64,
     drop_index: Vec<usize>,
     rng: Random,
+    /// Whether this iteration's trees were already dropped (upstream
+    /// `is_update_score_cur_iter_`, which upstream leaves uninitialized; `false` here).
+    dropped_this_iter: bool,
 }
 
 /// upstream `std::min(a, b)`: `b` only when strictly smaller.
@@ -301,6 +312,7 @@ impl Trainer {
                 sum_weight: 0.0,
                 drop_index: Vec::new(),
                 rng: Random::new(drop_seed),
+                dropped_this_iter: false,
             }),
             shrinkage: learning_rate,
             model_learning_rate: learning_rate,
@@ -427,7 +439,26 @@ impl Trainer {
     }
 
     /// upstream: `GBDT::TrainOneIter` (built-in objective). Returns `true` when finished.
+    /// The training score (class-major) that a custom objective is given. For DART this
+    /// first drops this iteration's trees, once per iteration
+    /// (upstream: src/boosting/dart.hpp (v4.7.0) `DART::GetTrainingScore`).
+    fn training_score(&mut self) -> &[f64] {
+        if self.dart.as_ref().is_some_and(|s| !s.dropped_this_iter) {
+            self.dart_drop();
+            if let Some(state) = self.dart.as_mut() {
+                state.dropped_this_iter = true;
+            }
+        }
+        &self.score
+    }
+
+    /// One iteration with the built-in objective (upstream `GBDT::TrainOneIter(nullptr, ..)`).
     fn train_one_iter(&mut self) -> bool {
+        self.train_one_iter_with(false)
+    }
+
+    /// One iteration; `external` means the gradients were supplied by the caller.
+    fn train_one_iter_with(&mut self, external: bool) -> bool {
         if self.rf {
             return self.train_one_iter_rf();
         }
@@ -437,8 +468,16 @@ impl Trainer {
         for (k, init) in init_scores.iter_mut().enumerate() {
             *init = self.boost_from_average(k);
         }
-        if self.dart.is_some() {
-            self.dart_drop();
+        // upstream: `DART::TrainOneIter` clears `is_update_score_cur_iter_`, then built-in
+        // objectives drop inside `Boosting()` (via `GetTrainingScore`). External gradients were
+        // computed on a score whose drop already happened in `training_score`; when the caller
+        // never fetched it, drop now so the iteration still applies DART.
+        if let Some(state) = self.dart.as_mut() {
+            let already_dropped = state.dropped_this_iter;
+            state.dropped_this_iter = false;
+            if !external || !already_dropped {
+                self.dart_drop();
+            }
         }
         self.objective
             .get_gradients(&self.score, &mut self.gradients, &mut self.hessians);

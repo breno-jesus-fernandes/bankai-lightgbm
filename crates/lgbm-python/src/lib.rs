@@ -404,6 +404,20 @@ impl NativeBooster {
         Ok(())
     }
 
+    /// The raw training score handed to a custom objective (class-major, init score
+    /// included; DART drops this iteration's trees first), as `LGBM_BoosterGetPredict(0)`.
+    fn training_score<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+        let trainer = self
+            .trainer
+            .as_mut()
+            .ok_or_else(|| LightGBMError::new_err("Booster has no training Dataset"))?;
+        let score = py.allow_threads(|| trainer.training_score().to_vec());
+        Ok(numpy::PyArray1::from_vec(py, score))
+    }
+
     fn update_custom(
         &mut self,
         py: Python<'_>,

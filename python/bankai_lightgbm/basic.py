@@ -732,7 +732,12 @@ class Booster:
             )
             self.pandas_categorical = dataset.pandas_categorical
         if fobj is not None:
-            predictions = self.predict(_internal_rows(self._train_set.data), raw_score=True)
+            # upstream: fobj(self.__inner_predict(data_idx=0), ...) -- the internal raw
+            # training score (init score included; DART drops this iteration's trees first),
+            # class-major and reshaped to (num_data, num_class) in Fortran order.
+            predictions = self._native().training_score()
+            if self.num_model_per_iteration() > 1:
+                predictions = predictions.reshape((-1, self.num_model_per_iteration()), order="F")
             gradients, hessians = fobj(predictions, self._train_set)
             num_class = self.num_model_per_iteration()
             if num_class > 1:

@@ -94,7 +94,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] All metrics: l1/l2/rmse/quantile/huber/fair/poisson/mape/gamma/gamma_deviance/tweedie/r2, ndcg@k, map@k, auc, average_precision, binary_logloss/error, auc_mu, multi_logloss/error (`multi_error_top_k`), cross_entropy, cross_entropy_lambda, kullback_leibler (bit-exact vs upstream on 24 fixtures; wiring into training/early stopping is P5)
 
 ## P5: Boosting variants + training loop
-- [x] DART (`drop_rate`, `max_drop`, `skip_drop`, `xgboost_dart_mode`, `uniform_drop`; byte-identical, 4 fixtures; the drop replays recorded splits on all rows)
+- [x] DART (`drop_rate`, `max_drop`, `skip_drop`, `xgboost_dart_mode`, `uniform_drop`; byte-identical, 4 fixtures; the drop replays recorded splits on all rows; custom objectives see the score after the iteration's drop, as `DART::GetTrainingScore`. Upstream never initializes `is_update_score_cur_iter_`, so with a custom objective its first drop draw is undefined behaviour; bankai uses `false` and reproduces upstream's majority outcome, and parity tests use RNG-independent drop settings)
 - [x] RF (`boosting=rf`, byte-identical; known gap: a first tree with no split is scored on out-of-bag rows only, matching upstream's non-subset path, the subset path is not modelled)
 - [x] GOSS (`data_sample_strategy=goss`, byte-identical; both the subset and dense regimes)
 - [x] Early stopping (`early_stopping_round`, `first_metric_only`, `early_stopping_min_delta`; validation metrics and callback parity)

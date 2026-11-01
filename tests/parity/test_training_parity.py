@@ -476,6 +476,15 @@ def test_train_rejects_unimplemented_options() -> None:
     assert str(got.value) == str(want.value)
 
 
+# Upstream's DART never initializes ``is_update_score_cur_iter_`` (src/boosting/dart.hpp
+# (v4.7.0)), and with a custom objective the first ``GetTrainingScore`` reads it to decide
+# whether to draw from the drop RNG, so upstream's own trees vary between processes for
+# default DART settings. With ``skip_drop=0`` and uniform drops at ``drop_rate=1`` every draw
+# passes its threshold, so the outcome no longer depends on that draw, and trees are
+# dropped on every iteration (which is what these tests need to exercise).
+_DART_RNG_INDEPENDENT: dict[str, Any] = {"skip_drop": 0.0, "uniform_drop": True, "drop_rate": 1.0}
+
+
 @pytest.mark.parametrize("boosting", ["gbdt", "dart", "rf"])
 def test_custom_regression_objective_matches_upstream(boosting: str) -> None:
     rng = np.random.default_rng(501)
@@ -500,6 +509,8 @@ def test_custom_regression_objective_matches_upstream(boosting: str) -> None:
         "deterministic": True,
         "force_col_wise": True,
     }
+    if boosting == "dart":
+        params.update(_DART_RNG_INDEPENDENT)
     if boosting == "rf":
         for library in (lgb, lightgbm):
             with pytest.raises(library.basic.LightGBMError, match="RF mode do not support custom"):
@@ -1374,3 +1385,97 @@ def test_early_stopping_rounds_type_error_like_upstream() -> None:
             _early_stopping_outcome(library, {"metric": "l2"}, 3, {"stopping_rounds": 1.5})
         errors.append(str(err.value))
     assert errors[0] == errors[1]
+
+
+def _capture_fobj_inputs(
+    library: Any, params: dict[str, Any], x: np.ndarray, y: np.ndarray, rounds: int, **ds_kw: Any
+) -> tuple[list[np.ndarray], str]:
+    seen: list[np.ndarray] = []
+
+    def objective(predictions: np.ndarray, dataset: Any) -> tuple[np.ndarray, np.ndarray]:
+        seen.append(np.array(predictions, copy=True))
+        return predictions - dataset.get_label(), np.ones_like(predictions)
+
+    booster = library.train(
+        {**params, "objective": objective}, library.Dataset(x, label=y, **ds_kw), rounds
+    )
+    return seen, booster.model_to_string()
+
+
+# max_drop >= rounds keeps uniform drop_rate = min(1, max_drop / iter) at 1, so the drop RNG
+# never decides (see _DART_RNG_INDEPENDENT); with max_drop=1 upstream itself returns two
+# different models across processes (13/16 vs 3/16 runs; bankai reproduces the majority).
+@pytest.mark.parametrize("max_drop", [5, 50])
+@pytest.mark.parametrize("xgboost_dart_mode", [False, True])
+def test_dart_custom_objective_sees_dropped_training_score(
+    max_drop: int, xgboost_dart_mode: bool
+) -> None:
+    """upstream: Booster.update(fobj) passes LGBM_BoosterGetPredict(0), i.e.
+    DART::GetTrainingScore after this iteration's drop (src/boosting/dart.hpp v4.7.0)."""
+    rng = np.random.default_rng(66)
+    x = rng.normal(size=(120, 3))
+    y = x[:, 0] - 0.4 * x[:, 1]
+    params = {
+        "boosting": "dart",
+        "verbosity": -1,
+        "num_threads": 1,
+        "deterministic": True,
+        "force_col_wise": True,
+        "num_leaves": 5,
+        "min_data_in_leaf": 2,
+        "metric": "None",
+        "max_drop": max_drop,
+        "xgboost_dart_mode": xgboost_dart_mode,
+        **_DART_RNG_INDEPENDENT,
+    }
+    ours, ours_model = _capture_fobj_inputs(lgb, params, x, y, 5)
+    theirs, theirs_model = _capture_fobj_inputs(lightgbm, params, x, y, 5)
+    assert len(ours) == len(theirs) == 5
+    for i, (got, want) in enumerate(zip(ours, theirs, strict=True)):
+        np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-15, err_msg=f"iteration {i}")
+    assert ours_model == theirs_model
+
+
+def test_custom_objective_sees_init_score_like_upstream() -> None:
+    """The training score handed to ``fobj`` starts from the Dataset's init_score."""
+    rng = np.random.default_rng(67)
+    x = rng.normal(size=(100, 3))
+    y = x[:, 0]
+    init = rng.normal(size=100)
+    params = {"verbosity": -1, "num_threads": 1, "deterministic": True, "metric": "None"}
+    ours, ours_model = _capture_fobj_inputs(lgb, params, x, y, 3, init_score=init)
+    theirs, theirs_model = _capture_fobj_inputs(lightgbm, params, x, y, 3, init_score=init)
+    for got, want in zip(ours, theirs, strict=True):
+        np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-15)
+    assert ours_model == theirs_model
+
+
+def test_multiclass_custom_objective_input_shape_like_upstream() -> None:
+    rng = np.random.default_rng(68)
+    x = rng.normal(size=(90, 4))
+    y = np.argmax(x[:, :3], axis=1).astype(float)
+    params = {
+        "verbosity": -1,
+        "num_threads": 1,
+        "deterministic": True,
+        "metric": "None",
+        "num_class": 3,
+    }
+
+    def run(library: Any) -> list[np.ndarray]:
+        seen: list[np.ndarray] = []
+
+        def objective(predictions: np.ndarray, dataset: Any) -> tuple[np.ndarray, np.ndarray]:
+            seen.append(np.array(predictions, copy=True))
+            onehot = np.eye(3)[dataset.get_label().astype(int)]
+            p = np.exp(predictions - predictions.max(axis=1, keepdims=True))
+            p /= p.sum(axis=1, keepdims=True)
+            return p - onehot, p * (1 - p)
+
+        library.train({**params, "objective": objective}, library.Dataset(x, label=y), 3)
+        return seen
+
+    ours, theirs = run(lgb), run(lightgbm)
+    for got, want in zip(ours, theirs, strict=True):
+        assert got.shape == want.shape == (90, 3)
+        np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-15)
