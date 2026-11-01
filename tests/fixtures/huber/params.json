@@ -1,0 +1,12 @@
+{
+ "params": {
+  "deterministic": true,
+  "num_threads": 1,
+  "seed": 42,
+  "verbose": -1,
+  "objective": "huber",
+  "alpha": 0.9
+ },
+ "dataset": {},
+ "num_boost_round": 20
+}

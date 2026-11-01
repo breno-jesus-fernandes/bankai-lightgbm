@@ -1,0 +1,23 @@
+{
+ "params": {
+  "deterministic": true,
+  "num_threads": 1,
+  "seed": 42,
+  "verbose": -1,
+  "objective": "regression",
+  "monotone_constraints": [
+   1,
+   0,
+   -1,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0
+  ]
+ },
+ "dataset": {},
+ "num_boost_round": 20
+}

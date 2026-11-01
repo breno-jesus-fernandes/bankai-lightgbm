@@ -1,0 +1,12 @@
+{
+ "params": {
+  "verbose": -1,
+  "max_cat_to_onehot": 8,
+  "min_data_in_bin": 1
+ },
+ "categorical": [
+  0,
+  1,
+  2
+ ]
+}

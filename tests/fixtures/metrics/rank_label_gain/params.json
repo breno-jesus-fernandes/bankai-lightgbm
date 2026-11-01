@@ -1,0 +1,21 @@
+{
+ "num_threads": 1,
+ "verbose": -1,
+ "seed": 3,
+ "objective": "lambdarank",
+ "metric": [
+  "ndcg",
+  "map"
+ ],
+ "eval_at": [
+  2,
+  4
+ ],
+ "label_gain": [
+  0,
+  1,
+  3,
+  4,
+  10
+ ]
+}

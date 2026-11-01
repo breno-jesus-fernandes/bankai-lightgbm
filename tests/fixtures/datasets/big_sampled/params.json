@@ -1,0 +1,8 @@
+{
+ "params": {
+  "verbose": -1,
+  "bin_construct_sample_cnt": 5000,
+  "data_random_seed": 7
+ },
+ "categorical": []
+}

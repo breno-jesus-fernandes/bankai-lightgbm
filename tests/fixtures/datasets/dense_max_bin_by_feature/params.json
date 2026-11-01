@@ -1,0 +1,16 @@
+{
+ "params": {
+  "verbose": -1,
+  "max_bin_by_feature": [
+   4,
+   8,
+   16,
+   32,
+   64,
+   128,
+   255,
+   3
+  ]
+ },
+ "categorical": []
+}

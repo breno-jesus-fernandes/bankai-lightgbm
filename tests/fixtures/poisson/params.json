@@ -1,0 +1,11 @@
+{
+ "params": {
+  "deterministic": true,
+  "num_threads": 1,
+  "seed": 42,
+  "verbose": -1,
+  "objective": "poisson"
+ },
+ "dataset": {},
+ "num_boost_round": 20
+}

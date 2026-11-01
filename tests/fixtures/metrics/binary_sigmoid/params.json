@@ -1,0 +1,13 @@
+{
+ "num_threads": 1,
+ "verbose": -1,
+ "seed": 3,
+ "objective": "binary",
+ "sigmoid": 0.6,
+ "metric": [
+  "binary_logloss",
+  "binary_error",
+  "auc",
+  "average_precision"
+ ]
+}

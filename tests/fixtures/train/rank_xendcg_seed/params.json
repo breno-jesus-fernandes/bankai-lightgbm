@@ -1,0 +1,14 @@
+{
+ "params": {
+  "deterministic": true,
+  "num_threads": 1,
+  "force_col_wise": true,
+  "seed": 7,
+  "verbose": -1,
+  "objective": "rank_xendcg",
+  "num_leaves": 7,
+  "objective_seed": 11
+ },
+ "num_boost_round": 10,
+ "categorical": []
+}

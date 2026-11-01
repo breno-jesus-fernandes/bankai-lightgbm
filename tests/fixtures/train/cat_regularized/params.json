@@ -1,0 +1,22 @@
+{
+ "params": {
+  "deterministic": true,
+  "num_threads": 1,
+  "force_col_wise": true,
+  "seed": 7,
+  "verbose": -1,
+  "objective": "regression",
+  "num_leaves": 15,
+  "cat_smooth": 5.0,
+  "cat_l2": 3.0,
+  "min_data_per_group": 40,
+  "max_cat_threshold": 8,
+  "lambda_l2": 1.0
+ },
+ "num_boost_round": 15,
+ "categorical": [
+  0,
+  4,
+  5
+ ]
+}

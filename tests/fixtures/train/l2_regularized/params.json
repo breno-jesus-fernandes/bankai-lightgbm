@@ -1,0 +1,16 @@
+{
+ "params": {
+  "deterministic": true,
+  "num_threads": 1,
+  "force_col_wise": true,
+  "seed": 7,
+  "verbose": -1,
+  "objective": "regression",
+  "lambda_l1": 0.5,
+  "lambda_l2": 2.0,
+  "min_gain_to_split": 0.01,
+  "min_sum_hessian_in_leaf": 5.0
+ },
+ "num_boost_round": 15,
+ "categorical": []
+}

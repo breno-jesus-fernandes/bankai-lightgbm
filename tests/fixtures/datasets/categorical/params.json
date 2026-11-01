@@ -1,0 +1,11 @@
+{
+ "params": {
+  "verbose": -1
+ },
+ "categorical": [
+  0,
+  1,
+  2,
+  3
+ ]
+}

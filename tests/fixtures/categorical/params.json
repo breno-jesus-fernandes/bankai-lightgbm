@@ -1,0 +1,16 @@
+{
+ "params": {
+  "deterministic": true,
+  "num_threads": 1,
+  "seed": 42,
+  "verbose": -1,
+  "objective": "regression",
+  "num_leaves": 15
+ },
+ "dataset": {
+  "categorical_feature": [
+   4
+  ]
+ },
+ "num_boost_round": 20
+}

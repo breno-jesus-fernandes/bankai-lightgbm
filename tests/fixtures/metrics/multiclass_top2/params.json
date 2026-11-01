@@ -1,0 +1,13 @@
+{
+ "num_threads": 1,
+ "verbose": -1,
+ "seed": 3,
+ "objective": "multiclass",
+ "num_class": 4,
+ "multi_error_top_k": 2,
+ "metric": [
+  "multi_logloss",
+  "multi_error",
+  "auc_mu"
+ ]
+}

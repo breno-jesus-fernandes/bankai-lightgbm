@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Rust
+target/
+**/*.rs.bk
+
+# Python extension builds
+*.so
+*.pyd

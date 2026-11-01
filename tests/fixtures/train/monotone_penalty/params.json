@@ -1,0 +1,16 @@
+{
+ "params": {
+  "deterministic": true,
+  "num_threads": 1,
+  "force_col_wise": true,
+  "seed": 7,
+  "verbose": -1,
+  "objective": "regression",
+  "num_leaves": 31,
+  "monotone_constraints": "-1,1,0,0,0,1",
+  "monotone_penalty": 1.5,
+  "min_data_in_leaf": 10
+ },
+ "num_boost_round": 15,
+ "categorical": []
+}

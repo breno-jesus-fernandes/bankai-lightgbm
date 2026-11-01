@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/breno-jesus-fernandes/bankai-lightgbm"
+rust-version = "1.97"
+
+[workspace.dependencies]
+lgbm-core = { path = "crates/lgbm-core" }
+lgbm-io = { path = "crates/lgbm-io" }
+thiserror = "2"
+rayon = "1"
+log = "0.4"
+
+[workspace.lints.rust]
+# `deny`, not `forbid`: allow-listed hot modules opt in with `#[allow(unsafe_code)]`
+# and a SAFETY comment per block (see AGENTS.md).
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+
+[profile.bench]
+inherits = "release"
+debug = true
