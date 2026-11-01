@@ -237,6 +237,10 @@ class _DummyLogger:
 _LOGGER: Any = _DummyLogger()
 
 
+def _log_info(msg: str) -> None:
+    _LOGGER.info(msg)
+
+
 def _log_warning(msg: str) -> None:
     _LOGGER.warning(msg)
 
@@ -550,6 +554,8 @@ class Booster:
     ) -> None:
         self.params: dict[str, Any] = deepcopy(params) if params else {}
         self.best_iteration = -1
+        # Name under which the training data is evaluated when passed in ``valid_sets``.
+        self._train_data_name = "training"
         self.best_score: dict[str, dict[str, float]] = {}
         self._train_set = train_set
         self._handle: NativeBooster | None = None

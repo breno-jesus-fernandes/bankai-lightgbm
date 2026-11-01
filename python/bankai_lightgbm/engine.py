@@ -73,6 +73,8 @@ def train(
     booster = Booster(params=params, train_set=train_set)
     if init_model is not None:
         booster._continue_from(init_model)
+    # upstream: engine.py (v4.7.0) train() resets it after constructing the Booster.
+    booster.best_iteration = 0
     if valid_sets is None and not callbacks and fobj is None:
         booster._train(num_boost_round)
         return booster
@@ -85,8 +87,16 @@ def train(
         eval_sets = list(valid_sets)
     if valid_names is not None and len(valid_names) != len(eval_sets):
         raise ValueError("Length of valid_names does not match valid_sets")
-    names = valid_names or [f"valid_{i}" for i in range(len(eval_sets))]
-    for valid_set, name in zip(eval_sets, names, strict=True):
+    # upstream: engine.py (v4.7.0) train(). The training set is evaluated first, under
+    # ``valid_names[i]`` or "training"; other sets keep their original index in "valid_{i}".
+    named: list[tuple[Dataset, str]] = []
+    for i, valid_set in enumerate(eval_sets):
+        if valid_set is train_set:
+            booster._train_data_name = valid_names[i] if valid_names is not None else "training"
+            named.insert(0, (valid_set, booster._train_data_name))
+        else:
+            named.append((valid_set, valid_names[i] if valid_names is not None else f"valid_{i}"))
+    for valid_set, name in named:
         booster.add_valid(valid_set, name)
 
     callback_list: list[Callable[[CallbackEnv], None]] = list(callbacks or [])

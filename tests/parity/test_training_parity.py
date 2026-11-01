@@ -1262,3 +1262,102 @@ def test_conflicting_num_iterations_aliases_warn_like_upstream() -> None:
 
     assert all(m.startswith(prefix) for m in messages)
     assert split(messages[0]) == split(messages[1])
+
+
+def _early_stopping_outcome(
+    library: Any, params: dict[str, Any], rounds: int, callback_kw: dict[str, Any], **train_kw: Any
+) -> tuple[int, int, dict[str, Any]]:
+    rng = np.random.default_rng(65)
+    x = rng.normal(size=(600, 4))
+    y = x[:, 0] + 0.5 * np.sin(3 * x[:, 1]) + rng.normal(size=600) * 0.3
+    train = library.Dataset(x[:400], y[:400])
+    valid = library.Dataset(x[400:], y[400:], reference=train)
+    valid_sets = train_kw.pop("valid_sets", None)
+    booster = library.train(
+        {"verbose": -1, "num_threads": 1, "deterministic": True, "seed": 3, **params},
+        train,
+        num_boost_round=rounds,
+        valid_sets=[valid]
+        if valid_sets is None
+        else [train if v == "train" else valid for v in valid_sets],
+        callbacks=[library.early_stopping(**callback_kw)],
+        **train_kw,
+    )
+    best = {k: dict(v) for k, v in booster.best_score.items()}
+    return booster.best_iteration, booster.num_trees(), best
+
+
+@pytest.mark.parametrize(
+    ("params", "rounds", "callback_kw"),
+    [
+        # never stops: upstream still reports the best iteration on the final round
+        ({"metric": "l2"}, 15, {"stopping_rounds": 50, "verbose": False}),
+        # several metrics: the first one that goes stale decides
+        (
+            {"metric": ["l2", "l1"], "learning_rate": 0.5},
+            60,
+            {"stopping_rounds": 2, "verbose": False},
+        ),
+        (
+            {"metric": ["l1", "l2"], "learning_rate": 0.5},
+            60,
+            {"stopping_rounds": 2, "verbose": False},
+        ),
+        (
+            {"metric": ["l2", "l1"], "learning_rate": 0.5},
+            60,
+            {"stopping_rounds": 2, "verbose": False, "first_metric_only": True},
+        ),
+        (
+            {"metric": ["l2", "l1"], "learning_rate": 0.5},
+            60,
+            {"stopping_rounds": 2, "verbose": False, "min_delta": [0.01, 0.0]},
+        ),
+        # disabled with stopping_rounds <= 0
+        ({"metric": "l2"}, 8, {"stopping_rounds": 0, "verbose": False}),
+    ],
+)
+def test_early_stopping_scenarios_match_upstream(
+    params: dict[str, Any], rounds: int, callback_kw: dict[str, Any]
+) -> None:
+    """upstream: callback.py (v4.7.0) _EarlyStoppingCallback."""
+    ours = _early_stopping_outcome(lgb, params, rounds, callback_kw)
+    theirs = _early_stopping_outcome(lightgbm, params, rounds, callback_kw)
+    assert ours == theirs
+
+
+def test_early_stopping_is_disabled_for_dart_like_upstream() -> None:
+    for library in (lgb, lightgbm):
+        with pytest.warns(UserWarning, match="Early stopping is not available in dart mode"):
+            best_iteration, num_trees, _ = _early_stopping_outcome(
+                library,
+                {"metric": "l2", "boosting": "dart"},
+                6,
+                {"stopping_rounds": 1, "verbose": False},
+            )
+        assert (best_iteration, num_trees) == (0, 6)
+
+
+def test_early_stopping_with_only_the_training_set_is_disabled_like_upstream() -> None:
+    outcomes = []
+    for library in (lgb, lightgbm):
+        with pytest.warns(UserWarning, match="Only training set found, disabling early stopping."):
+            outcomes.append(
+                _early_stopping_outcome(
+                    library,
+                    {"metric": "l2"},
+                    6,
+                    {"stopping_rounds": 1, "verbose": False},
+                    valid_sets=["train"],
+                )
+            )
+    assert outcomes[0] == outcomes[1]
+
+
+def test_early_stopping_rounds_type_error_like_upstream() -> None:
+    errors = []
+    for library in (lgb, lightgbm):
+        with pytest.raises(TypeError) as err:
+            _early_stopping_outcome(library, {"metric": "l2"}, 3, {"stopping_rounds": 1.5})
+        errors.append(str(err.value))
+    assert errors[0] == errors[1]

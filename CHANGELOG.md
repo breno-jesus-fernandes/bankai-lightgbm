@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `early_stopping` now follows upstream exactly: metrics are checked in order and the first one that stops improving decides, `best_score` holds that iteration's full evaluation list, the best iteration is also reported when training ends without stopping, `min_delta` accepts a list, `stopping_rounds <= 0` disables it (non-integers raise `TypeError`), and DART or training-set-only evaluation disable it with upstream's warnings. `train` sets `best_iteration = 0` and names a training set passed in `valid_sets` `"training"` (evaluated first), like upstream.
+
 - `train` and `cv` resolve the number of boosting rounds like upstream: `num_iterations` or any of its aliases in `params` (e.g. `n_estimators`) take precedence over `num_boost_round`, conflicting aliases warn, and the chosen value is recorded in the model's parameters on every path (previously training with `valid_sets` or callbacks recorded the default `100`). Invalid counts raise upstream's message.
 
 - `Booster.predict` accepts `scipy.sparse` CSR and CSC matrices natively (normal, raw score, leaf index and SHAP), matching upstream bit for bit without densifying the whole matrix; other sparse formats are converted with upstream's "Converting data to scipy sparse matrix." warning. `pred_contrib` on sparse input returns a sparse matrix of the same format (a list per class for multiclass) with upstream's stored entries and the input's float dtype.
