@@ -108,9 +108,7 @@ _DARWIN_PATH_SMOOTH = pytest.mark.xfail(
 @pytest.mark.parametrize("fmt", ["dense", "csr", "csc"])
 @pytest.mark.parametrize(
     "name",
-    [
-        name for name in CONFIGS
-    ],
+    [name for name in CONFIGS],
 )
 def test_multi_value_training_matches_upstream(fmt: str, name: str) -> None:
     x, y = _mixed()
