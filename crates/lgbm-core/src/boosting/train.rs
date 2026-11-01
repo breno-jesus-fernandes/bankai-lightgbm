@@ -90,6 +90,29 @@ impl GbdtTrainer {
         })
     }
 
+    /// Continue training after `init`'s trees (upstream `GBDT::MergeFrom`): the initial trees
+    /// come first and new trees follow. The dataset's `init_score` must hold `init`'s raw
+    /// predictions, as upstream's Python layer sets them; the trainer starts from those scores.
+    pub fn with_init_model(cfg: Arc<Config>, ds: Arc<Dataset>, init: &Gbdt) -> Result<Self> {
+        if cfg.boosting == "dart" {
+            return Err(Error::Unsupported("init_model with boosting=dart".into()));
+        }
+        if ds.metadata.init_score.is_empty() {
+            return Err(Error::InvalidParameter(
+                "continued training needs the init model's predictions as init_score".into(),
+            ));
+        }
+        let mut trainer = Self::new(cfg, ds)?;
+        let ntpi = trainer.trainer.num_tree_per_iteration;
+        if !init.models.len().is_multiple_of(ntpi) {
+            return Err(Error::InvalidParameter(
+                "init_model tree count does not match the number of classes".into(),
+            ));
+        }
+        trainer.trainer.models = init.models.clone();
+        Ok(trainer)
+    }
+
     /// One boosting iteration. Returns `true` when no tree could split any further.
     pub fn update_one_iter(&mut self) -> bool {
         self.trainer.train_one_iter()

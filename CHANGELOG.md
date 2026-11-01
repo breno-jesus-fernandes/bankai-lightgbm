@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Support `init_model` continued training for gbdt (file path or Booster, including multiclass and validation callbacks), matching upstream trees and predictions. DART with `init_model` is rejected explicitly; non-Booster, non-path objects raise `TypeError` where upstream silently ignores them.
+
 - Support `init_score` in Dataset (class-major, 2-D Fortran-order flattening like upstream): training starts from the scores without the automatic boost-from-average, validation metrics include them, subsets select them per class, and random forest rejects them as upstream does.
 
 - Accept negative query sizes as upstream does (non-ranking objectives train normally); ranking objectives now raise a clear error instead of aborting.

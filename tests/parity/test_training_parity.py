@@ -463,7 +463,8 @@ def test_custom_evaluation_matches_upstream_train_and_cv() -> None:
 def test_train_rejects_unimplemented_options() -> None:
     x = np.random.default_rng(0).normal(size=(40, 2))
     ds = lgb.Dataset(x, label=x[:, 0], params={"verbose": -1})
-    with pytest.raises(NotImplementedError, match="init_model"):
+    # Upstream silently ignores unknown init_model objects; bankai raises instead.
+    with pytest.raises(TypeError, match="init_model"):
         lgb.train({"verbose": -1}, ds, init_model=object())
     referenced = lgb.Dataset(x, label=x[:, 0], reference=ds)
     assert referenced.construct().num_data() == len(x)
@@ -960,3 +961,73 @@ def test_random_forest_rejects_init_score_like_upstream() -> None:
     dataset = lgb.Dataset(x, label=y, init_score=np.ones(60), params=params)
     with pytest.raises(lgb.LightGBMError, match="init_score"):
         lgb.train(params, dataset, num_boost_round=1)
+
+
+@pytest.mark.parametrize("source", ["booster", "file"])
+def test_init_model_continuation_matches_upstream(source: str, tmp_path: Path) -> None:
+    # upstream: GBDT::MergeFrom keeps the initial model's trees first, and the new trees are
+    # trained on its raw predictions (passed as init_score). The parameters block records the
+    # rounds of the continued call only.
+    rng = np.random.default_rng(41)
+    x = rng.normal(size=(60, 3))
+    y = x[:, 0] - x[:, 1]
+    params = {**_init_score_params(), "objective": "regression"}
+    results = []
+    for library in (lightgbm, lgb):
+        base = library.train(params, library.Dataset(x, label=y, params=params), num_boost_round=3)
+        if source == "file":
+            path = tmp_path / f"{library.__name__}.txt"
+            base.save_model(str(path))
+            init_model: Any = str(path)
+        else:
+            init_model = base
+        continued = library.train(
+            params,
+            library.Dataset(x, label=y, params=params),
+            num_boost_round=2,
+            init_model=init_model,
+        )
+        results.append((continued.model_to_string(), continued.predict(x)))
+    assert results[1][0] == results[0][0]
+    np.testing.assert_allclose(results[1][1], results[0][1], rtol=1e-12, atol=1e-15)
+
+
+def test_multiclass_init_model_continuation_matches_upstream() -> None:
+    rng = np.random.default_rng(42)
+    x = rng.normal(size=(90, 3))
+    y = np.argmax(x, axis=1).astype(float)
+    params = {**_init_score_params(), "objective": "multiclass", "num_class": 3}
+    results = []
+    for library in (lightgbm, lgb):
+        base = library.train(params, library.Dataset(x, label=y, params=params), num_boost_round=2)
+        continued = library.train(
+            params, library.Dataset(x, label=y, params=params), num_boost_round=2, init_model=base
+        )
+        results.append(continued.predict(x, raw_score=True))
+    np.testing.assert_allclose(results[1], results[0], rtol=1e-12, atol=1e-15)
+
+
+def test_init_model_with_validation_callbacks_matches_upstream() -> None:
+    rng = np.random.default_rng(43)
+    x = rng.normal(size=(80, 3))
+    y = x[:, 0] + rng.normal(scale=0.1, size=80)
+    x_valid = rng.normal(size=(30, 3))
+    y_valid = x_valid[:, 0]
+    params = {**_init_score_params(), "objective": "regression", "metric": "l2"}
+    curves = []
+    for library in (lightgbm, lgb):
+        base = library.train(params, library.Dataset(x, label=y, params=params), num_boost_round=2)
+        train = library.Dataset(x, label=y, params=params)
+        valid = library.Dataset(x_valid, label=y_valid, reference=train, params=params)
+        record: dict[str, Any] = {}
+        library.train(
+            params,
+            train,
+            num_boost_round=3,
+            init_model=base,
+            valid_sets=[valid],
+            valid_names=["valid"],
+            callbacks=[library.record_evaluation(record)],
+        )
+        curves.append(record["valid"]["l2"])
+    np.testing.assert_allclose(curves[1], curves[0], rtol=1e-12, atol=1e-15)

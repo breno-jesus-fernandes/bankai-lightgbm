@@ -99,6 +99,19 @@ impl NativeDataset {
         self.ds.num_data()
     }
 
+    /// A copy of this dataset with the init score replaced (class-major; empty clears it).
+    /// The binned data is copied; the raw matrix is shared.
+    fn with_init_score(&self, init_score: Vec<f64>) -> PyResult<Self> {
+        let mut ds = (*self.ds).clone();
+        ds.set_init_score(&init_score).map_err(to_py)?;
+        Ok(NativeDataset {
+            ds: Arc::new(ds),
+            data: Arc::clone(&self.data),
+            nrow: self.nrow,
+            ncol: self.ncol,
+        })
+    }
+
     fn num_feature(&self) -> usize {
         self.ds.layout.num_total_features
     }
@@ -152,17 +165,23 @@ impl NativeBooster {
 
     /// Train `num_iterations` rounds on `dataset` (`LGBM_BoosterCreate` + `UpdateOneIter`).
     #[staticmethod]
+    #[pyo3(signature = (params, dataset, init_model=None))]
     fn train(
         py: Python<'_>,
         params: HashMap<String, String>,
         dataset: PyRef<'_, NativeDataset>,
+        init_model: Option<PyRef<'_, NativeBooster>>,
     ) -> PyResult<Self> {
         let ds = Arc::clone(&dataset.ds);
+        let init = init_model.map(|m| m.model.clone());
         let (trainer, model) = py
             .allow_threads(|| -> lgbm_core::Result<(GbdtTrainer, Gbdt)> {
                 let cfg = Config::from_params(&params)?;
                 let cfg = Arc::new(cfg);
-                let mut trainer = GbdtTrainer::new(Arc::clone(&cfg), ds)?;
+                let mut trainer = match &init {
+                    Some(init) => GbdtTrainer::with_init_model(Arc::clone(&cfg), ds, init)?,
+                    None => GbdtTrainer::new(Arc::clone(&cfg), ds)?,
+                };
                 for _ in 0..cfg.num_iterations {
                     if trainer.update_one_iter() {
                         break;
@@ -179,16 +198,22 @@ impl NativeBooster {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (params, dataset, init_model=None))]
     fn create_training(
         py: Python<'_>,
         params: HashMap<String, String>,
         dataset: PyRef<'_, NativeDataset>,
+        init_model: Option<PyRef<'_, NativeBooster>>,
     ) -> PyResult<Self> {
         let ds = Arc::clone(&dataset.ds);
+        let init = init_model.map(|m| m.model.clone());
         let trainer = py
             .allow_threads(|| -> lgbm_core::Result<GbdtTrainer> {
-                let cfg = Config::from_params(&params)?;
-                GbdtTrainer::new(Arc::new(cfg), ds)
+                let cfg = Arc::new(Config::from_params(&params)?);
+                match &init {
+                    Some(init) => GbdtTrainer::with_init_model(cfg, ds, init),
+                    None => GbdtTrainer::new(cfg, ds),
+                }
             })
             .map_err(to_py)?;
         let model = trainer.snapshot();

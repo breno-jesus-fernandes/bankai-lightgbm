@@ -290,6 +290,16 @@ class Dataset:
             raise LightGBMError("Dataset is not constructed")
         return self._handle
 
+    def set_init_score(self, init_score: Any) -> Dataset:
+        """Set the init score; constructed handles are updated in place."""
+        self.init_score = init_score
+        flat = _init_score_values(init_score, self.num_data()) if init_score is not None else []
+        if self._handle is not None:
+            self._handle = self._handle.with_init_score(flat)
+        if self._evaluation_handle is not None:
+            self._evaluation_handle = self._evaluation_handle.with_init_score(flat)
+        return self
+
     def _construct_for_eval(self) -> NativeDataset:
         if self._evaluation_handle is None:
             if self._handle is not None:
@@ -386,6 +396,8 @@ class Booster:
         self.best_score: dict[str, dict[str, float]] = {}
         self._train_set = train_set
         self._handle: NativeBooster | None = None
+        # Trees of the model that continued training starts from (``init_model``).
+        self._init_model: NativeBooster | None = None
         self.valid_sets: list[tuple[Dataset, str]] = []
         if train_set is not None:
             if model_file is not None or model_str is not None:
@@ -417,7 +429,35 @@ class Booster:
         if dataset._categorical:
             merged["categorical_feature"] = ",".join(str(c) for c in dataset._categorical)
         merged["num_iterations"] = num_boost_round
-        self._handle = NativeBooster.train(_params_to_strings(merged), dataset._handle_or_raise())
+        self._handle = NativeBooster.train(
+            _params_to_strings(merged), dataset._handle_or_raise(), self._init_model
+        )
+        self.pandas_categorical = dataset.pandas_categorical
+
+    def _continue_from(self, init_model: Any) -> None:
+        """Start training after ``init_model``'s trees (upstream ``LGBM_BoosterMerge``).
+
+        The init model's raw predictions on the training data become the training init score,
+        so the new trees fit what the initial trees leave over.
+        """
+        if self._train_set is None:
+            raise LightGBMError("Booster has no training Dataset")
+        if isinstance(init_model, Booster):
+            init = init_model
+        elif isinstance(init_model, (str, Path)):
+            init = Booster(model_file=init_model)
+        else:
+            # Upstream silently ignores other objects; bankai refuses them instead.
+            raise TypeError("init_model should be a Booster or a path to a model file")
+        dataset = self._train_set
+        if dataset.init_score is not None:
+            warnings.warn(
+                "The init_score will be overridden by the prediction of init_model.",
+                UserWarning,
+                stacklevel=3,
+            )
+        dataset.set_init_score(init.predict(dataset.data, raw_score=True))
+        self._init_model = init._native()
         self.pandas_categorical = dataset.pandas_categorical
 
     def update(self, train_set: Dataset | None = None, fobj: Any = None) -> bool:
@@ -438,7 +478,7 @@ class Booster:
             if dataset._categorical:
                 merged["categorical_feature"] = ",".join(str(c) for c in dataset._categorical)
             self._handle = NativeBooster.create_training(
-                _params_to_strings(merged), dataset._handle_or_raise()
+                _params_to_strings(merged), dataset._handle_or_raise(), self._init_model
             )
             self.pandas_categorical = dataset.pandas_categorical
         if fobj is not None:
@@ -532,6 +572,7 @@ class Booster:
         this = self.__dict__.copy()
         this.pop("train_set", None)
         this.pop("valid_sets", None)
+        this.pop("_init_model", None)
         this["_handle"] = self.model_to_string(num_iteration=-1)
         return this
 
@@ -541,6 +582,7 @@ class Booster:
             state["_handle"] = NativeBooster.from_string(model_str)
         state.setdefault("_train_set", None)
         state.setdefault("valid_sets", [])
+        state.setdefault("_init_model", None)
         self.__dict__.update(state)
 
     def model_from_string(self, model_str: str) -> Booster:

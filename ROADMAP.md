@@ -96,7 +96,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] RF (`boosting=rf`, byte-identical; known gap: a first tree with no split is scored on out-of-bag rows only, matching upstream's non-subset path, the subset path is not modelled)
 - [x] GOSS (`data_sample_strategy=goss`, byte-identical; both the subset and dense regimes)
 - [x] Early stopping (`early_stopping_round`, `first_metric_only`, `early_stopping_min_delta`; validation metrics and callback parity)
-- [ ] Continued training (`init_model`); `init_score` ✅ (byte-identical training, multiclass, validation metrics, subsets; RF rejects it like upstream)
+- [ ] Continued training: `init_model` ✅ for gbdt/multiclass (file, Booster, validation and callbacks; DART rejected for now); `init_score` ✅ (byte-identical training, multiclass, validation metrics, subsets; RF rejects it like upstream)
 - [ ] Model merge/shuffle, `set_leaf_output`, `rollback_one_iter`
 
 ## P6: Python package (drop-in)

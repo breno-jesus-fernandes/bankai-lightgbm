@@ -41,8 +41,6 @@ def train(
     """
     if num_boost_round <= 0:
         raise ValueError("num_boost_round should be greater than zero.")
-    if init_model is not None:
-        raise NotImplementedError("init_model is not implemented yet (roadmap P5)")
     params = dict(params)
     # upstream: engine.py::_choose_param_value, objective aliases (v4.7.0).
     objective_aliases = ("objective", "app", "loss", "application", "objective_type")
@@ -61,6 +59,8 @@ def train(
         train_set.categorical_feature = categorical_feature
     train_set.params.update(params)
     booster = Booster(params=params, train_set=train_set)
+    if init_model is not None:
+        booster._continue_from(init_model)
     if valid_sets is None and not callbacks and fobj is None:
         booster._train(num_boost_round)
         return booster
