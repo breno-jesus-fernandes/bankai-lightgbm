@@ -1180,3 +1180,21 @@ def test_extra_trees_matches_upstream(seed: int) -> None:
         results.append((booster.model_to_string(), booster.predict(x)))
     assert results[1][0] == results[0][0]
     np.testing.assert_allclose(results[1][1], results[0][1], rtol=1e-12, atol=1e-15)
+
+
+def test_bagging_by_query_is_rejected_until_ported() -> None:
+    # Upstream samples whole queries for bagging_by_query=true. bankai does not port that
+    # yet, so it must refuse rather than silently bag rows.
+    rng = np.random.default_rng(62)
+    x = rng.normal(size=(12, 3))
+    params = {
+        "verbosity": -1,
+        "objective": "lambdarank",
+        "bagging_by_query": True,
+        "bagging_freq": 1,
+        "bagging_fraction": 0.5,
+        "min_data_in_leaf": 1,
+    }
+    dataset = lgb.Dataset(x, label=np.arange(12) % 3, group=[4, 4, 4], params=params)
+    with pytest.raises(lgb.LightGBMError, match="bagging_by_query"):
+        lgb.train(params, dataset, num_boost_round=1)
