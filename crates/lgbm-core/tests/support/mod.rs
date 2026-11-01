@@ -197,6 +197,51 @@ fn ulp_distance(a: f64, b: f64) -> u64 {
     key(a).abs_diff(key(b))
 }
 
+/// Compares trained model text with a fixture. On the fixture platform it must match exactly.
+/// Elsewhere, upstream's rounding differs between compilers (AGENTS.md section 4), so every
+/// float may differ by up to 64 ULPs; keys, integer fields and line counts must still match
+/// exactly, and `tree_sizes` (byte counts that follow from the digits) is not compared.
+/// Returns a description of the first mismatch, or `None`.
+pub fn model_text_mismatch(case: &Path, ours: &str, want: &str) -> Option<String> {
+    let max_ulps = if on_fixture_platform() { 0 } else { 64 };
+    let (ol, wl): (Vec<&str>, Vec<&str>) = (ours.lines().collect(), want.lines().collect());
+    if ol.len() != wl.len() {
+        return Some(format!(
+            "{}: {} lines, want {}",
+            case.display(),
+            ol.len(),
+            wl.len()
+        ));
+    }
+    for (i, (a, b)) in ol.iter().zip(&wl).enumerate() {
+        if a == b || (max_ulps > 0 && a.starts_with("tree_sizes=")) {
+            continue;
+        }
+        let same_fields = match (a.split_once('='), b.split_once('=')) {
+            (Some((ka, va)), Some((kb, vb))) if max_ulps > 0 && ka == kb => {
+                let (fa, fb): (Vec<&str>, Vec<&str>) =
+                    (va.split(' ').collect(), vb.split(' ').collect());
+                fa.len() == fb.len()
+                    && fa.iter().zip(&fb).all(|(x, y)| {
+                        x == y
+                            || matches!(
+                                (x.parse::<f64>(), y.parse::<f64>()),
+                                (Ok(p), Ok(q)) if ulp_distance(p, q) <= max_ulps
+                            )
+                    })
+            }
+            _ => false,
+        };
+        if !same_fields {
+            return Some(format!(
+                "{}: line {i}\n  ours {a}\n  want {b}",
+                case.display()
+            ));
+        }
+    }
+    None
+}
+
 /// Bit-exact comparison on the fixture platform; elsewhere allow a few ULPs, since
 /// upstream's own rounding differs between compilers/architectures (see AGENTS.md).
 pub fn assert_bits_eq(case: &Path, what: &str, got: &[f64], want: &[f64]) {

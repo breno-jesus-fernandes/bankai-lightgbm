@@ -22,8 +22,8 @@ classifiers = [
 pandas = ["pandas>=2.0"]
 arrow = ["pyarrow>=14"]
 scikit-learn = ["scikit-learn>=1.3"]
-plotting = ["matplotlib>=3.7", "graphviz"]
-dev = ["maturin>=1.7,<2", "pytest>=8", "ruff", "mypy", "lightgbm==4.7.0", "pandas>=2.0", "scikit-learn>=1.3", "psutil", "cloudpickle", "joblib", "matplotlib>=3.7", "graphviz"]
+plotting = ["matplotlib>=3.7"]
+dev = ["maturin>=1.7,<2", "pytest>=8", "ruff", "mypy", "lightgbm==4.7.0", "pandas>=2.0", "scikit-learn>=1.3", "psutil", "cloudpickle", "joblib", "matplotlib>=3.7"]
 
 [tool.maturin]
 manifest-path = "crates/lgbm-python/Cargo.toml"
