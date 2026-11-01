@@ -66,7 +66,7 @@ strict = true
 files = ["python/bankai_lightgbm", "scripts"]
 
 [[tool.mypy.overrides]]
-module = ["pandas", "pandas.*", "scipy", "scipy.*", "sklearn", "sklearn.*", "lightgbm", "lightgbm.*", "joblib", "joblib.*", "psutil", "graphviz", "graphviz.*"]
+module = ["pandas", "pandas.*", "scipy", "scipy.*", "sklearn", "sklearn.*", "lightgbm", "lightgbm.*", "joblib", "joblib.*", "psutil", "graphviz", "matplotlib", "matplotlib.*", "graphviz.*"]
 ignore_missing_imports = true
 
 # Ported from upstream LightGBM (MIT, see THIRD_PARTY_NOTICES.md). Its annotations are looser than
