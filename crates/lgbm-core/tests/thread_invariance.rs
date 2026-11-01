@@ -1,6 +1,6 @@
-//! Training output must not depend on `num_threads`. The parallel split search and the
-//! multi-value histograms split their work across threads but keep every sum in the same
-//! order, so the model text is identical for any thread count.
+//! Training output must not depend on `num_threads`. Threads split work (multi-value
+//! histograms, and any parallel region added later) but keep every sum in the same order,
+//! so the model text is identical for any thread count.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::HashMap;
@@ -60,8 +60,9 @@ fn train_text(num_threads: u32, x: &[f64], y: &[f64], nrow: usize, ncol: usize) 
 
 #[test]
 fn model_text_is_independent_of_num_threads() {
-    // 120 features with up to 255 bins each: well above the parallel-search threshold.
-    let (nrow, ncol) = (4000, 120);
+    // Large enough that any parallel region for split search or partitioning would run
+    // (40k rows, 40 features with up to 255 bins each), and a bundled multi-value group.
+    let (nrow, ncol) = (40_000, 40);
     let (x, y) = synthetic(nrow, ncol);
     let serial = train_text(1, &x, &y, nrow, ncol);
     assert!(serial.contains("Tree=14"), "expected 15 trees in the model");

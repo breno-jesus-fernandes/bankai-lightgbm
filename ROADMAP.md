@@ -86,6 +86,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [ ] `refit`, `deterministic`
 - **Gate:** identical trees on fixed seeds; training as fast as upstream
 - Bench note (`benches/bench_train.py`, linux/x86_64 2 vCPU, training only, 50 rounds): 1 thread at parity (dense 1.04x, multi-value group 0.95–0.97x); no thread scaling yet (0.47–0.68x at 2 threads): split finding, sparse partition and single-group histograms run serially, while upstream parallelizes them. Benchmark a release build (`maturin develop -r`); `scripts/check.sh` installs a debug build.
+- Thread scaling (open): per-feature split search and block-parallel partitioning were tried on rayon and measured neutral on this 2-vCPU VM (interleaved A/B, within noise). A fork/join after a serial gap costs about 15–30 µs here, which cancels the gain for regions of 8–30k bins or rows; upstream's OpenMP threads spin instead of sleeping. Next options: coarser regions (whole feature groups or leaves per task), or a worker pool that spins between regions. Both need a design decision before implementation.
 
 ## P4: Objectives + metrics
 - [x] Regression: `l2`, `l1`, `huber`, `fair`, `poisson`, `quantile`, `mape`, `gamma`, `tweedie` (byte-identical training, weighted and unweighted)
