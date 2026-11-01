@@ -70,3 +70,76 @@ def test_ranker_predictions_match_upstream() -> None:
     want = up.LGBMRanker(**PARAMS).fit(x, relevance, group=group).predict(x)
     got = bk.LGBMRanker(**PARAMS).fit(x, relevance, group=group).predict(x)
     np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-15)
+
+
+def test_eval_set_and_early_stopping_match_upstream() -> None:
+    x, y = _data(n=900)
+    xtr, ytr, xva, yva = x[:600], y[:600], x[600:], y[600:]
+    params = dict(PARAMS, n_estimators=200)
+    want = up.LGBMRegressor(**params).fit(
+        xtr,
+        ytr,
+        eval_set=[(xva, yva)],
+        eval_metric="l2",
+        callbacks=[up.early_stopping(5, verbose=False)],
+    )
+    got = bk.LGBMRegressor(**params).fit(
+        xtr,
+        ytr,
+        eval_set=[(xva, yva)],
+        eval_metric="l2",
+        callbacks=[bk.early_stopping(5, verbose=False)],
+    )
+    assert got.best_iteration_ == want.best_iteration_
+    assert list(got.evals_result_) == list(want.evals_result_)
+    np.testing.assert_allclose(
+        got.evals_result_["valid_0"]["l2"], want.evals_result_["valid_0"]["l2"], rtol=1e-12
+    )
+    np.testing.assert_allclose(got.predict(xva), want.predict(xva), rtol=1e-12, atol=1e-15)
+
+
+def test_multiclass_matches_upstream() -> None:
+    x, y = _data(n=900)
+    labels = np.digitize(y, np.quantile(y, [1 / 3, 2 / 3]))
+    want = up.LGBMClassifier(**PARAMS).fit(x, labels)
+    got = bk.LGBMClassifier(**PARAMS).fit(x, labels)
+    assert got.n_classes_ == want.n_classes_ == 3
+    np.testing.assert_allclose(got.predict_proba(x), want.predict_proba(x), rtol=1e-12, atol=1e-15)
+    np.testing.assert_array_equal(got.predict(x), want.predict(x))
+
+
+def test_feature_importances_match_upstream() -> None:
+    x, y = _data()
+    want = up.LGBMRegressor(**PARAMS).fit(x, y)
+    got = bk.LGBMRegressor(**PARAMS).fit(x, y)
+    np.testing.assert_array_equal(got.feature_importances_, want.feature_importances_)
+    assert got.n_features_in_ == want.n_features_in_ == x.shape[1]
+
+
+def test_pandas_feature_names_match_upstream() -> None:
+    pd = pytest.importorskip("pandas")
+    x, y = _data()
+    df = pd.DataFrame(x, columns=[f"f{i}" for i in range(x.shape[1])])
+    want = up.LGBMRegressor(**PARAMS).fit(df, y)
+    got = bk.LGBMRegressor(**PARAMS).fit(df, y)
+    assert list(got.feature_names_in_) == list(want.feature_names_in_)
+    np.testing.assert_allclose(got.predict(df), want.predict(df), rtol=1e-12, atol=1e-15)
+
+
+def test_mismatched_lengths_raise_like_upstream() -> None:
+    # sklearn validates the inputs before LightGBM sees them, so both raise the same error.
+    x, y = _data()
+    with pytest.raises(ValueError):
+        up.LGBMRegressor(**PARAMS).fit(x, y[:-1])
+    with pytest.raises(ValueError):
+        bk.LGBMRegressor(**PARAMS).fit(x, y[:-1])
+
+
+def test_pandas_model_text_matches_upstream() -> None:
+    pd = pytest.importorskip("pandas")
+    x, y = _data()
+    df = pd.DataFrame(x, columns=[f"f{i}" for i in range(x.shape[1])])
+    want = up.LGBMRegressor(**PARAMS).fit(df, y).booster_.model_to_string()
+    got = bk.LGBMRegressor(**PARAMS).fit(df, y).booster_.model_to_string()
+    trees = lambda text: text.split("\nparameters:")[0]  # noqa: E731
+    assert trees(got) == trees(want)

@@ -19,6 +19,7 @@ class NativeDataset:
         group: list[int] | None = None,
         reference: NativeDataset | None = None,
         init_score: list[float] | None = None,
+        feature_names: list[str] | None = None,
     ) -> NativeDataset: ...
     @staticmethod
     def from_sparse(
@@ -35,6 +36,7 @@ class NativeDataset:
         group: list[int] | None = None,
         reference: NativeDataset | None = None,
         init_score: list[float] | None = None,
+        feature_names: list[str] | None = None,
     ) -> NativeDataset: ...
     def with_init_score(self, init_score: list[float]) -> NativeDataset: ...
     def with_fields(

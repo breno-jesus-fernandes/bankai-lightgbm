@@ -88,7 +88,7 @@ impl NativeDataset {
     /// Bin a dense row-major `float64` matrix (`LGBM_DatasetCreateFromMat`). `params` are
     /// the dataset parameters as strings; `categorical` are column indices.
     #[staticmethod]
-    #[pyo3(signature = (data, label, params, categorical, weight=None, group=None, reference=None, init_score=None))]
+    #[pyo3(signature = (data, label, params, categorical, weight=None, group=None, reference=None, init_score=None, feature_names=None))]
     #[allow(clippy::too_many_arguments)] // Python Dataset constructor arguments.
     fn from_dense(
         py: Python<'_>,
@@ -100,6 +100,7 @@ impl NativeDataset {
         group: Option<Vec<i32>>,
         reference: Option<PyRef<'_, NativeDataset>>,
         init_score: Option<Vec<f64>>,
+        feature_names: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let shape = data.shape().to_vec();
         let values = data
@@ -116,7 +117,9 @@ impl NativeDataset {
                 } else {
                     Dataset::from_dense(&values, nrow, ncol, &label, &cfg, &categorical)?
                 };
-                with_metadata(ds, weight, group, init_score)
+                let mut ds = with_metadata(ds, weight, group, init_score)?;
+                apply_feature_names(&mut ds, feature_names)?;
+                Ok(ds)
             })
             .map_err(to_py)?;
         Ok(NativeDataset {
@@ -132,7 +135,7 @@ impl NativeDataset {
     /// rows in column order first. Other arguments are as for `from_dense`.
     #[staticmethod]
     #[pyo3(signature = (indptr, indices, data, nrow, ncol, is_csc, label, params, categorical,
-        weight=None, group=None, reference=None, init_score=None))]
+        weight=None, group=None, reference=None, init_score=None, feature_names=None))]
     #[allow(clippy::too_many_arguments)] // Python Dataset constructor arguments.
     fn from_sparse(
         py: Python<'_>,
@@ -149,6 +152,7 @@ impl NativeDataset {
         group: Option<Vec<i32>>,
         reference: Option<PyRef<'_, NativeDataset>>,
         init_score: Option<Vec<f64>>,
+        feature_names: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let contiguous = |e: numpy::NotContiguousError| LightGBMError::new_err(e.to_string());
         let (indptr, indices, values) = (
@@ -171,7 +175,8 @@ impl NativeDataset {
                 } else {
                     Dataset::from_csr(&m, &label, &cfg, &categorical)?
                 };
-                let ds = with_metadata(ds, weight, group, init_score)?;
+                let mut ds = with_metadata(ds, weight, group, init_score)?;
+                apply_feature_names(&mut ds, feature_names)?;
                 Ok((ds, RawRows::Csr(indptr, indices, values)))
             })
             .map_err(to_py)?;
@@ -739,6 +744,22 @@ impl NativeBooster {
 }
 
 /// Attach optional weights, query sizes and init scores to a freshly built dataset.
+/// Names the columns (upstream: the `feature_name` of `Dataset`, used as the model's feature
+/// names); `None` keeps the automatic `Column_i` names.
+fn apply_feature_names(ds: &mut Dataset, names: Option<Vec<String>>) -> lgbm_core::Result<()> {
+    if let Some(names) = names {
+        if names.len() != ds.layout.num_total_features {
+            return Err(lgbm_core::Error::InvalidParameter(format!(
+                "Length of feature names ({}) doesn't equal with num_features ({})",
+                names.len(),
+                ds.layout.num_total_features
+            )));
+        }
+        ds.feature_names = names;
+    }
+    Ok(())
+}
+
 fn with_metadata(
     mut ds: Dataset,
     weight: Option<Vec<f32>>,

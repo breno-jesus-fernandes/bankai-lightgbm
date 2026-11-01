@@ -740,6 +740,12 @@ class Dataset:
         if self.init_score is not None:
             init_score = _init_score_values(self.init_score, n)
         reference = self.reference._handle_or_raise() if self.reference is not None else None
+        # upstream: an explicit `feature_name` list wins; else DataFrame columns name the features.
+        names: list[str] | None = None
+        if isinstance(self.feature_name, list):
+            names = [str(name) for name in self.feature_name]
+        elif feature_names is not None:
+            names = feature_names
         if sparse is not None:
             import scipy.sparse
 
@@ -757,6 +763,7 @@ class Dataset:
                 group,
                 reference,
                 init_score,
+                feature_names=names,
             )
         assert matrix is not None
         return NativeDataset.from_dense(
@@ -768,6 +775,7 @@ class Dataset:
             group,
             reference,
             init_score,
+            feature_names=names,
         )
 
 
