@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add custom evaluation functions (`feval`) to training and cross-validation, including multiple metrics returned by one function.
 - Add seeded cross-validation with custom folds, train/validation metric aggregation, callbacks, early stopping, and optional serializable `CVBooster` results.
 - Add `Dataset.subset()` with source bin mapper reuse for fold construction.
 - Add `reset_parameter` schedules for learning rate by list or per-iteration callable.

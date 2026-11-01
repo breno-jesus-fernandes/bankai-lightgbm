@@ -185,6 +185,12 @@ class Dataset:
     def num_feature(self) -> int:
         return self.construct()._handle_or_raise().num_feature()
 
+    def get_label(self) -> npt.NDArray[np.float32] | None:
+        """Return the dataset labels as a one-dimensional float32 array."""
+        if self.label is None:
+            return None
+        return np.asarray(self.label, dtype=np.float32).reshape(-1)
+
     def subset(self, used_indices: Any, params: dict[str, Any] | None = None) -> Dataset:
         """Select rows while reusing this Dataset's bin mappers."""
         self.construct()
@@ -381,14 +387,37 @@ class Booster:
         self.valid_sets.append((data, name))
 
     def eval_valid(self, feval: Any = None) -> list[tuple[str, str, float, bool]]:
-        """Evaluate configured metrics on every registered validation dataset."""
-        if feval is not None:
-            raise NotImplementedError("custom evaluation functions are not implemented yet")
+        """Evaluate configured and custom metrics on registered validation data."""
+        if feval is None:
+            custom_metrics: list[Any] = []
+        elif callable(feval):
+            custom_metrics = [feval]
+        elif isinstance(feval, list):
+            custom_metrics = feval
+        else:
+            raise TypeError("feval should be a callable or a list of callables")
         results: list[tuple[str, str, float, bool]] = []
         for dataset, name in self.valid_sets:
             native_dataset = dataset._construct_for_eval()
             params = {**dataset.params, **self.params}
             results.extend(self._native().eval(native_dataset, _params_to_strings(params), name))
+            if custom_metrics:
+                predictions = self.predict(dataset.data)
+                for custom_metric in custom_metrics:
+                    if custom_metric is None:
+                        continue
+                    metric_results = custom_metric(predictions, dataset)
+                    if not isinstance(metric_results, list):
+                        metric_results = [metric_results]
+                    for metric_result in metric_results:
+                        if len(metric_result) != 3:
+                            raise ValueError(
+                                "custom evaluation must return (name, value, higher_is_better)"
+                            )
+                        metric_name, value, higher_is_better = metric_result
+                        results.append(
+                            (name, str(metric_name), float(value), bool(higher_is_better))
+                        )
         return results
 
     def reset_parameter(self, params: dict[str, Any]) -> None:

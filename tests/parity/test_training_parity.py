@@ -382,11 +382,89 @@ def test_cv_early_stopping_matches_upstream() -> None:
     )
 
 
+def test_custom_evaluation_matches_upstream_train_and_cv() -> None:
+    rng = np.random.default_rng(315)
+    x = rng.normal(size=(72, 3))
+    y = (x[:, 0] - 0.3 * x[:, 1] > 0).astype(float)
+    params: dict[str, Any] = {
+        "objective": "binary",
+        "metric": "None",
+        "verbosity": -1,
+        "num_leaves": 5,
+        "min_data_in_leaf": 2,
+        "min_data_in_bin": 1,
+        "max_bin": 15,
+        "learning_rate": 0.2,
+        "boost_from_average": False,
+        "deterministic": True,
+        "force_col_wise": True,
+        "seed": 315,
+        "num_threads": 1,
+    }
+
+    def custom_mae(predictions: np.ndarray, dataset: Any) -> list[tuple[str, float, bool]]:
+        residual = predictions - dataset.get_label()
+        mae = float(np.mean(np.abs(residual)))
+        rmse = float(np.sqrt(np.mean(residual**2)))
+        return [("custom_mae", mae, False), ("custom_rmse", rmse, False)]
+
+    ours_valid = lgb.Dataset(x, label=y, params=dict(params))
+    theirs_valid = lightgbm.Dataset(x, label=y, params=dict(params))
+    ours = lgb.train(
+        dict(params),
+        lgb.Dataset(x, label=y, params=dict(params)),
+        num_boost_round=3,
+        valid_sets=[ours_valid],
+        valid_names=["valid"],
+        feval=[custom_mae],
+        keep_training_booster=True,
+    )
+    theirs = lightgbm.train(
+        dict(params),
+        lightgbm.Dataset(x, label=y, params=dict(params)),
+        num_boost_round=3,
+        valid_sets=[theirs_valid],
+        valid_names=["valid"],
+        feval=[custom_mae],
+        keep_training_booster=True,
+    )
+    ours_results = ours.eval_valid(feval=custom_mae)
+    theirs_results = theirs.eval_valid(feval=custom_mae)
+    assert [(row[0], row[1], row[3]) for row in ours_results] == [
+        (row[0], row[1], row[3]) for row in theirs_results
+    ]
+    np.testing.assert_allclose(
+        [row[2] for row in ours_results], [row[2] for row in theirs_results], rtol=1e-12
+    )
+
+    ours_cv = lgb.cv(
+        dict(params),
+        lgb.Dataset(x, label=y, params=dict(params)),
+        num_boost_round=3,
+        nfold=3,
+        stratified=False,
+        seed=315,
+        feval=[custom_mae],
+    )
+    theirs_cv = lightgbm.cv(
+        dict(params),
+        lightgbm.Dataset(x, label=y, params=dict(params)),
+        num_boost_round=3,
+        nfold=3,
+        stratified=False,
+        seed=315,
+        feval=[custom_mae],
+    )
+    assert ours_cv.keys() == theirs_cv.keys()
+    for name in theirs_cv:
+        np.testing.assert_allclose(ours_cv[name], theirs_cv[name], rtol=1e-12, atol=1e-15)
+
+
 def test_train_rejects_unimplemented_options() -> None:
     x = np.random.default_rng(0).normal(size=(40, 2))
     ds = lgb.Dataset(x, label=x[:, 0], params={"verbose": -1})
-    with pytest.raises(NotImplementedError, match="feval"):
-        lgb.train({"verbose": -1}, ds, feval=lambda *_: [])
+    with pytest.raises(NotImplementedError, match="init_model"):
+        lgb.train({"verbose": -1}, ds, init_model=object())
     referenced = lgb.Dataset(x, label=x[:, 0], reference=ds)
     with pytest.raises(NotImplementedError, match="shared reference binning"):
         referenced.construct()

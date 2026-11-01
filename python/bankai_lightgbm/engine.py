@@ -41,9 +41,8 @@ def train(
     """
     if num_boost_round <= 0:
         raise ValueError("num_boost_round should be greater than zero.")
-    for name, value in (("feval", feval), ("init_model", init_model)):
-        if value:
-            raise NotImplementedError(f"{name} is not implemented yet (roadmap P5)")
+    if init_model is not None:
+        raise NotImplementedError("init_model is not implemented yet (roadmap P5)")
     params = dict(params)
     if feature_name != "auto":
         train_set.feature_name = feature_name
@@ -108,7 +107,7 @@ def train(
         for callback in before_callbacks:
             callback(before_env)
         finished = booster.update()
-        evaluation_result_list = booster.eval_valid() or None
+        evaluation_result_list = booster.eval_valid(feval=feval) or None
         booster.best_score = {}
         for data_name, metric_name, value, _ in evaluation_result_list or []:
             booster.best_score.setdefault(data_name, {})[metric_name] = value
@@ -145,9 +144,9 @@ class CVBooster:
         """Update every fold model by one boosting iteration."""
         return [booster.update() for booster in self.boosters]
 
-    def eval_valid(self) -> list[list[tuple[str, str, float, bool]]]:
+    def eval_valid(self, feval: Any = None) -> list[list[tuple[str, str, float, bool]]]:
         """Return validation metric results for each fold."""
-        return [booster.eval_valid() for booster in self.boosters]
+        return [booster.eval_valid(feval=feval) for booster in self.boosters]
 
     def reset_parameter(self, params: dict[str, Any]) -> None:
         """Reset the same supported training parameters on every fold model."""
@@ -318,7 +317,7 @@ def cv(
         raise TypeError("cv() only accepts a Dataset as train_set")
     if num_boost_round <= 0:
         raise ValueError("Number of boosting rounds must be greater than 0")
-    for name, value in (("feval", feval), ("init_model", init_model), ("fpreproc", fpreproc)):
+    for name, value in (("init_model", init_model), ("fpreproc", fpreproc)):
         if value is not None:
             raise NotImplementedError(f"{name} is not implemented yet")
     params = dict(params)
@@ -387,7 +386,7 @@ def cv(
         for callback in before_callbacks:
             callback(before_env)
         cvbooster.update()
-        fold_results = cvbooster.eval_valid()
+        fold_results = cvbooster.eval_valid(feval=feval)
         metric_values: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
         metric_flags: dict[tuple[str, str], bool] = {}
         for fold_result in fold_results:
