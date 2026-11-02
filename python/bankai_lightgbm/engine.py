@@ -126,6 +126,9 @@ def train(
             else:
                 named.append((valid_set, given if given is not None else f"valid_{i}"))
         for valid_set, name in named:
+            if valid_set is not train_set:
+                # upstream: engine.py (v4.7.0) train() sets the training Dataset as reference.
+                valid_set.set_reference(train_set)
             booster.add_valid(valid_set, name)
 
         callback_list: list[Callable[[CallbackEnv], None]] = list(callbacks or [])
