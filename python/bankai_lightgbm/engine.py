@@ -170,7 +170,8 @@ def train(
             before_env = CallbackEnv(booster, params, iteration, 0, num_boost_round, None)
             for callback in before_callbacks:
                 callback(before_env)
-            finished = booster.update(fobj=fobj)
+            # upstream: the is_finished return of update is ignored; every round runs.
+            booster.update(fobj=fobj)
             # upstream: an empty list (no validation sets) is passed on, not None.
             evaluation_result_list = booster.eval_valid(feval=feval)
             booster.best_score = {}
@@ -188,8 +189,6 @@ def train(
                 for result in stop.best_score:
                     data_name, metric_name, value = result[0], result[1], result[2]
                     booster.best_score.setdefault(data_name, {})[metric_name] = value
-                break
-            if finished:
                 break
         return _finish_training(booster, keep_training_booster)
     finally:
