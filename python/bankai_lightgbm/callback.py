@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -252,15 +251,10 @@ class _LogEvaluationCallback:
         results = env.evaluation_result_list
         if self.period <= 0 or not results or (env.iteration + 1) % self.period != 0:
             return
-        formatted_results = []
-        for result in results:
-            data_name, metric_name, value, _ = result[:4]
-            formatted = f"{data_name}'s {metric_name}: {value:g}"
-            if self.show_stdv and len(result) == 5:
-                formatted += f" + {result[4]:g}"
-            formatted_results.append(formatted)
-        formatted = "\t".join(formatted_results)
-        logging.getLogger("bankai_lightgbm").info("[%d]\t%s", env.iteration + 1, formatted)
+        from bankai_lightgbm.basic import _log_info
+
+        result = "\t".join(_format_eval_result(x, self.show_stdv) for x in results)
+        _log_info(f"[{env.iteration + 1}]\t{result}")
 
 
 def log_evaluation(period: int = 1, show_stdv: bool = True) -> _LogEvaluationCallback:

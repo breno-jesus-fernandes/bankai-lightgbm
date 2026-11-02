@@ -7,7 +7,6 @@ and with ``lightgbm.train`` (same data, params, weights, groups and categoricals
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 from typing import Any
 
@@ -183,7 +182,7 @@ def test_early_stopping_callback_matches_upstream() -> None:
     assert automatic.current_iteration() == theirs.current_iteration()
 
 
-def test_record_and_log_evaluation_callbacks(caplog: Any) -> None:
+def test_record_and_log_evaluation_callbacks(capsys: Any) -> None:
     rng = np.random.default_rng(32)
     x_train = rng.normal(size=(50, 2))
     y_train = x_train[:, 0] - x_train[:, 1]
@@ -201,7 +200,6 @@ def test_record_and_log_evaluation_callbacks(caplog: Any) -> None:
         "num_threads": 1,
     }
     recorded: dict[str, dict[str, list[float]]] = {}
-    caplog.set_level(logging.INFO, logger="bankai_lightgbm")
     ours = lgb.train(
         dict(params),
         lgb.Dataset(x_train, label=y_train, params=dict(params)),
@@ -210,6 +208,7 @@ def test_record_and_log_evaluation_callbacks(caplog: Any) -> None:
         valid_names=["valid"],
         callbacks=[lgb.record_evaluation(recorded), lgb.log_evaluation(period=1)],
     )
+    ours_lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("[")]
     expected_results: dict[str, dict[str, list[float]]] = {}
     lightgbm.train(
         dict(params),
@@ -225,7 +224,10 @@ def test_record_and_log_evaluation_callbacks(caplog: Any) -> None:
 
     assert recorded.keys() == expected_results.keys()
     np.testing.assert_allclose(recorded["valid"]["l2"], expected_results["valid"]["l2"])
-    assert "[1]\tvalid's l2:" in caplog.text
+    # upstream: log_evaluation prints each line through the same logger as the native library.
+    expected_lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("[")]
+    assert ours_lines[0].startswith("[1]\tvalid's l2: ")
+    assert ours_lines == expected_lines
     assert ours.current_iteration() == 3
 
 
