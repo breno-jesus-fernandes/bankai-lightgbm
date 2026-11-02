@@ -194,6 +194,20 @@ def _load_pandas_categorical(raw: str | None) -> list[list[Any]] | None:
     return None if loaded is None else list(loaded)
 
 
+def _drop_all_ones_weight(weight: Any) -> Any:
+    """Return ``None`` for a weight whose values are all one, as upstream does.
+
+    upstream: python-package/lightgbm/basic.py ``Dataset.set_weight``
+    (``np.all(weight == 1)`` and ``(series == 1).all()`` set the weight to ``None``).
+    """
+    if weight is None or isinstance(weight, (list, tuple)):
+        # upstream compares only arrays and Series; a list's ``== 1`` is a scalar False.
+        return weight
+    if np.all(np.asarray(weight) == 1):
+        return None
+    return weight
+
+
 def _json_default_with_numpy(obj: Any) -> Any:
     """Convert numpy classes to JSON serializable objects."""
     if isinstance(obj, (np.integer, np.floating, np.bool_)):
@@ -774,7 +788,7 @@ class Dataset:
         self.data = data
         self.label = label
         self.reference = reference
-        self.weight = weight
+        self.weight = _drop_all_ones_weight(weight)
         self.group = group
         self.init_score = init_score
         self.feature_name = feature_name
@@ -1005,6 +1019,7 @@ class Dataset:
 
     def set_weight(self, weight: Any) -> Dataset:
         """Set the sample weights; a constructed Dataset is updated in place."""
+        weight = _drop_all_ones_weight(weight)
         self.weight = weight
         if self._handle is not None or self._evaluation_handle is not None:
             values = (
