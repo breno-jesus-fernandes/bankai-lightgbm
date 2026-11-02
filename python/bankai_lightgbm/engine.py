@@ -442,100 +442,107 @@ def cv(
         for alias in ("metric", "metrics", "metric_types"):
             params.pop(alias, None)
         params["metric"] = metrics
+    # upstream: engine.py (v4.7.0) cv(), the Dataset update is reversed when cv returns.
+    params_back_up = dict(train_set.params)
     train_set.params.update(params)
-    folds_list = _make_cv_folds(
-        train_set,
-        folds=folds,
-        nfold=nfold,
-        stratified=stratified,
-        shuffle=shuffle,
-        seed=seed,
-        params=params,
-    )
-    boosters: list[Booster] = []
-    for train_rows, valid_rows in folds_list:
-        fold_train = train_set.subset(train_rows, params)
-        fold_valid = train_set.subset(valid_rows, params)
-        booster = Booster(params=params, train_set=fold_train)
-        if eval_train_metric:
-            booster.add_valid(fold_train, "train")
-        booster.add_valid(fold_valid, "valid")
-        boosters.append(booster)
-    cvbooster = CVBooster(boosters)
-
-    callback_list = list(callbacks or [])
-    early_rounds_value = 0
-    for alias in (
-        "early_stopping_round",
-        "early_stopping_rounds",
-        "early_stopping",
-        "n_iter_no_change",
-    ):
-        if alias in params:
-            early_rounds_value = params[alias]
-            break
-    early_rounds = int(early_rounds_value or 0)
-    if early_rounds > 0 and not any(
-        isinstance(callback, _EarlyStoppingCallback) for callback in callback_list
-    ):
-        callback_list.append(
-            early_stopping(
-                early_rounds,
-                first_metric_only=_to_bool(params.get("first_metric_only", False)),
-                verbose=int(params.get("verbosity", 1)) > 0,
-                min_delta=float(params.get("early_stopping_min_delta", 0.0)),
-            )
+    try:
+        folds_list = _make_cv_folds(
+            train_set,
+            folds=folds,
+            nfold=nfold,
+            stratified=stratified,
+            shuffle=shuffle,
+            seed=seed,
+            params=params,
         )
-    for callback in callback_list:
-        before_training = getattr(callback, "before_training", None)
-        if before_training is not None:
-            before_training(cvbooster)
-    callback_list.sort(key=lambda callback: getattr(callback, "order", 0))
-    before_callbacks = [
-        callback for callback in callback_list if getattr(callback, "before_iteration", False)
-    ]
-    after_callbacks = [
-        callback for callback in callback_list if not getattr(callback, "before_iteration", False)
-    ]
+        boosters: list[Booster] = []
+        for train_rows, valid_rows in folds_list:
+            fold_train = train_set.subset(train_rows, params)
+            fold_valid = train_set.subset(valid_rows, params)
+            booster = Booster(params=params, train_set=fold_train)
+            if eval_train_metric:
+                booster.add_valid(fold_train, "train")
+            booster.add_valid(fold_valid, "valid")
+            boosters.append(booster)
+        cvbooster = CVBooster(boosters)
 
-    results: dict[str, list[float]] = OrderedDict()
-    for iteration in range(num_boost_round):
-        before_env = CallbackEnv(cvbooster, params, iteration, 0, num_boost_round, None)
-        for callback in before_callbacks:
-            callback(before_env)
-        cvbooster.update(fobj=fobj)
-        fold_results = cvbooster.eval_valid(feval=feval)
-        metric_values: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
-        metric_flags: dict[tuple[str, str], bool] = {}
-        for fold_result in fold_results:
-            for data_name, metric_name, value, higher_is_better in fold_result:
-                key = (data_name, metric_name)
-                metric_values.setdefault(key, []).append(value)
-                metric_flags[key] = higher_is_better
-        evaluation_result_list: list[tuple[str, str, float, bool, float]] = []
-        for (data_name, metric_name), values in metric_values.items():
-            mean = float(np.mean(values))
-            std = float(np.std(values))
-            results.setdefault(f"{data_name} {metric_name}-mean", []).append(mean)
-            results.setdefault(f"{data_name} {metric_name}-stdv", []).append(std)
-            evaluation_result_list.append(
-                (data_name, metric_name, mean, metric_flags[(data_name, metric_name)], std)
+        callback_list = list(callbacks or [])
+        early_rounds_value = 0
+        for alias in (
+            "early_stopping_round",
+            "early_stopping_rounds",
+            "early_stopping",
+            "n_iter_no_change",
+        ):
+            if alias in params:
+                early_rounds_value = params[alias]
+                break
+        early_rounds = int(early_rounds_value or 0)
+        if early_rounds > 0 and not any(
+            isinstance(callback, _EarlyStoppingCallback) for callback in callback_list
+        ):
+            callback_list.append(
+                early_stopping(
+                    early_rounds,
+                    first_metric_only=_to_bool(params.get("first_metric_only", False)),
+                    verbose=int(params.get("verbosity", 1)) > 0,
+                    min_delta=float(params.get("early_stopping_min_delta", 0.0)),
+                )
             )
-        after_env = CallbackEnv(
-            cvbooster, params, iteration, 0, num_boost_round, evaluation_result_list or None
-        )
-        try:
-            for callback in after_callbacks:
-                callback(after_env)
-        except EarlyStopException as stop:
-            cvbooster.best_iteration = stop.best_iteration + 1
-            for booster in boosters:
-                booster.best_iteration = cvbooster.best_iteration
-            results = OrderedDict(
-                (name, values[: cvbooster.best_iteration]) for name, values in results.items()
-            )
-            break
+        for callback in callback_list:
+            before_training = getattr(callback, "before_training", None)
+            if before_training is not None:
+                before_training(cvbooster)
+        callback_list.sort(key=lambda callback: getattr(callback, "order", 0))
+        before_callbacks = [
+            callback for callback in callback_list if getattr(callback, "before_iteration", False)
+        ]
+        after_callbacks = [
+            callback
+            for callback in callback_list
+            if not getattr(callback, "before_iteration", False)
+        ]
 
-    if return_cvbooster:
-        results["cvbooster"] = cvbooster  # type: ignore[assignment]
+        results: dict[str, list[float]] = OrderedDict()
+        for iteration in range(num_boost_round):
+            before_env = CallbackEnv(cvbooster, params, iteration, 0, num_boost_round, None)
+            for callback in before_callbacks:
+                callback(before_env)
+            cvbooster.update(fobj=fobj)
+            fold_results = cvbooster.eval_valid(feval=feval)
+            metric_values: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+            metric_flags: dict[tuple[str, str], bool] = {}
+            for fold_result in fold_results:
+                for data_name, metric_name, value, higher_is_better in fold_result:
+                    key = (data_name, metric_name)
+                    metric_values.setdefault(key, []).append(value)
+                    metric_flags[key] = higher_is_better
+            evaluation_result_list: list[tuple[str, str, float, bool, float]] = []
+            for (data_name, metric_name), values in metric_values.items():
+                mean = float(np.mean(values))
+                std = float(np.std(values))
+                results.setdefault(f"{data_name} {metric_name}-mean", []).append(mean)
+                results.setdefault(f"{data_name} {metric_name}-stdv", []).append(std)
+                evaluation_result_list.append(
+                    (data_name, metric_name, mean, metric_flags[(data_name, metric_name)], std)
+                )
+            after_env = CallbackEnv(
+                cvbooster, params, iteration, 0, num_boost_round, evaluation_result_list or None
+            )
+            try:
+                for callback in after_callbacks:
+                    callback(after_env)
+            except EarlyStopException as stop:
+                cvbooster.best_iteration = stop.best_iteration + 1
+                for booster in boosters:
+                    booster.best_iteration = cvbooster.best_iteration
+                results = OrderedDict(
+                    (name, values[: cvbooster.best_iteration]) for name, values in results.items()
+                )
+                break
+
+        if return_cvbooster:
+            results["cvbooster"] = cvbooster  # type: ignore[assignment]
+    finally:
+        train_set.params = params_back_up
     return dict(results)
