@@ -133,6 +133,16 @@ def _typed_param_value(text: str) -> Any:
     return text
 
 
+def _table_column_names(data: Any) -> list[str] | None:
+    """Column names of a pyarrow Table or a polars DataFrame, else ``None``."""
+    module = type(data).__module__
+    if module.startswith("pyarrow") and hasattr(data, "column_names"):
+        return [str(name) for name in data.column_names]
+    if module.startswith("polars") and hasattr(data, "columns") and hasattr(data, "schema"):
+        return [str(name) for name in data.columns]
+    return None
+
+
 def _categorical_indices(
     categorical_feature: Any, feature_names: list[str] | None, pandas_cat_cols: list[int]
 ) -> list[int]:
@@ -1098,6 +1108,10 @@ class Dataset:
         elif _is_sequence_data(self.data):
             matrix = _rows_from_sequences(self.data)
         else:
+            # upstream: _data_from_pyarrow_table and _data_from_polars_frame take the column names.
+            table_columns = _table_column_names(self.data)
+            if table_columns is not None:
+                feature_names = table_columns
             matrix = np.asarray(self.data, dtype=np.float64)
         if matrix is not None:
             if matrix.ndim != 2:
@@ -1675,6 +1689,8 @@ class Booster:
             if validate_features:
                 _validate_feature_names(self.feature_name(), [str(c) for c in data.columns])
             mat = _pandas_to_matrix(data, self.pandas_categorical)
+        elif _table_column_names(data) is not None:
+            mat = np.asarray(data, dtype=np.float64)
         else:
             mat = self._to_dense(data)
         if mat.ndim != 2:
@@ -1700,6 +1716,9 @@ class Booster:
         ``scipy.sparse.csr_matrix`` after logging a warning.
         """
         if isinstance(data, (np.ndarray, list)) or _is_pandas_df(data):
+            return None
+        if _table_column_names(data) is not None:
+            # upstream: dataframe-like inputs (pyarrow Table, polars DataFrame) predict densely.
             return None
         try:
             import scipy.sparse
