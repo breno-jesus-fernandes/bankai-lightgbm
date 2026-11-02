@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `cv` no longer leaves its parameters on the Dataset after it returns, so a later `cv` with other metrics reports only its own metrics, as upstream does.
+
 - `Booster.eval` accepts `feval` (one callable or a list), adding the custom metrics to the built-in ones as upstream does. `eval_valid` shares the same code.
 
 - A parameter given to `train` is no longer kept on the training Dataset after the call, so a later call on the same Dataset does not inherit it (for example GOSS followed by bagging). Upstream restores the Dataset's parameters the same way.
