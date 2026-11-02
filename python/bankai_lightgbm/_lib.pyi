@@ -56,7 +56,10 @@ class NativeDataset:
 class NativeBooster:
     @staticmethod
     def train(
-        params: dict[str, str], dataset: NativeDataset, init_model: NativeBooster | None = None
+        params: dict[str, str],
+        dataset: NativeDataset,
+        init_model: NativeBooster | None = None,
+        warn_config: bool = True,
     ) -> NativeBooster: ...
     @staticmethod
     def create_training(
@@ -124,3 +127,4 @@ class NativeBooster:
     ) -> Any: ...
 
 def param_aliases() -> dict[str, list[str]]: ...
+def validate_params(params: dict[str, str]) -> None: ...

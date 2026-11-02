@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use lgbm_core::boosting::{Gbdt, GbdtTrainer};
 use lgbm_core::config::Config;
@@ -302,18 +303,22 @@ impl NativeBooster {
 
     /// Train `num_iterations` rounds on `dataset` (`LGBM_BoosterCreate` + `UpdateOneIter`).
     #[staticmethod]
-    #[pyo3(signature = (params, dataset, init_model=None))]
+    #[pyo3(signature = (params, dataset, init_model=None, warn_config=true))]
     fn train(
         py: Python<'_>,
         params: HashMap<String, String>,
         dataset: PyRef<'_, NativeDataset>,
         init_model: Option<PyRef<'_, NativeBooster>>,
+        warn_config: bool,
     ) -> PyResult<Self> {
         let ds = Arc::clone(&dataset.ds);
         let init = init_model.map(|m| m.model.clone());
         let (trainer, model) = py
             .allow_threads(|| -> lgbm_core::Result<(GbdtTrainer, Gbdt)> {
-                let cfg = Config::from_params(&params)?;
+                let cfg = {
+                    let _mute = MuteGuard::new(!warn_config);
+                    Config::from_params(&params)?
+                };
                 let cfg = Arc::new(cfg);
                 let mut trainer = match &init {
                     Some(init) => GbdtTrainer::with_init_model(Arc::clone(&cfg), ds, init)?,
@@ -826,13 +831,78 @@ fn param_aliases() -> HashMap<&'static str, Vec<&'static str>> {
         .collect()
 }
 
+/// Forwards the core crate's `log` records (parameter warnings) to the Python logger, as
+/// upstream's log callback does. Routed through `bankai_lightgbm.basic._native_log`.
+struct PyLogger;
+
+impl log::Log for PyLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if !self.enabled(record.metadata()) || CONFIG_LOGS_MUTED.load(Ordering::Relaxed) {
+            return;
+        }
+        let level = if record.level() == log::Level::Warn {
+            "warning"
+        } else {
+            "info"
+        };
+        let message = record.args().to_string();
+        // Logging must never fail the caller: a missing Python side only drops the message.
+        let _ = Python::with_gil(|py| -> PyResult<()> {
+            py.import("bankai_lightgbm.basic")?
+                .call_method1("_native_log", (level, message))?;
+            Ok(())
+        });
+    }
+
+    fn flush(&self) {}
+}
+
+static PY_LOGGER: PyLogger = PyLogger;
+
+/// Set while a config is re-parsed for a call that already reported its warnings (e.g.
+/// `NativeBooster.train` after `validate_params` in the `Booster` constructor), so each
+/// warning is printed once, as upstream does.
+static CONFIG_LOGS_MUTED: AtomicBool = AtomicBool::new(false);
+
+/// Restores the previous mute state when dropped.
+struct MuteGuard(bool);
+
+impl MuteGuard {
+    fn new(mute: bool) -> Self {
+        MuteGuard(CONFIG_LOGS_MUTED.swap(mute, Ordering::Relaxed))
+    }
+}
+
+impl Drop for MuteGuard {
+    fn drop(&mut self) {
+        CONFIG_LOGS_MUTED.store(self.0, Ordering::Relaxed);
+    }
+}
+
+/// Parse `params` the way `LGBM_BoosterCreate` does, raising on invalid values and emitting
+/// the same config warnings (upstream constructs the booster in ``Booster.__init__``).
+#[pyfunction]
+#[pyo3(signature = (params))]
+fn validate_params(params: HashMap<String, String>) -> PyResult<()> {
+    Config::from_params(&params).map(|_| ()).map_err(to_py)
+}
+
 #[pymodule]
 fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Install once per process; a second module init keeps the first logger.
+    if log::set_logger(&PY_LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Info);
+    }
     m.add("UPSTREAM_VERSION", lgbm_core::UPSTREAM_VERSION)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("LightGBMError", m.py().get_type::<LightGBMError>())?;
     m.add_class::<NativeBooster>()?;
     m.add_class::<NativeDataset>()?;
     m.add_function(wrap_pyfunction!(param_aliases, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_params, m)?)?;
     Ok(())
 }
