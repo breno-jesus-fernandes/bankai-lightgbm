@@ -16,7 +16,6 @@ tests/python_package_test/test_basic.py::test_chunked_dataset_linear	linear_tree
 tests/python_package_test/test_basic.py::test_consistent_state_for_dataset_fields	Dataset Python surface, pending items (ROADMAP P6 Dataset)
 tests/python_package_test/test_basic.py::test_dataset_construction_overwrites_user_provided_metadata_fields	Dataset Python surface, pending items (ROADMAP P6 Dataset)
 tests/python_package_test/test_basic.py::test_equal_datasets_from_one_and_several_matrices_w_different_layouts	not triaged (ROADMAP P6 Python package)
-tests/python_package_test/test_basic.py::test_equal_datasets_from_row_major_and_col_major_data	not triaged (ROADMAP P6 Python package)
 tests/python_package_test/test_basic.py::test_feature_names_are_set_correctly_when_no_feature_names_passed_into_Dataset	Dataset Python surface, pending items (ROADMAP P6 Dataset)
 tests/python_package_test/test_basic.py::test_feature_num_bin[10]	not triaged (ROADMAP P6 Python package)
 tests/python_package_test/test_basic.py::test_feature_num_bin[2]	not triaged (ROADMAP P6 Python package)
@@ -110,37 +109,9 @@ tests/python_package_test/test_engine.py::test_verbosity_and_verbose	native log 
 tests/python_package_test/test_engine.py::test_verbosity_can_suppress_alias_warnings[0-verbose]	native log callback not wired, not triaged (ROADMAP P6 Python package)
 tests/python_package_test/test_engine.py::test_verbosity_can_suppress_alias_warnings[0-verbosity]	native log callback not wired, not triaged (ROADMAP P6 Python package)
 tests/python_package_test/test_pandas.py::test_pandas_categorical_encoding	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_categorical_encoding_unseen_category	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_supported_dtypes[dtype0-values0]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_supported_dtypes[dtype1-values1]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_supported_dtypes[dtype10-values10]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_supported_dtypes[dtype11-values11]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_supported_dtypes[dtype2-values2]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_supported_dtypes[dtype3-values3]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_supported_dtypes[dtype4-values4]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_supported_dtypes[dtype5-values5]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_supported_dtypes[dtype6-values6]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_supported_dtypes[dtype7-values7]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_supported_dtypes[dtype8-values8]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_supported_dtypes[dtype9-values9]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
 tests/python_package_test/test_pandas.py::test_pandas_unsupported_dtypes[dtype0-values0]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
 tests/python_package_test/test_pandas.py::test_pandas_unsupported_dtypes[dtype1-values1]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
 tests/python_package_test/test_pandas.py::test_pandas_unsupported_dtypes[dtype2-values2]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
 tests/python_package_test/test_pandas.py::test_pandas_unsupported_dtypes[dtype3-values3]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
 tests/python_package_test/test_utilities.py::test_register_custom_logger	native log callback not wired, not triaged (ROADMAP P6 Python package)
 tests/python_package_test/test_utilities.py::test_register_logger	native log callback not wired, not triaged (ROADMAP P6 Python package)
-tests/python_package_test/test_arrow.py::test_dataset_construct_fuzzy[generate_simple_arrow_table-dataset_params0]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_arrow.py::test_dataset_construct_fuzzy[<lambda>-dataset_params1]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_arrow.py::test_dataset_construct_fuzzy[generate_dummy_arrow_table-dataset_params2]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_arrow.py::test_dataset_construct_fuzzy[<lambda>-dataset_params3]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_arrow.py::test_dataset_construct_fuzzy[<lambda>-dataset_params4]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_arrow.py::test_dataset_construct_fuzzy[<lambda>-dataset_params5]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_arrow.py::test_dataset_construct_fuzzy[<lambda>-dataset_params6]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_arrow.py::test_dataset_construct_fuzzy_boolean	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_polars.py::test_dataset_construct_fuzzy[generate_simple_polars_frame-dataset_params0]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_polars.py::test_dataset_construct_fuzzy[generate_dummy_polars_frame-dataset_params1]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_polars.py::test_dataset_construct_fuzzy[<lambda>-dataset_params2]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_polars.py::test_dataset_construct_fuzzy[<lambda>-dataset_params3]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_polars.py::test_dataset_construct_fuzzy[<lambda>-dataset_params4]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_polars.py::test_dataset_construct_fuzzy[<lambda>-dataset_params5]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_polars.py::test_dataset_construct_fuzzy_boolean	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest

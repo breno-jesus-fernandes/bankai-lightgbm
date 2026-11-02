@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `Dataset._dump_text` writes the bins of every feature in every row, byte-identical to upstream's `Dataset::DumpTextFile` (`tests/parity/test_dataset_dump_parity.py`). Upstream cases that compare dumps (pandas dtypes, row- and column-major construction) now pass.
+
 - `Dataset` accepts `position`, with `set_position`, `get_position` and `get_field("position")` returning dense int32 ids in first-seen order, as upstream does. Subsets keep their parent's ids. Training a ranking objective with positions raises `NotImplementedError` until the position bias is ported (P4).
 
 - `Dataset.subset` of a pyarrow Table or polars DataFrame keeps its type, so `get_data()` returns the table, as upstream does.
@@ -10,7 +12,7 @@
 
 - A weight whose values are all one is stored as `None`, as upstream does (`Dataset(..., weight=...)` and `set_weight`).
 
-- Upstream's `test_arrow.py`, `test_polars.py` and `test_dual.py` are ported to `tests/python_package_test`. Cases that fail are strict `xfail`s naming their ROADMAP item; the arrow/polars ones that remain need `Dataset._dump_text`. `pyarrow` and `polars` join the `dev` extra.
+- Upstream's `test_arrow.py`, `test_polars.py` and `test_dual.py` are ported to `tests/python_package_test`. `pyarrow` and `polars` join the `dev` extra, and every arrow and polars case passes.
 
 - The leaf gain is computed with a fused multiply-add on aarch64, as upstream's arm64 build does (`madd`). On macOS arm64, multi-value training with `path_smooth` chose a different default direction for a missing value than upstream, because the two directions' gains differ only in the last bits; models now match upstream there (`test_multi_value_training_matches_upstream`, previously an xfail on Darwin). Linux and Windows output is unchanged.
 

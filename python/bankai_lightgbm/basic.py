@@ -1087,6 +1087,11 @@ class Dataset:
             self.position = self._position
         return self
 
+    def _dump_text(self, filename: str | Path) -> None:
+        """Write the bins of every feature in every row (upstream ``Dataset._dump_text``)."""
+        self.construct()
+        self._handle_or_raise().dump_text(str(filename))
+
     def get_position(self) -> npt.NDArray[np.int32] | None:
         """Return the position of each row as dense int32 ids (upstream ``get_position``)."""
         return self.get_field("position")

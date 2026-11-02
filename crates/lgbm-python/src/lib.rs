@@ -192,6 +192,12 @@ impl NativeDataset {
         self.ds.num_data()
     }
 
+    /// Write the bin dump to `path` (upstream `Dataset::DumpTextFile`).
+    fn dump_text(&self, path: &str) -> PyResult<()> {
+        std::fs::write(path, lgbm_core::io::dump::dump_text(&self.ds))
+            .map_err(|err| pyo3::exceptions::PyOSError::new_err(err.to_string()))
+    }
+
     /// A copy with any given metadata field replaced (`None` keeps it; an empty list clears).
     fn with_fields(
         &self,
