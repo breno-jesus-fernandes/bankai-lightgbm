@@ -98,7 +98,10 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
+      # Windows pull-request builds failed to link python3.lib with a restored cache (LNK1181);
+      # build from scratch there. Other platforms keep the cache.
+      - if: matrix.os != 'windows-latest'
+        uses: Swatinem/rust-cache@v2
       - name: Install
         shell: bash
         run: |
