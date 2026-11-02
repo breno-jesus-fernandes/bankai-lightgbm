@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `Dataset.save_binary` reports a failed write as upstream does (`Cannot write binary data to <file>, wrote N of M bytes`) instead of the raw OS error.
+
 - Label and weight inputs follow upstream's `_list_to_1d_numpy`: pandas Series with non-numeric dtypes raise `ValueError` naming the bad fields, and nested lists raise `TypeError`.
 
 - `Dataset.feature_num_bin` returns the bins of a feature given by index or name (0 for unused features), as upstream does.

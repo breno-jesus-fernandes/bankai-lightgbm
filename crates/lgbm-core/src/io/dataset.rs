@@ -1271,7 +1271,27 @@ impl Dataset {
             log::warn!("File {} exists, cannot save binary to it", path.display());
             return Ok(());
         }
-        std::fs::write(path, self.to_binary_bytes())?;
+        // upstream: VirtualFileWriter::Write reports how many bytes reached the file.
+        use std::io::{ErrorKind, Write};
+        let bytes = self.to_binary_bytes();
+        let mut file = std::fs::File::create(path)
+            .map_err(|_| crate::Error::BinaryOpen(path.display().to_string()))?;
+        let mut written = 0usize;
+        while written < bytes.len() {
+            match file.write(&bytes[written..]) {
+                Ok(0) => break,
+                Ok(n) => written += n,
+                Err(err) if err.kind() == ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        if written != bytes.len() {
+            return Err(crate::Error::BinaryWrite {
+                path: path.display().to_string(),
+                written,
+                total: bytes.len(),
+            });
+        }
         Ok(())
     }
 }
