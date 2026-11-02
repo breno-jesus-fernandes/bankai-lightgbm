@@ -263,9 +263,27 @@ fn alias_of(name: &str) -> Option<&'static str> {
         .map(|(_, n)| *n)
 }
 
+/// upstream `Config::SetVerbosity`: the log level follows `verbosity` (or `verbose` when
+/// `verbosity` is absent); `verbosity < 0` keeps only errors, `0` warnings, `1` info, more debug.
+/// Unset means no change. Called before any parameter warning, as upstream does.
+pub fn set_verbosity_from_params(params: &HashMap<String, String>) {
+    let raw = params.get("verbosity").or_else(|| params.get("verbose"));
+    let Some(verbosity) = raw.and_then(|v| v.trim().parse::<i32>().ok()) else {
+        return;
+    };
+    let level = match verbosity {
+        v if v < 0 => log::LevelFilter::Error,
+        0 => log::LevelFilter::Warn,
+        1 => log::LevelFilter::Info,
+        _ => log::LevelFilter::Debug,
+    };
+    log::set_max_level(level);
+}
+
 /// upstream `ParameterAlias::KeyAliasTransform`: rename aliases to canonical names.
 /// When several spellings are given, the canonical name wins, then the shortest alias.
 pub fn key_alias_transform(params: &mut HashMap<String, String>) {
+    set_verbosity_from_params(params);
     let mut tmp: HashMap<&'static str, String> = HashMap::new();
     let mut keys: Vec<&String> = params.keys().collect();
     keys.sort(); // deterministic warnings/choices (upstream iterates an unordered_map)
@@ -273,15 +291,18 @@ pub fn key_alias_transform(params: &mut HashMap<String, String>) {
         if let Some(canonical) = alias_of(key) {
             match tmp.get(canonical) {
                 Some(prev) => {
-                    if !sort_alias(prev, key) {
+                    // upstream: src/io/config_auto.cpp / include/LightGBM/config.h KeyAliasTransform
+                    let prev_value = params.get(prev).cloned().unwrap_or_default();
+                    let value = params.get(key).cloned().unwrap_or_default();
+                    if sort_alias(prev, key) {
                         warn(&format!(
-                            "{canonical} is set with {prev}, will be overridden by {key}"
+                            "{canonical} is set with {prev}={prev_value}, {key}={value} will be ignored. Current value: {canonical}={prev_value}"
                         ));
-                        tmp.insert(canonical, key.clone());
                     } else {
                         warn(&format!(
-                            "{canonical} is set with {prev}, {key} will be ignored"
+                            "{canonical} is set with {prev}={prev_value}, will be overridden by {key}={value}. Current value: {canonical}={value}"
                         ));
+                        tmp.insert(canonical, key.clone());
                     }
                 }
                 None => {
@@ -293,8 +314,11 @@ pub fn key_alias_transform(params: &mut HashMap<String, String>) {
         }
     }
     for (canonical, alias) in tmp {
-        if params.contains_key(canonical) {
-            warn(&format!("{canonical} is set, {alias} will be ignored"));
+        if let Some(canonical_value) = params.get(canonical).cloned() {
+            let alias_value = params.get(&alias).cloned().unwrap_or_default();
+            warn(&format!(
+                "{canonical} is set={canonical_value}, {alias}={alias_value} will be ignored. Current value: {canonical}={canonical_value}"
+            ));
         } else if let Some(v) = params.get(&alias).cloned() {
             params.insert(canonical.to_string(), v);
             params.remove(&alias);
@@ -330,13 +354,18 @@ pub fn str2map(parameters: &str) -> Result<HashMap<String, String>> {
             warn(&format!("Unknown parameter {arg}"));
         }
     }
+    let mut first_values = HashMap::new();
+    for key in &order {
+        first_values.insert(key.clone(), all[key][0].clone());
+    }
+    set_verbosity_from_params(&first_values);
     let mut params = HashMap::new();
     for key in order {
         let values = &all[&key];
         for extra in &values[1..] {
             warn(&format!(
-                "{key} is set={}, {key}={extra} will be ignored",
-                values[0]
+                "{key} is set={}, {key}={extra} will be ignored. Current value: {key}={}",
+                values[0], values[0]
             ));
         }
         params.insert(key, values[0].clone());
@@ -585,9 +614,12 @@ impl Config {
         if self.max_depth > 0 && !num_leaves_given {
             let full = 2f64.powi(self.max_depth);
             if full > f64::from(self.num_leaves) {
-                warn(
-                    "Provided parameters constrain tree depth (max_depth) without explicitly setting 'num_leaves'.",
-                );
+                warn(&format!(
+                    "Provided parameters constrain tree depth (max_depth={}) without explicitly setting 'num_leaves'. \
+                     This can lead to underfitting. To resolve this warning, pass 'num_leaves' (<={:.0}) in params. \
+                     Alternatively, pass (max_depth=-1) and just use 'num_leaves' to constrain model complexity.",
+                    self.max_depth, full
+                ));
             }
             if full < f64::from(self.num_leaves) {
                 self.num_leaves = full as i32;

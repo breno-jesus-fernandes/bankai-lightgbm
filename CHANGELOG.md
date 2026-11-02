@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Config warnings reach Python: the native library logs through `PyLogger`, so `[LightGBM] [Warning] ...` lines print as upstream does. `Booster(params, train_set=...)` validates its parameters when constructed, so the `max_depth` warning (raised for `max_depth >= 5` with `num_leaves` omitted) and the alias conflict warnings match upstream's text and timing.
+
 - `Dataset.construct` sets `feature_name` to the resolved names, and `set_feature_name` marks them as user-set and checks their length, as upstream does.
 
 - `Dataset._dump_text` writes the bins of every feature in every row, byte-identical to upstream's `Dataset::DumpTextFile` (`tests/parity/test_dataset_dump_parity.py`). Upstream cases that compare dumps (pandas dtypes, row- and column-major construction) now pass.

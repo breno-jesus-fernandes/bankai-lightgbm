@@ -20,7 +20,7 @@ import numpy as np
 import numpy.typing as npt
 import scipy.sparse
 
-from bankai_lightgbm._lib import LightGBMError, NativeBooster, NativeDataset
+from bankai_lightgbm._lib import LightGBMError, NativeBooster, NativeDataset, validate_params
 from bankai_lightgbm.compat import PANDAS_INSTALLED
 from bankai_lightgbm.compat import pd_DataFrame as pd_DataFrame
 from bankai_lightgbm.compat import pd_Series as pd_Series
@@ -508,6 +508,12 @@ def register_logger(
     _LOGGER = logger
     _INFO_METHOD_NAME = info_method_name
     _WARNING_METHOD_NAME = warning_method_name
+
+
+def _native_log(level: str, msg: str) -> None:
+    """Route a warning or info record from the native library, as upstream's log callback does."""
+    label = "Warning" if level == "warning" else "Info"
+    _log_info(f"[LightGBM] [{label}] {msg}")
 
 
 def _log_info(msg: str) -> None:
@@ -1301,7 +1307,11 @@ class Booster:
             self.valid_sets: list[tuple[Dataset, str]] = []
             if model_file is not None or model_str is not None:
                 raise TypeError("Booster cannot take both a training set and a model")
-            _log_unknown_params({**getattr(train_set, "params", {}), **self.params})
+            merged_params = {**getattr(train_set, "params", {}), **self.params}
+            _log_unknown_params(merged_params)
+            # upstream: Booster.__init__ creates the C++ booster (LGBM_BoosterCreate), which
+            # parses the config and emits its warnings and errors at this point.
+            validate_params(_params_to_strings(merged_params))
             self.pandas_categorical = None
             return
         if model_file is not None:
@@ -1329,8 +1339,12 @@ class Booster:
         if dataset._categorical:
             merged["categorical_feature"] = ",".join(str(c) for c in dataset._categorical)
         merged["num_iterations"] = num_boost_round
+        # The constructor already reported this config's warnings, so do not repeat them.
         self._handle = NativeBooster.train(
-            _params_to_strings(merged), dataset._handle_or_raise(), self._init_model
+            _params_to_strings(merged),
+            dataset._handle_or_raise(),
+            self._init_model,
+            warn_config=False,
         )
         self.pandas_categorical = dataset.pandas_categorical
 
