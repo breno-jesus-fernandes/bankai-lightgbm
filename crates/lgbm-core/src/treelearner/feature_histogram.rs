@@ -7,6 +7,7 @@ use super::split_info::{K_MIN_SCORE, SplitInfo};
 use crate::config::Config;
 use crate::io::bin::BinType;
 use crate::meta::{K_EPSILON, MissingType};
+use crate::utils::common::madd;
 use crate::utils::random::Random;
 
 /// `kEpsilon` (a float constant) as used in double arithmetic.
@@ -132,7 +133,10 @@ fn leaf_gain_given_output<const L1: bool>(
     } else {
         sum_gradients
     };
-    -(2.0 * g * output + (sum_hessians + l2) * output * output)
+    // upstream: `-(2.0 * g * output + (sum_hessians + l2) * output * output)`. Upstream builds
+    // on arm64 contract the add into a fused multiply-add (see `madd`), which can decide a
+    // near-tie between the two default directions of a missing value.
+    -madd(2.0 * g, output, (sum_hessians + l2) * output * output)
 }
 
 /// upstream: `GetLeafGain<USE_L1, USE_MAX_OUTPUT, USE_SMOOTHING>`

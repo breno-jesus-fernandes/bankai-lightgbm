@@ -8,7 +8,6 @@ both libraries on the same data on this machine and compares the model text exac
 
 from __future__ import annotations
 
-import sys
 from typing import Any
 
 import lightgbm
@@ -94,25 +93,8 @@ CONFIGS: dict[str, dict[str, Any]] = {
 }
 
 
-_DARWIN_PATH_SMOOTH = pytest.mark.xfail(
-    sys.platform == "darwin",
-    strict=True,
-    reason=(
-        "macOS arm64 only: path_smooth on the multi-value path picks a different split in one "
-        "node (decision_type and one leaf value differ from upstream), not triaged yet; "
-        "see ROADMAP P2 MultiValBin and AGENTS.md section 4 (madd/FMA)"
-    ),
-)
-
-
 @pytest.mark.parametrize("fmt", ["dense", "csr", "csc"])
-@pytest.mark.parametrize(
-    "name",
-    [
-        pytest.param(name, marks=_DARWIN_PATH_SMOOTH) if name == "path_smooth" else name
-        for name in CONFIGS
-    ],
-)
+@pytest.mark.parametrize("name", list(CONFIGS))
 def test_multi_value_training_matches_upstream(fmt: str, name: str) -> None:
     x, y = _mixed()
     if CONFIGS[name].get("objective") == "binary":
