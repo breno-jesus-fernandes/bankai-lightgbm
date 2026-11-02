@@ -60,6 +60,7 @@ Rules:
 - CI gates:
   - A `criterion` regression of more than **5%** vs `main` fails the build.
   - The Python-level benchmark (`benches/`) runs subsets of Higgs, Epsilon, MSLR/Yahoo LTR, and a sparse dataset. It compares against upstream `lightgbm==4.7.0`. Being slower than upstream by more than run-to-run noise (~3%) fails the build.
+  - The interleaved benchmark job in CI runs on pushes to `main`, on manual runs, and on pull requests that touch hot-path code (`treelearner/`, `boosting/`, `objective/`, `io/bin*`, `io/sparse.rs`, `io/sample.rs`, `predictor.rs`, `tree.rs`, `utils/spin_pool.rs`, `utils/common.rs`, the benchmark scripts, and `ci.yml`). Other pull requests skip it. Edit the `changes` filter in `.github/workflows/ci.yml` when a new hot path appears.
 - Parallelism uses `rayon` (instead of OpenMP). Respect `num_threads`: build a scoped thread pool per Booster rather than the global pool.
 - SIMD uses `std::arch` with runtime feature detection (`is_x86_feature_detected!`), or `pulp`. A scalar fallback must exist and be tested.
 - Avoid allocating in inner loops. Reuse buffers through the per-learner state, as upstream's `TrainingShareStates` does.

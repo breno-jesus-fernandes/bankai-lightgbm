@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,7 +20,37 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: scripts/miri.sh
 
+  # Pull requests run the benchmark gate only when they touch hot-path code (AGENTS.md section 5).
+  # Pushes to main and manual runs always benchmark.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      hot: ${{ steps.filter.outputs.hot }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            hot:
+              - 'crates/lgbm-core/src/treelearner/**'
+              - 'crates/lgbm-core/src/boosting/**'
+              - 'crates/lgbm-core/src/objective/**'
+              - 'crates/lgbm-core/src/io/bin.rs'
+              - 'crates/lgbm-core/src/io/bin_data.rs'
+              - 'crates/lgbm-core/src/io/sparse.rs'
+              - 'crates/lgbm-core/src/io/sample.rs'
+              - 'crates/lgbm-core/src/predictor.rs'
+              - 'crates/lgbm-core/src/tree.rs'
+              - 'crates/lgbm-core/src/utils/spin_pool.rs'
+              - 'crates/lgbm-core/src/utils/common.rs'
+              - 'crates/lgbm-core/benches/**'
+              - 'scripts/bench_interleaved.py'
+              - '.github/workflows/ci.yml'
+
   benchmark:
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.hot == 'true'
     runs-on: ubuntu-latest
     env:
       # Intel code placement: where the linker puts a tight loop's branches changes its speed by
