@@ -95,6 +95,8 @@ Rules:
 - Never commit a red build. If a step is not green yet, keep it out of the commit (or mark the test `#[ignore]`/`xfail` with a reason that points to the roadmap item).
 - Keep PRs small, with one feature or one fix each. Use Conventional Commits (`feat(core): ...`, `fix(io): ...`, `perf(treelearner): ...`, `test(parity): ...`).
 - Tick the matching checkbox in `ROADMAP.md` in the same PR.
+- **Keep going through the roadmap:** when asked to work autonomously, move on to the next roadmap step (the next unchecked item, or the next gap in the current step) without asking for confirmation. Pick the next small gap and report each merged PR.
+- **Stop only for decisions the roadmap does not settle:** changes to CI gates or required checks, deleting data or branches, force-pushes, and work outside the repository. Ask about those and nothing else.
 - Update `CHANGELOG.md` for user-visible changes.
 
 ## 10. Definition of done
