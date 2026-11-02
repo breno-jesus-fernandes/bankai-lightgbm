@@ -47,6 +47,18 @@ def train(
 
     Validation metrics and early stopping callbacks are evaluated after each iteration.
     """
+    # upstream: python-package/lightgbm/engine.py (v4.7.0) train(), input checks
+    if not isinstance(train_set, Dataset):
+        raise TypeError(
+            f"train() only accepts Dataset object, train_set has type '{type(train_set).__name__}'."
+        )
+    if isinstance(valid_sets, list):
+        for i, valid_item in enumerate(valid_sets):
+            if not isinstance(valid_item, Dataset):
+                raise TypeError(
+                    "Every item in valid_sets must be a Dataset object. "
+                    f"Item {i} has type '{type(valid_item).__name__}'."
+                )
     params = dict(params)
     # upstream: engine.py::_choose_param_value, objective aliases (v4.7.0).
     objective_aliases = ("objective", "app", "loss", "application", "objective_type")
@@ -387,7 +399,9 @@ def cv(
 ) -> dict[str, Any]:
     """Perform seeded cross-validation and aggregate per-fold metrics."""
     if not isinstance(train_set, Dataset):
-        raise TypeError("cv() only accepts a Dataset as train_set")
+        raise TypeError(
+            f"cv() only accepts Dataset object, train_set has type '{type(train_set).__name__}'."
+        )
     for name, value in (("init_model", init_model), ("fpreproc", fpreproc)):
         if value is not None:
             raise NotImplementedError(f"{name} is not implemented yet")

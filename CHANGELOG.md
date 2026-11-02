@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `train` and `cv` raise upstream's `TypeError` messages when `train_set` is not a Dataset, and when an item of `valid_sets` is not a Dataset (naming the item index and its type).
+
 - `categorical_feature` given through a parameter or its alias (for example `categorical_column`) is applied when the Dataset is built, as upstream does. Before, the alias was ignored and the column was split as numeric.
 
 - `Dataset.save_binary` reports a failed write as upstream does (`Cannot write binary data to <file>, wrote N of M bytes`) instead of the raw OS error.
