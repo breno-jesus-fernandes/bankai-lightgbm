@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `log_evaluation` prints its `[i]` lines by default and sends them to a logger registered with `register_logger`, as upstream does. Before, bankai wrote them to the stdlib logger, so by default nothing was printed.
+
 - `train` runs every requested round even after an iteration finds no splits, evaluating the validation sets on each round, as upstream does. Before, training stopped at the first such round and the validation history was shorter.
 
 - `cv` no longer leaves its parameters on the Dataset after it returns, so a later `cv` with other metrics reports only its own metrics, as upstream does.
