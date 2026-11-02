@@ -230,6 +230,31 @@ def _table_column_names(data: Any) -> list[str] | None:
     return None
 
 
+# upstream: include/LightGBM/config.h (v4.7.0) categorical_feature aliases
+_CATEGORICAL_FEATURE_ALIASES = (
+    "categorical_feature",
+    "categorical_column",
+    "cat_feature",
+    "cat_column",
+    "categorical_features",
+)
+
+
+def _categorical_from_params(params: dict[str, Any], feature_names: list[str] | None) -> list[int]:
+    """Categorical columns given through a parameter (or one of its aliases) instead of the argument."""
+    for key in _CATEGORICAL_FEATURE_ALIASES:
+        value = params.get(key)
+        if value is None or value == "" or value == "auto":
+            continue
+        items = list(value) if isinstance(value, (list, tuple)) else str(value).split(",")
+        normalized: list[int | str] = [
+            int(item) if isinstance(item, str) and item.strip().isdigit() else item
+            for item in items
+        ]
+        return _categorical_indices(normalized, feature_names, [])
+    return []
+
+
 def _categorical_indices(
     categorical_feature: Any, feature_names: list[str] | None, pandas_cat_cols: list[int]
 ) -> list[int]:
@@ -1311,9 +1336,14 @@ class Dataset:
         if isinstance(self.feature_name, list):
             # An explicit ``feature_name`` names the columns, so ``categorical_feature`` may use it.
             feature_names = [str(name) for name in self.feature_name]
-        categorical = _categorical_indices(
-            self.categorical_feature, feature_names, pandas_auto_cat_cols
-        )
+        if (
+            isinstance(self.categorical_feature, str) and self.categorical_feature == "auto"
+        ) and not (pandas_auto_cat_cols):
+            categorical = _categorical_from_params(self.params, feature_names)
+        else:
+            categorical = _categorical_indices(
+                self.categorical_feature, feature_names, pandas_auto_cat_cols
+            )
         self._has_non_default_feature_names = (
             feature_names is not None or self.feature_name != "auto"
         )
