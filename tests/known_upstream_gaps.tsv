@@ -63,8 +63,6 @@ tests/python_package_test/test_engine.py::test_monotone_constraints[False]	monot
 tests/python_package_test/test_engine.py::test_monotone_constraints[True]	monotone constraints beyond basic (ROADMAP P3 monotone)
 tests/python_package_test/test_engine.py::test_monotone_penalty	monotone constraints beyond basic (ROADMAP P3 monotone)
 tests/python_package_test/test_engine.py::test_monotone_penalty_max	monotone constraints beyond basic (ROADMAP P3 monotone)
-tests/python_package_test/test_engine.py::test_multiclass_custom_eval[False]	not triaged (ROADMAP P6 Python package)
-tests/python_package_test/test_engine.py::test_multiclass_custom_eval[True]	not triaged (ROADMAP P6 Python package)
 tests/python_package_test/test_engine.py::test_multiclass_rf	RF parity with upstream, not triaged (ROADMAP P5 RF)
 tests/python_package_test/test_engine.py::test_pandas_nullable_dtypes	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
 tests/python_package_test/test_engine.py::test_pandas_with_numpy_regular_dtypes	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
