@@ -1412,6 +1412,36 @@ class Dataset:
         )
 
 
+def _custom_metrics(feval: Any) -> list[Any]:
+    """Normalize ``feval`` (one callable or a list of them) to a list, as upstream accepts both."""
+    if feval is None:
+        return []
+    if callable(feval):
+        return [feval]
+    if isinstance(feval, list):
+        return feval
+    raise TypeError("feval should be a callable or a list of callables")
+
+
+def _custom_results(
+    name: str, predictions: Any, dataset: Dataset, custom_metrics: list[Any]
+) -> list[tuple[str, str, float, bool]]:
+    """Run custom metrics on ``predictions`` and return ``(name, metric, value, higher_is_better)``."""
+    results: list[tuple[str, str, float, bool]] = []
+    for custom_metric in custom_metrics:
+        if custom_metric is None:
+            continue
+        metric_results = custom_metric(predictions, dataset)
+        if not isinstance(metric_results, list):
+            metric_results = [metric_results]
+        for metric_result in metric_results:
+            if len(metric_result) != 3:
+                raise ValueError("custom evaluation must return (name, value, higher_is_better)")
+            metric_name, value, higher_is_better = metric_result
+            results.append((name, str(metric_name), float(value), bool(higher_is_better)))
+    return results
+
+
 class Booster:
     """Booster in LightGBM. API-compatible with ``lightgbm.Booster``."""
 
@@ -1683,28 +1713,25 @@ class Booster:
     def eval(self, data: Dataset, name: str, feval: Any = None) -> list[EvalResult]:
         """Evaluate the configured metrics on ``data`` (upstream ``Booster.eval``).
 
-        Custom metrics (``feval``) are not supported yet.
+        ``feval`` adds custom metrics, which are computed from the converted predictions.
         """
         if not isinstance(data, Dataset):
             raise TypeError("Can only eval for Dataset instance")
-        if feval is not None:
-            raise NotImplementedError(
-                "custom metrics (feval) in Booster.eval are not supported yet"
-            )
         params = {**data.params, **self.params}
         native = self._native().eval(data._construct_for_eval(), _params_to_strings(params), name)
-        return [EvalResult(*item) for item in native]
+        results = [EvalResult(*item) for item in native]
+        custom_metrics = _custom_metrics(feval)
+        if custom_metrics:
+            predictions = self.predict(_internal_rows(data.data))
+            results.extend(
+                EvalResult(*item)
+                for item in _custom_results(name, predictions, data, custom_metrics)
+            )
+        return results
 
     def eval_valid(self, feval: Any = None) -> list[tuple[str, str, float, bool]]:
         """Evaluate configured and custom metrics on registered validation data."""
-        if feval is None:
-            custom_metrics: list[Any] = []
-        elif callable(feval):
-            custom_metrics = [feval]
-        elif isinstance(feval, list):
-            custom_metrics = feval
-        else:
-            raise TypeError("feval should be a callable or a list of callables")
+        custom_metrics = _custom_metrics(feval)
         results: list[tuple[str, str, float, bool]] = []
         for dataset, name in self.__dict__.get("valid_sets", []):
             native_dataset = dataset._construct_for_eval()
@@ -1712,21 +1739,7 @@ class Booster:
             results.extend(self._native().eval(native_dataset, _params_to_strings(params), name))
             if custom_metrics:
                 predictions = self.predict(_internal_rows(dataset.data))
-                for custom_metric in custom_metrics:
-                    if custom_metric is None:
-                        continue
-                    metric_results = custom_metric(predictions, dataset)
-                    if not isinstance(metric_results, list):
-                        metric_results = [metric_results]
-                    for metric_result in metric_results:
-                        if len(metric_result) != 3:
-                            raise ValueError(
-                                "custom evaluation must return (name, value, higher_is_better)"
-                            )
-                        metric_name, value, higher_is_better = metric_result
-                        results.append(
-                            (name, str(metric_name), float(value), bool(higher_is_better))
-                        )
+                results.extend(_custom_results(name, predictions, dataset, custom_metrics))
         return results
 
     def reset_parameter(self, params: dict[str, Any]) -> None:

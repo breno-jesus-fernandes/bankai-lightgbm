@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `Booster.eval` accepts `feval` (one callable or a list), adding the custom metrics to the built-in ones as upstream does. `eval_valid` shares the same code.
+
 - A parameter given to `train` is no longer kept on the training Dataset after the call, so a later call on the same Dataset does not inherit it (for example GOSS followed by bagging). Upstream restores the Dataset's parameters the same way.
 
 - `train` and `cv` raise upstream's `TypeError` messages when `train_set` is not a Dataset, and when an item of `valid_sets` is not a Dataset (naming the item index and its type).
