@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `categorical_feature` given through a parameter or its alias (for example `categorical_column`) is applied when the Dataset is built, as upstream does. Before, the alias was ignored and the column was split as numeric.
+
 - `Dataset.save_binary` reports a failed write as upstream does (`Cannot write binary data to <file>, wrote N of M bytes`) instead of the raw OS error.
 
 - Label and weight inputs follow upstream's `_list_to_1d_numpy`: pandas Series with non-numeric dtypes raise `ValueError` naming the bad fields, and nested lists raise `TypeError`.
