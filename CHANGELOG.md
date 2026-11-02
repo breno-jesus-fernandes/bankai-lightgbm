@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Upstream's `test_arrow.py`, `test_polars.py` and `test_dual.py` are ported to `tests/python_package_test`. The 105 cases that still fail are strict `xfail`s naming their ROADMAP item (position metadata, `Dataset._dump_text`, predict on arrow/polars input, `weight=None`, categorical names from columns, `get_data`, and sklearn with pyarrow/polars inputs). `pyarrow` and `polars` join the `dev` extra.
+
 - The leaf gain is computed with a fused multiply-add on aarch64, as upstream's arm64 build does (`madd`). On macOS arm64, multi-value training with `path_smooth` chose a different default direction for a missing value than upstream, because the two directions' gains differ only in the last bits; models now match upstream there (`test_multi_value_training_matches_upstream`, previously an xfail on Darwin). Linux and Windows output is unchanged.
 
 - Upstream's `tests/python_package_test` is ported in full (`test_basic`, `test_engine`, `test_callback`, `test_utilities`, `test_consistency`, `test_pandas`, plus the earlier sklearn and plotting files). Upstream cases that still fail are strict `xfail`s listed in `tests/known_upstream_gaps.tsv` with their ROADMAP item. Behavior fixed along the way: `EarlyStopException` is exported; `early_stopping_round` set to `None` no longer errors; `predict(pred_leaf=True)` with `start_iteration` past the last tree returns an empty `(n, 0)` array instead of panicking; sparse `pred_contrib` is predicted in row blocks, so very large CSR inputs no longer exhaust memory; `Dataset` gains `create_valid`, `get_data`, `get_feature_name`, `get_params`, `set_field`, `get_field`; `register_logger` and `EvalResult`/`Sequence` are exported; `reset_parameter` accepts keyword arguments.

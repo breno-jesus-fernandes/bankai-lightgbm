@@ -19,11 +19,13 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
 - [x] Plotting helpers: `plot_importance`, `plot_split_value_histogram`, `plot_metric`, `plot_tree`, `create_tree_digraph`
 - [ ] Port upstream `tests/python_package_test` and run it green against `bankai_lightgbm`
       Done: all ported files in `tests/python_package_test` (`test_plotting`, `test_sklearn`, `test_basic`,
-      `test_engine`, `test_callback`, `test_utilities`, `test_consistency`, `test_pandas`), run unmodified
-      except imports. Upstream cases that still fail are strict `xfail`s listed in
-      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (129 node ids; a fix turns them into
-      failing XPASS, so the line is removed with the fix). Not yet ported: `test_arrow.py`, `test_polars.py`,
-      `test_dual.py`. `test_dask.py` belongs to P7 (distributed).
+      `test_engine`, `test_callback`, `test_utilities`, `test_consistency`, `test_pandas`, `test_arrow`, `test_polars`,
+      `test_dual`), run unmodified except imports. Upstream cases that still fail are strict `xfail`s listed in
+      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (234 node ids; a fix turns them into
+      failing XPASS, so the line is removed with the fix). `test_dask.py` belongs to P7 (distributed).
+      Arrow/polars gaps (85 ids, Step 1 arrow/polars ingest): `position` metadata (56), `Dataset._dump_text`
+      (15), predict on pyarrow/polars input returning a CSR (8), `weight=None` (2), categorical names from
+      arrow/polars columns (2), `get_data` returning converted data (2), and sklearn with pyarrow/polars inputs (20).
       Open work from the list: the "not triaged" entries (RF value mismatch, pandas dtypes, early-stopping
       naming, categorical handle, metrics, native log callback).
 - Gate: the ported upstream suite passes for everything the step names; unsupported parts raise `NotImplementedError`.
