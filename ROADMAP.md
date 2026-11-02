@@ -21,10 +21,9 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
       Done: all ported files in `tests/python_package_test` (`test_plotting`, `test_sklearn`, `test_basic`,
       `test_engine`, `test_callback`, `test_utilities`, `test_consistency`, `test_pandas`, `test_arrow`, `test_polars`,
       `test_dual`), run unmodified except imports. Upstream cases that still fail are strict `xfail`s listed in
-      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (200 node ids; a fix turns them into
+      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (142 node ids; a fix turns them into
       failing XPASS, so the line is removed with the fix). `test_dask.py` belongs to P7 (distributed).
-      Arrow/polars gaps (71 ids, Step 1 arrow/polars ingest): `position` metadata (56), `Dataset._dump_text`
-      (15). `get_data` on pyarrow/polars subsets now keeps the table type. Done: all-ones weights become `None`, as upstream; arrow/polars column names feed categorical features; pyarrow/polars predict densely.
+      Arrow/polars gaps (15 ids, Step 1 arrow/polars ingest): `Dataset._dump_text` (15). `get_data` on pyarrow/polars subsets now keeps the table type. Done: all-ones weights become `None`, as upstream; arrow/polars column names feed categorical features; pyarrow/polars predict densely.
       Open work from the list: the "not triaged" entries (RF value mismatch, pandas dtypes, early-stopping
       naming, categorical handle, metrics, native log callback).
 - Gate: the ported upstream suite passes for everything the step names; unsupported parts raise `NotImplementedError`.
@@ -84,7 +83,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] `MultiValBin` for col-wise training: the multi-value group's histograms come from row-wise sparse/dense multi-value bins with upstream's offsets, kernels, data blocks and merge order (byte-identical model text vs upstream across objectives, sampling, constraints, categorical, multiclass, ranking, CSR/CSC/dense input, and with 2 threads; `tests/parity/test_multi_val_training_parity.py`). Sparse multi-value columns are partitioned with a forward `SparseBin` cursor, without densifying
 - [ ] Row-wise training layout (`force_row_wise`; upstream `GetMultiBinFromAllFeatures`)
 - [x] Exclusive Feature Bundling (`enable_bundle`), sampling identical to upstream
-- [ ] Metadata: label, weight, and group/query implemented; weight/query length errors and nested subsets covered; position pending; init_score done (class-major storage, training, validation metrics, subsets)
+- [ ] Metadata: label, weight, and group/query implemented; weight/query length errors and nested subsets covered; position metadata done (set/get, remapped int32 ids, subsets; ranking position bias pending P4); init_score done (class-major storage, training, validation metrics, subsets)
 - [x] Sparse CSR/CSC input (`LGBM_DatasetCreateFromCSR`/`FromCSC`): sampling, push order (stored pairs then `FinishOneRow` zero pushes), reference datasets and linear-tree raw values, O(nnz) without densifying; `save_binary` byte-identical to upstream incl. bundles, unsorted indices and multi-value groups. Known gap: a duplicated column within a row that lands in a *sparse* multi-value column (upstream keeps whichever entry its unstable `std::sort` leaves first, which is stdlib-dependent; bankai keeps the first). Construction speed (`benches/bench_dataset.py`, linux/x86_64 2 vCPU): CSR 0.8–1.05x, CSC 0.75–4x upstream; dense construction measured 0.32–0.82x (pre-existing, profile `value_to_bin`/`find_groups`)
 - [ ] Parsers: CSV/TSV/LibSVM, header, `label_column`, `weight_column`, `group_column`, `ignore_column`, `two_round`
 - [x] Binary dataset file (`save_binary`) byte-identical to upstream (20 fixtures); reader for upstream files

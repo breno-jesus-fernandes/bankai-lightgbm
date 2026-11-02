@@ -70,6 +70,12 @@ def train(
     if categorical_feature != "auto":
         train_set.categorical_feature = categorical_feature
     train_set.params.update(params)
+    if train_set.position is not None and str(
+        params.get("objective", params.get("application", ""))
+    ).lower() in {"lambdarank", "rank_xendcg", "xendcg", "xe_ndcg", "xe_ndcg_mart", "xendcg_mart"}:
+        raise NotImplementedError(
+            "position bias for ranking objectives is not implemented yet (ROADMAP P4)"
+        )
     booster = Booster(params=params, train_set=train_set)
     if init_model is not None:
         booster._continue_from(init_model)

@@ -204,6 +204,22 @@ def _load_pandas_categorical(raw: str | None) -> list[list[Any]] | None:
     return None if loaded is None else list(loaded)
 
 
+def _remap_positions(position: Any, num_data: int) -> npt.NDArray[np.int32]:
+    """Remap raw position ids to dense int32 indices, numbered in first-seen order.
+
+    upstream: src/io/metadata.cpp (v4.7.0) Metadata::SetPosition
+    """
+    values = np.asarray(position).reshape(-1)
+    if values.shape[0] != num_data:
+        raise LightGBMError(
+            f"Positions size ({values.shape[0]}) doesn't match data size ({num_data})"
+        )
+    _, first_index, inverse = np.unique(values, return_index=True, return_inverse=True)
+    rank = np.empty(first_index.shape[0], dtype=np.int32)
+    rank[np.argsort(first_index, kind="stable")] = np.arange(first_index.shape[0], dtype=np.int32)
+    return rank[inverse.reshape(-1)]
+
+
 def _drop_all_ones_weight(weight: Any) -> Any:
     """Return ``None`` for a weight whose values are all one, as upstream does.
 
@@ -794,8 +810,13 @@ class Dataset:
         categorical_feature: _ABCSequence[int | str] | str = "auto",
         params: dict[str, Any] | None = None,
         free_raw_data: bool = True,
+        position: Any = None,
     ) -> None:
         self.data = data
+        self.position = position
+        self._position: npt.NDArray[np.int32] | None = None
+        # a subset keeps its parent's dense ids, as upstream's Metadata::Init does
+        self._inherited_position: npt.NDArray[np.int32] | None = None
         self.label = label
         self.reference = reference
         self.weight = _drop_all_ones_weight(weight)
@@ -867,6 +888,7 @@ class Dataset:
             "weight": self.set_weight,
             "init_score": self.set_init_score,
             "group": self.set_group,
+            "position": self.set_position,
         }
         if field_name not in setters:
             raise NotImplementedError(f"field '{field_name}' is not supported yet (roadmap P2)")
@@ -881,6 +903,12 @@ class Dataset:
             return self.get_weight()
         if field_name == "init_score":
             return self.get_init_score()
+        if field_name == "position":
+            if self.position is None:
+                return None
+            if self._position is None:
+                self.construct()
+            return self._position
         if field_name == "group":
             group = self.get_group()
             if group is None:
@@ -957,11 +985,14 @@ class Dataset:
             weight=take(self.weight),
             init_score=take(self.init_score),
             group=subset_group,
+            position=take(self.position),
             feature_name=self.feature_name,
             categorical_feature=self.categorical_feature,
             params={**self.params, **(params or {})},
             free_raw_data=self.free_raw_data,
         )
+        if self._position is not None:
+            subset._inherited_position = self._position[indices]
         subset.pandas_categorical = self.pandas_categorical
         subset._categorical = self._categorical.copy()
         subset._handle = native
@@ -1045,6 +1076,21 @@ class Dataset:
             self._update_native_fields(weight=values)
         return self
 
+    def set_position(self, position: Any) -> Dataset:
+        """Set the position of each row (ranking position bias); remapped to dense int32 ids."""
+        self.position = position
+        self._position = None
+        if position is not None and (
+            self._handle is not None or self._evaluation_handle is not None
+        ):
+            self._position = _remap_positions(position, self.num_data())
+            self.position = self._position
+        return self
+
+    def get_position(self) -> npt.NDArray[np.int32] | None:
+        """Return the position of each row as dense int32 ids (upstream ``get_position``)."""
+        return self.get_field("position")
+
     def set_group(self, group: Any) -> Dataset:
         """Set query group sizes; a constructed Dataset is updated in place."""
         self.group = group
@@ -1123,6 +1169,14 @@ class Dataset:
                 raise ValueError("Input data must be 2-dimensional")
             matrix = np.ascontiguousarray(matrix, dtype=np.float64)
             n = matrix.shape[0]
+        if self.position is None:
+            self._position = None
+        elif self._inherited_position is not None:
+            self._position = self._inherited_position
+        else:
+            self._position = _remap_positions(self.position, n)
+        if self._position is not None:
+            self.position = self._position
         if self.label is None:
             label = np.zeros(n, dtype=np.float64)
         else:
