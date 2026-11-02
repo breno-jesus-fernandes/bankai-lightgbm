@@ -82,8 +82,6 @@ tests/python_package_test/test_engine.py::test_rf	RF parity with upstream, not t
 tests/python_package_test/test_engine.py::test_sample_strategy_with_boosting	not triaged (ROADMAP P6 Python package)
 tests/python_package_test/test_engine.py::test_save_and_load_linear	linear_tree training and model I/O (ROADMAP P3 linear_tree)
 tests/python_package_test/test_engine.py::test_string_serialized_params_retrieval	Booster Python surface, pending items (ROADMAP P6 Booster)
-tests/python_package_test/test_engine.py::test_train_and_cv_raise_informative_error_for_train_set_of_wrong_type	not triaged (ROADMAP P6 Python package)
-tests/python_package_test/test_engine.py::test_train_raises_informative_error_if_any_valid_sets_are_not_dataset_objects	not triaged (ROADMAP P6 Python package)
 tests/python_package_test/test_engine.py::test_training_on_constructed_subset_without_params	Dataset Python surface, pending items (ROADMAP P6 Dataset)
 tests/python_package_test/test_engine.py::test_trees_to_dataframe	Booster Python surface, pending items (ROADMAP P6 Booster)
 tests/python_package_test/test_engine.py::test_validate_features	not triaged (ROADMAP P6 Python package)
