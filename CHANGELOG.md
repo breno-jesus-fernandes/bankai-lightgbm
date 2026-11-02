@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `Dataset.construct` sets `feature_name` to the resolved names, and `set_feature_name` marks them as user-set and checks their length, as upstream does.
+
 - `Dataset._dump_text` writes the bins of every feature in every row, byte-identical to upstream's `Dataset::DumpTextFile` (`tests/parity/test_dataset_dump_parity.py`). Upstream cases that compare dumps (pandas dtypes, row- and column-major construction) now pass.
 
 - `Dataset` accepts `position`, with `set_position`, `get_position` and `get_field("position")` returning dense int32 ids in first-seen order, as upstream does. Subsets keep their parent's ids. Training a ranking objective with positions raises `NotImplementedError` until the position bias is ported (P4).
