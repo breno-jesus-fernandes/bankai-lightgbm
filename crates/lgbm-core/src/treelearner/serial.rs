@@ -206,6 +206,18 @@ impl SerialTreeLearner {
             checked_bins.push(Some(checked));
         }
         let num_features = l.num_features;
+        // upstream: SerialTreeLearner::Init and FeatureHistogram::DynamicChangeSize (v4.7.0)
+        log::info!(
+            "Total Bins {}",
+            (0..num_features)
+                .map(|i| ds.feature_num_bin(i))
+                .sum::<i32>()
+        );
+        log::info!(
+            "Number of data points in the train set: {}, number of used features: {}",
+            ds.num_data(),
+            num_features
+        );
         let num_threads = if cfg.num_threads > 0 {
             cfg.num_threads as usize
         } else {
