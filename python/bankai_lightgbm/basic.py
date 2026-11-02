@@ -920,6 +920,11 @@ class Dataset:
             subset_data = self.data.iloc[indices]
         elif _is_scipy_sparse(self.data):
             subset_data = self.data.tocsr()[indices]
+        elif type(self.data).__module__.startswith("pyarrow") and hasattr(self.data, "take"):
+            # upstream: Dataset.get_data slices a pyarrow Table or polars DataFrame, keeping its type.
+            subset_data = self.data.take(indices)
+        elif _table_column_names(self.data) is not None:
+            subset_data = self.data[indices]
         else:
             subset_data = np.asarray(self.data)[indices]
 
