@@ -139,7 +139,6 @@ tests/python_package_test/test_arrow.py::test_dataset_construct_fuzzy[<lambda>-d
 tests/python_package_test/test_arrow.py::test_dataset_construct_fuzzy[<lambda>-dataset_params5]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
 tests/python_package_test/test_arrow.py::test_dataset_construct_fuzzy[<lambda>-dataset_params6]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
 tests/python_package_test/test_arrow.py::test_dataset_construct_fuzzy_boolean	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_arrow.py::test_dataset_construct_weights_none	pyarrow/polars `weight=None` still stores ones; ROADMAP Step 1 arrow/polars ingest
 tests/python_package_test/test_arrow.py::test_dataset_construct_position[arrow_type0-position_data0]	Dataset position metadata (`set_position`, `position=`) not implemented; ROADMAP Step 1 arrow/polars ingest (metadata position pending)
 tests/python_package_test/test_arrow.py::test_dataset_construct_position[arrow_type0-position_data1]	Dataset position metadata (`set_position`, `position=`) not implemented; ROADMAP Step 1 arrow/polars ingest (metadata position pending)
 tests/python_package_test/test_arrow.py::test_dataset_construct_position[arrow_type0-position_data2]	Dataset position metadata (`set_position`, `position=`) not implemented; ROADMAP Step 1 arrow/polars ingest (metadata position pending)
@@ -193,7 +192,6 @@ tests/python_package_test/test_polars.py::test_dataset_construct_fuzzy[<lambda>-
 tests/python_package_test/test_polars.py::test_dataset_construct_fuzzy[<lambda>-dataset_params4]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
 tests/python_package_test/test_polars.py::test_dataset_construct_fuzzy[<lambda>-dataset_params5]	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
 tests/python_package_test/test_polars.py::test_dataset_construct_fuzzy_boolean	`Dataset._dump_text` (upstream text dump) not implemented; ROADMAP Step 1 arrow/polars ingest
-tests/python_package_test/test_polars.py::test_dataset_construct_weights_none	pyarrow/polars `weight=None` still stores ones; ROADMAP Step 1 arrow/polars ingest
 tests/python_package_test/test_polars.py::test_dataset_construct_position[Int8]	Dataset position metadata (`set_position`, `position=`) not implemented; ROADMAP Step 1 arrow/polars ingest (metadata position pending)
 tests/python_package_test/test_polars.py::test_dataset_construct_position[Int16]	Dataset position metadata (`set_position`, `position=`) not implemented; ROADMAP Step 1 arrow/polars ingest (metadata position pending)
 tests/python_package_test/test_polars.py::test_dataset_construct_position[Int32]	Dataset position metadata (`set_position`, `position=`) not implemented; ROADMAP Step 1 arrow/polars ingest (metadata position pending)
