@@ -837,6 +837,8 @@ class Dataset:
         """Bin the data (no-op if already constructed)."""
         if self._handle is None:
             self._handle = self._build()
+            # upstream: Dataset._lazy_init ends with ``self.feature_name = self.get_feature_name()``
+            self.feature_name = self.get_feature_name()
         return self
 
     def num_data(self) -> int:
@@ -872,6 +874,19 @@ class Dataset:
     def get_data(self) -> Any:
         """Return the raw data this Dataset was created from (upstream ``get_data``)."""
         return self.data
+
+    def set_feature_name(self, feature_name: Any) -> Dataset:
+        """Set the feature names (upstream ``set_feature_name``); ``"auto"`` leaves them unset."""
+        if isinstance(feature_name, str) and feature_name == "auto":
+            return self
+        names = [str(name) for name in feature_name]
+        if self._handle is not None and len(names) != self.num_feature():
+            raise ValueError(
+                f"Length of feature_name({len(names)}) and num_feature({self.num_feature()}) don't match"
+            )
+        self.feature_name = names
+        self._has_non_default_feature_names = True
+        return self
 
     def get_feature_name(self) -> list[str]:
         """Return the feature names (upstream ``get_feature_name``)."""
