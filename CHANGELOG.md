@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Label and weight inputs follow upstream's `_list_to_1d_numpy`: pandas Series with non-numeric dtypes raise `ValueError` naming the bad fields, and nested lists raise `TypeError`.
+
 - `Dataset.feature_num_bin` returns the bins of a feature given by index or name (0 for unused features), as upstream does.
 
 - Config warnings reach Python: the native library logs through `PyLogger`, so `[LightGBM] [Warning] ...` lines print as upstream does. `Booster(params, train_set=...)` validates its parameters when constructed, so the `max_depth` warning (raised for `max_depth >= 5` with `num_leaves` omitted) and the alias conflict warnings match upstream's text and timing.

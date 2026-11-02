@@ -15,6 +15,8 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Literal, NamedTuple, Union
 
+import narwhals as nw
+import narwhals.dependencies as nwd
 import narwhals.typing as nwt
 import numpy as np
 import numpy.typing as npt
@@ -28,15 +30,100 @@ from bankai_lightgbm.compat import pd_Series as pd_Series
 __all__ = ["Booster", "Dataset", "LightGBMError"]
 
 
-def _list_to_1d_numpy(*, data: Any, dtype: npt.DTypeLike, name: str) -> npt.NDArray[Any]:
-    """Flatten a label- or weight-like field to 1-D (upstream ``_list_to_1d_numpy``, v4.7.0).
+def _is_numeric(obj: Any) -> bool:
+    """Check whether object is a number or not, include numpy number, etc.
 
-    A column vector is flattened with the warning upstream logs; lists and pandas Series are
-    accepted as they are.
+    upstream: python-package/lightgbm/basic.py (v4.7.0) ``_is_numeric``
     """
-    if isinstance(data, np.ndarray) and data.ndim == 2 and data.shape[1] == 1:
+    try:
+        float(obj)
+        return True
+    except (TypeError, ValueError):
+        # TypeError: obj is not a string or a number
+        # ValueError: obj is a string that cannot be parsed as a float
+        return False
+
+
+def _is_numpy_1d_array(data: Any) -> bool:
+    """Check whether data is a numpy 1-D array."""
+    return isinstance(data, np.ndarray) and len(data.shape) == 1
+
+
+def _is_numpy_column_array(data: Any) -> bool:
+    """Check whether data is a column numpy array."""
+    if not isinstance(data, np.ndarray):
+        return False
+    shape = data.shape
+    return len(shape) == 2 and shape[1] == 1
+
+
+def _cast_numpy_array_to_dtype(array: np.ndarray, dtype: npt.DTypeLike) -> np.ndarray:
+    """Cast numpy array to given dtype."""
+    if array.dtype == dtype:
+        return array
+    return array.astype(dtype=dtype, copy=False)
+
+
+def _is_1d_list(data: Any) -> bool:
+    """Check whether data is a 1-D list."""
+    return isinstance(data, list) and (not data or _is_numeric(data[0]))
+
+
+def _is_allowed_numpy_dtype(dtype: type) -> bool:
+    float128 = getattr(np, "float128", type(None))
+    return issubclass(dtype, (np.integer, np.floating, np.bool_)) and not issubclass(
+        dtype, (np.timedelta64, float128)
+    )
+
+
+def _check_for_bad_pandas_dtypes(pandas_dtypes_series: pd_Series) -> None:
+    """Raise if any pandas column dtype cannot be converted to a numeric array.
+
+    upstream: python-package/lightgbm/basic.py (v4.7.0) ``_check_for_bad_pandas_dtypes``
+    """
+    bad_pandas_dtypes = [
+        f"{column_name}: {pandas_dtype}"
+        for column_name, pandas_dtype in pandas_dtypes_series.items()
+        if not _is_allowed_numpy_dtype(pandas_dtype.type)
+    ]
+    if bad_pandas_dtypes:
+        raise ValueError(
+            f"pandas dtypes must be int, float or bool.\nFields with bad pandas dtypes: {', '.join(bad_pandas_dtypes)}"
+        )
+
+
+def _list_to_1d_numpy(*, data: Any, dtype: npt.DTypeLike, name: str) -> npt.NDArray[Any]:
+    """Convert data to numpy 1-D array.
+
+    upstream: python-package/lightgbm/basic.py (v4.7.0) ``_list_to_1d_numpy``
+    """
+    if _is_numpy_1d_array(data):
+        return _cast_numpy_array_to_dtype(data, dtype)
+    elif _is_numpy_column_array(data):
         _log_warning("Converting column-vector to 1d array")
-    return np.asarray(data, dtype=dtype).reshape(-1)
+        array = data.ravel()
+        return _cast_numpy_array_to_dtype(array, dtype)
+    elif _is_1d_list(data):
+        return np.asarray(data, dtype=dtype)
+    elif isinstance(data, pd_Series):
+        _check_for_bad_pandas_dtypes(data.to_frame().dtypes)
+        return np.asarray(data, dtype=dtype)  # SparseArray should be supported as well
+    elif nwd.is_into_series(data) or nwd.is_into_dataframe(data):
+        # pyarrow and polars inputs (and one-column frames). upstream streams these to C in
+        # ``set_field``; here they are flattened to the same 1-D array.
+        frame = nw.from_native(data, allow_series=True)
+        if isinstance(frame, nw.DataFrame):
+            if frame.shape[1] != 1:
+                raise TypeError(
+                    f"Wrong type({type(data).__name__}) for {name}.\n"
+                    "It should be list, numpy 1-D array or pandas Series"
+                )
+            frame = frame.get_column(frame.columns[0])
+        return _cast_numpy_array_to_dtype(frame.to_numpy().reshape(-1), dtype)
+    else:
+        raise TypeError(
+            f"Wrong type({type(data).__name__}) for {name}.\nIt should be list, numpy 1-D array or pandas Series"
+        )
 
 
 def _custom_derivative(data: Any, name: str) -> npt.NDArray[np.float32]:
