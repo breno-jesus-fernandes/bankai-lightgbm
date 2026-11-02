@@ -12,6 +12,19 @@ pub enum Error {
     /// Malformed model or data input.
     #[error("parse error: {0}")]
     Parse(String),
+    /// An output file could not be created (upstream `VirtualFileWriter::Init` in `SaveBinaryFile`).
+    #[error("Cannot write binary data to {0} ")]
+    BinaryOpen(String),
+    /// An output file was only partly written (upstream `VirtualFileWriter::Write`).
+    #[error("Cannot write binary data to {path}, wrote {written} of {total} bytes")]
+    BinaryWrite {
+        /// Path that was being written.
+        path: String,
+        /// Bytes written before the failure.
+        written: usize,
+        /// Bytes that had to be written.
+        total: usize,
+    },
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
