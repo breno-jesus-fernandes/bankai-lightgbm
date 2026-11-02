@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Validation sets are binned with the training set's bin mappers, as upstream does: `train` calls `Dataset.set_reference` on each validation set (new method). Before, each validation set was binned from its own data, which repeated the native "no meaningful features" warning and gave it different bins from the training set.
+
+- Training no longer prints the native "no meaningful features" warning twice for a run with a validation set built without a reference.
+
 - Training logs the same Info lines as upstream for a binary objective and at tree-learner start: class counts, `Total Bins`, the training data-point count, and `[binary:BoostFromScore]` with the average and init score.
 
 - `log_evaluation` prints its `[i]` lines by default and sends them to a logger registered with `register_logger`, as upstream does. Before, bankai wrote them to the stdlib logger, so by default nothing was printed.

@@ -84,4 +84,3 @@ tests/python_package_test/test_pandas.py::test_pandas_unsupported_dtypes[dtype0-
 tests/python_package_test/test_pandas.py::test_pandas_unsupported_dtypes[dtype1-values1]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
 tests/python_package_test/test_pandas.py::test_pandas_unsupported_dtypes[dtype2-values2]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
 tests/python_package_test/test_pandas.py::test_pandas_unsupported_dtypes[dtype3-values3]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_utilities.py::test_register_logger	native log callback not wired, not triaged (ROADMAP P6 Python package)

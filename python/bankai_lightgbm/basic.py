@@ -1005,6 +1005,29 @@ class Dataset:
         """Return the raw data this Dataset was created from (upstream ``get_data``)."""
         return self.data
 
+    def set_reference(self, reference: Dataset) -> Dataset:
+        """Use ``reference``'s bin mappers, categorical features and feature names (upstream ``set_reference``).
+
+        A Dataset that is already binned is rebinned from its raw data, which must still be kept.
+        upstream: python-package/lightgbm/basic.py (v4.7.0) ``Dataset.set_reference``
+        """
+        if self.reference is reference:
+            return self
+        if self._handle is not None or self._evaluation_handle is not None:
+            if self.data is None:
+                raise LightGBMError(
+                    "Cannot set reference after freed raw data, "
+                    "set free_raw_data=False when construct Dataset to avoid this."
+                )
+            self._handle = None
+            self._evaluation_handle = None
+        self.categorical_feature = reference.categorical_feature
+        if isinstance(reference.feature_name, list):
+            self.feature_name = list(reference.feature_name)
+            self._has_non_default_feature_names = True
+        self.reference = reference
+        return self
+
     def set_feature_name(self, feature_name: Any) -> Dataset:
         """Set the feature names (upstream ``set_feature_name``); ``"auto"`` leaves them unset."""
         if isinstance(feature_name, str) and feature_name == "auto":
