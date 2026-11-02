@@ -766,6 +766,25 @@ fn write_aligned_i32s(out: &mut Vec<u8>, vals: &[i32]) {
 }
 
 impl Dataset {
+    /// Number of bins of a real (original) feature, as upstream's `LGBM_DatasetGetFeatureNumBin`:
+    /// features that are not used (trivial) report 0. `feature` must be below `num_total_features`.
+    /// upstream: src/c_api.cpp (v4.7.0) LGBM_DatasetGetFeatureNumBin; include/LightGBM/dataset.h FeatureNumBin
+    pub fn feature_num_bin(&self, feature: usize) -> i32 {
+        let inner = self
+            .layout
+            .used_feature_map
+            .get(feature)
+            .copied()
+            .unwrap_or(-1);
+        if inner < 0 {
+            return 0;
+        }
+        let inner = inner as usize;
+        let group = self.layout.feature2group[inner] as usize;
+        let sub = self.layout.feature2subfeature[inner] as usize;
+        self.layout.groups[group].bin_mappers[sub].num_bin
+    }
+
     /// upstream: `Metadata::SetQuery`: `sizes` are the rows of each query, in order
     /// (an empty slice clears the query information).
     pub fn set_group(&mut self, sizes: &[i32]) -> Result<()> {
