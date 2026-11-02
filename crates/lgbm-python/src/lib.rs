@@ -241,6 +241,19 @@ impl NativeDataset {
         self.ds.layout.num_total_features
     }
 
+    /// Bins of one feature (upstream `LGBM_DatasetGetFeatureNumBin`); out-of-range indices raise.
+    fn feature_num_bin(&self, feature: i64) -> PyResult<i32> {
+        let total = self.ds.layout.num_total_features;
+        if feature < 0 || feature as usize >= total {
+            return Err(LightGBMError::new_err(format!(
+                "Tried to retrieve number of bins for feature index {feature}, \
+                 but the valid feature indices are [0, {}].",
+                total as i64 - 1
+            )));
+        }
+        Ok(self.ds.feature_num_bin(feature as usize))
+    }
+
     /// Labels as stored natively (float32, NaN mapped to 0 and clamped like upstream's
     /// `Metadata::SetLabel`), for `Dataset.get_label` after construction.
     fn label<'py>(&self, py: Python<'py>) -> Bound<'py, numpy::PyArray1<f32>> {

@@ -853,6 +853,18 @@ class Dataset:
     def num_feature(self) -> int:
         return self.construct()._handle_or_raise().num_feature()
 
+    def feature_num_bin(self, feature: int | str) -> int:
+        """Number of bins of a feature given by index or name (0 for features that are not used).
+
+        upstream: python-package/lightgbm/basic.py (v4.7.0) ``Dataset.feature_num_bin``
+        """
+        self.construct()
+        if isinstance(feature, str):
+            if feature not in self.feature_name:
+                raise LightGBMError(f"Could not find feature name {feature} in the dataset")
+            feature = self.feature_name.index(feature)
+        return self._handle_or_raise().feature_num_bin(int(feature))
+
     def create_valid(
         self,
         data: Any,
