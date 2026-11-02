@@ -38,6 +38,8 @@ impl BinaryLogloss {
         if !need_train {
             log::warn!("Contains only one class");
         }
+        // upstream: src/objective/binary_objective.hpp (v4.7.0) Init
+        log::info!("Number of positive: {cnt_positive}, number of negative: {cnt_negative}");
         let mut label_weights = [1.0f64, 1.0];
         if cfg.is_unbalance && cnt_positive > 0 && cnt_negative > 0 {
             if cnt_positive > cnt_negative {
@@ -105,7 +107,10 @@ impl Objective for BinaryLogloss {
         };
         let eps = f64::from(K_EPSILON);
         let pavg = (suml / sumw).min(1.0 - eps).max(eps);
-        (pavg / (1.0 - pavg)).ln() / self.sigmoid
+        let initscore = (pavg / (1.0 - pavg)).ln() / self.sigmoid;
+        // upstream: src/objective/binary_objective.hpp (v4.7.0) BoostFromScore
+        log::info!("[binary:BoostFromScore]: pavg={pavg:.6} -> initscore={initscore:.6}");
+        initscore
     }
 
     fn is_constant_hessian(&self) -> bool {

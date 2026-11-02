@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Training logs the same Info lines as upstream for a binary objective and at tree-learner start: class counts, `Total Bins`, the training data-point count, and `[binary:BoostFromScore]` with the average and init score.
+
 - `log_evaluation` prints its `[i]` lines by default and sends them to a logger registered with `register_logger`, as upstream does. Before, bankai wrote them to the stdlib logger, so by default nothing was printed.
 
 - `train` runs every requested round even after an iteration finds no splits, evaluating the validation sets on each round, as upstream does. Before, training stopped at the first such round and the validation history was shorter.
