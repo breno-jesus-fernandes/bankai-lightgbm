@@ -81,104 +81,119 @@ def train(
         train_set.feature_name = feature_name
     if categorical_feature != "auto":
         train_set.categorical_feature = categorical_feature
+    # upstream: engine.py (v4.7.0) train(), `train_set._reverse_update_params()` in `finally`:
+    # the training parameters are only applied to the Dataset while it trains.
+    params_back_up = dict(train_set.params)
     train_set.params.update(params)
-    if train_set.position is not None and str(
-        params.get("objective", params.get("application", ""))
-    ).lower() in {"lambdarank", "rank_xendcg", "xendcg", "xe_ndcg", "xe_ndcg_mart", "xendcg_mart"}:
-        raise NotImplementedError(
-            "position bias for ranking objectives is not implemented yet (ROADMAP P4)"
-        )
-    booster = Booster(params=params, train_set=train_set)
-    if init_model is not None:
-        booster._continue_from(init_model)
-    # upstream: engine.py (v4.7.0) train() resets it after constructing the Booster.
-    booster.best_iteration = 0
-    if valid_sets is None and not callbacks and fobj is None:
-        booster._train(num_boost_round)
-        return _finish_training(booster, keep_training_booster)
-
-    if valid_sets is None:
-        eval_sets = []
-    elif isinstance(valid_sets, Dataset):
-        eval_sets = [valid_sets]
-    else:
-        eval_sets = list(valid_sets)
-    # upstream: engine.py (v4.7.0) train(). The training set is evaluated first, under
-    # ``valid_names[i]`` or "training"; other sets keep their original index in "valid_{i}".
-    # A ``valid_names`` shorter than ``valid_sets`` only names the first sets, as upstream does.
-    named: list[tuple[Dataset, str]] = []
-    for i, valid_set in enumerate(eval_sets):
-        given = valid_names[i] if valid_names is not None and i < len(valid_names) else None
-        if valid_set is train_set:
-            booster._train_data_name = given if given is not None else "training"
-            named.insert(0, (valid_set, booster._train_data_name))
-        else:
-            named.append((valid_set, given if given is not None else f"valid_{i}"))
-    for valid_set, name in named:
-        booster.add_valid(valid_set, name)
-
-    callback_list: list[Callable[[CallbackEnv], None]] = list(callbacks or [])
-    early_rounds_value = 0
-    for alias in (
-        "early_stopping_round",
-        "early_stopping_rounds",
-        "early_stopping",
-        "n_iter_no_change",
-    ):
-        if alias in params:
-            early_rounds_value = params[alias]
-            break
-    early_rounds = int(early_rounds_value or 0)
-    if early_rounds > 0 and not any(
-        isinstance(callback, _EarlyStoppingCallback) for callback in callback_list
-    ):
-        callback_list.append(
-            early_stopping(
-                early_rounds,
-                first_metric_only=_to_bool(params.get("first_metric_only", False)),
-                min_delta=float(params.get("early_stopping_min_delta", 0.0)),
+    try:
+        if train_set.position is not None and str(
+            params.get("objective", params.get("application", ""))
+        ).lower() in {
+            "lambdarank",
+            "rank_xendcg",
+            "xendcg",
+            "xe_ndcg",
+            "xe_ndcg_mart",
+            "xendcg_mart",
+        }:
+            raise NotImplementedError(
+                "position bias for ranking objectives is not implemented yet (ROADMAP P4)"
             )
-        )
-    for callback in callback_list:
-        before_training = getattr(callback, "before_training", None)
-        if before_training is not None:
-            model = before_training(booster)
-            if model is not None:
-                booster = model
-    callback_list.sort(key=lambda callback: getattr(callback, "order", 0))
-    before_callbacks = [
-        callback for callback in callback_list if getattr(callback, "before_iteration", False)
-    ]
-    after_callbacks = [
-        callback for callback in callback_list if not getattr(callback, "before_iteration", False)
-    ]
+        booster = Booster(params=params, train_set=train_set)
+        if init_model is not None:
+            booster._continue_from(init_model)
+        # upstream: engine.py (v4.7.0) train() resets it after constructing the Booster.
+        booster.best_iteration = 0
+        if valid_sets is None and not callbacks and fobj is None:
+            booster._train(num_boost_round)
+            return _finish_training(booster, keep_training_booster)
 
-    for iteration in range(num_boost_round):
-        before_env = CallbackEnv(booster, params, iteration, 0, num_boost_round, None)
-        for callback in before_callbacks:
-            callback(before_env)
-        finished = booster.update(fobj=fobj)
-        # upstream: an empty list (no validation sets) is passed on, not None.
-        evaluation_result_list = booster.eval_valid(feval=feval)
-        booster.best_score = {}
-        for data_name, metric_name, value, _ in evaluation_result_list:
-            booster.best_score.setdefault(data_name, {})[metric_name] = value
-        after_env = CallbackEnv(
-            booster, params, iteration, 0, num_boost_round, evaluation_result_list
-        )
-        try:
-            for callback in after_callbacks:
-                callback(after_env)
-        except EarlyStopException as stop:
-            booster.best_iteration = stop.best_iteration + 1
+        if valid_sets is None:
+            eval_sets = []
+        elif isinstance(valid_sets, Dataset):
+            eval_sets = [valid_sets]
+        else:
+            eval_sets = list(valid_sets)
+        # upstream: engine.py (v4.7.0) train(). The training set is evaluated first, under
+        # ``valid_names[i]`` or "training"; other sets keep their original index in "valid_{i}".
+        # A ``valid_names`` shorter than ``valid_sets`` only names the first sets, as upstream does.
+        named: list[tuple[Dataset, str]] = []
+        for i, valid_set in enumerate(eval_sets):
+            given = valid_names[i] if valid_names is not None and i < len(valid_names) else None
+            if valid_set is train_set:
+                booster._train_data_name = given if given is not None else "training"
+                named.insert(0, (valid_set, booster._train_data_name))
+            else:
+                named.append((valid_set, given if given is not None else f"valid_{i}"))
+        for valid_set, name in named:
+            booster.add_valid(valid_set, name)
+
+        callback_list: list[Callable[[CallbackEnv], None]] = list(callbacks or [])
+        early_rounds_value = 0
+        for alias in (
+            "early_stopping_round",
+            "early_stopping_rounds",
+            "early_stopping",
+            "n_iter_no_change",
+        ):
+            if alias in params:
+                early_rounds_value = params[alias]
+                break
+        early_rounds = int(early_rounds_value or 0)
+        if early_rounds > 0 and not any(
+            isinstance(callback, _EarlyStoppingCallback) for callback in callback_list
+        ):
+            callback_list.append(
+                early_stopping(
+                    early_rounds,
+                    first_metric_only=_to_bool(params.get("first_metric_only", False)),
+                    min_delta=float(params.get("early_stopping_min_delta", 0.0)),
+                )
+            )
+        for callback in callback_list:
+            before_training = getattr(callback, "before_training", None)
+            if before_training is not None:
+                model = before_training(booster)
+                if model is not None:
+                    booster = model
+        callback_list.sort(key=lambda callback: getattr(callback, "order", 0))
+        before_callbacks = [
+            callback for callback in callback_list if getattr(callback, "before_iteration", False)
+        ]
+        after_callbacks = [
+            callback
+            for callback in callback_list
+            if not getattr(callback, "before_iteration", False)
+        ]
+
+        for iteration in range(num_boost_round):
+            before_env = CallbackEnv(booster, params, iteration, 0, num_boost_round, None)
+            for callback in before_callbacks:
+                callback(before_env)
+            finished = booster.update(fobj=fobj)
+            # upstream: an empty list (no validation sets) is passed on, not None.
+            evaluation_result_list = booster.eval_valid(feval=feval)
             booster.best_score = {}
-            for result in stop.best_score:
-                data_name, metric_name, value = result[0], result[1], result[2]
+            for data_name, metric_name, value, _ in evaluation_result_list:
                 booster.best_score.setdefault(data_name, {})[metric_name] = value
-            break
-        if finished:
-            break
-    return _finish_training(booster, keep_training_booster)
+            after_env = CallbackEnv(
+                booster, params, iteration, 0, num_boost_round, evaluation_result_list
+            )
+            try:
+                for callback in after_callbacks:
+                    callback(after_env)
+            except EarlyStopException as stop:
+                booster.best_iteration = stop.best_iteration + 1
+                booster.best_score = {}
+                for result in stop.best_score:
+                    data_name, metric_name, value = result[0], result[1], result[2]
+                    booster.best_score.setdefault(data_name, {})[metric_name] = value
+                break
+            if finished:
+                break
+        return _finish_training(booster, keep_training_booster)
+    finally:
+        train_set.params = params_back_up
 
 
 def _finish_training(booster: Booster, keep_training_booster: bool) -> Booster:
