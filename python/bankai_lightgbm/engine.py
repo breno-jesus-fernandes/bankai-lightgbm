@@ -23,6 +23,7 @@ from bankai_lightgbm.callback import (
     CallbackEnv,
     EarlyStopException,
     _EarlyStoppingCallback,
+    _should_enable_early_stopping,
     early_stopping,
 )
 
@@ -73,6 +74,16 @@ def train(
         params["objective"] = "none"
     params = _choose_num_iterations(num_boost_round_kwarg=num_boost_round, params=params)
     num_boost_round = int(params["num_iterations"])
+    # upstream: engine.py (v4.7.0) train() resolves early stopping from the global params first,
+    # and drops it when it is None.
+    params = _choose_param_value(
+        main_param_name="early_stopping_round", params=params, default_value=None
+    )
+    if params["early_stopping_round"] is None:
+        params.pop("early_stopping_round")
+    _should_enable_early_stopping(
+        params.get("early_stopping_round", 0)
+    )  # type check before Booster
     if num_boost_round <= 0:
         raise ValueError(
             f"Number of boosting rounds must be greater than 0. Got {num_boost_round}."
@@ -114,6 +125,9 @@ def train(
             eval_sets = [valid_sets]
         else:
             eval_sets = list(valid_sets)
+        if isinstance(valid_names, str):
+            # upstream: engine.py (v4.7.0) train() accepts a single name
+            valid_names = [valid_names]
         # upstream: engine.py (v4.7.0) train(). The training set is evaluated first, under
         # ``valid_names[i]`` or "training"; other sets keep their original index in "valid_{i}".
         # A ``valid_names`` shorter than ``valid_sets`` only names the first sets, as upstream does.
@@ -132,25 +146,15 @@ def train(
             booster.add_valid(valid_set, name)
 
         callback_list: list[Callable[[CallbackEnv], None]] = list(callbacks or [])
-        early_rounds_value = 0
-        for alias in (
-            "early_stopping_round",
-            "early_stopping_rounds",
-            "early_stopping",
-            "n_iter_no_change",
-        ):
-            if alias in params:
-                early_rounds_value = params[alias]
-                break
-        early_rounds = int(early_rounds_value or 0)
-        if early_rounds > 0 and not any(
+        if _should_enable_early_stopping(params.get("early_stopping_round", 0)) and not any(
             isinstance(callback, _EarlyStoppingCallback) for callback in callback_list
         ):
             callback_list.append(
                 early_stopping(
-                    early_rounds,
+                    params["early_stopping_round"],
                     first_metric_only=_to_bool(params.get("first_metric_only", False)),
                     min_delta=float(params.get("early_stopping_min_delta", 0.0)),
+                    verbose=int(_choose_param_value("verbosity", params, 1)["verbosity"]) > 0,
                 )
             )
         for callback in callback_list:

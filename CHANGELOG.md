@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `train` resolves `early_stopping_round` from the global parameters (and its aliases) before the Booster is built, drops it when it is `None`, and rejects a non-integer value with upstream's `TypeError`. A single string passed as `valid_names` names the one validation set.
+
 - `Dataset.init_score` reads back the value from the constructed Dataset, so a pandas DataFrame passed as init score is returned as a NumPy array, as upstream does.
 
 - Validation sets are binned with the training set's bin mappers, as upstream does: `train` calls `Dataset.set_reference` on each validation set (new method). Before, each validation set was binned from its own data, which repeated the native "no meaningful features" warning and gave it different bins from the training set.
