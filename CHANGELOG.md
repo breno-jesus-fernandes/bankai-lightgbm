@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `Dataset.init_score` reads back the value from the constructed Dataset, so a pandas DataFrame passed as init score is returned as a NumPy array, as upstream does.
+
 - Validation sets are binned with the training set's bin mappers, as upstream does: `train` calls `Dataset.set_reference` on each validation set (new method). Before, each validation set was binned from its own data, which repeated the native "no meaningful features" warning and gave it different bins from the training set.
 
 - Training no longer prints the native "no meaningful features" warning twice for a run with a validation set built without a reference.
