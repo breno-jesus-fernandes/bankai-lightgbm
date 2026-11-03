@@ -957,6 +957,9 @@ class Dataset:
             self._handle = self._build()
             # upstream: Dataset._lazy_init ends with ``self.feature_name = self.get_feature_name()``
             self.feature_name = self.get_feature_name()
+            # upstream: Dataset._lazy_init sets init_score through set_init_score, so it is read back.
+            if self.init_score is not None:
+                self.init_score = self.get_init_score()
         return self
 
     def num_data(self) -> int:
@@ -1286,6 +1289,9 @@ class Dataset:
             self._handle = self._handle.with_init_score(flat)
         if self._evaluation_handle is not None:
             self._evaluation_handle = self._evaluation_handle.with_init_score(flat)
+        if self._handle is not None and init_score is not None:
+            # upstream: set_init_score re-reads the field ("original values can be modified at cpp side")
+            self.init_score = self.get_init_score()
         return self
 
     def _construct_for_eval(self) -> NativeDataset:
