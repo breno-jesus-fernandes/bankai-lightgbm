@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A Dataset records the categorical feature indices it resolved (including pandas category columns) in `params["categorical_column"]`, as upstream does.
+
 - Pandas input with a column of an unsupported dtype (string, timezone-aware datetime, period or interval) raises upstream's `ValueError` naming the bad columns, after categorical columns are converted to codes.
 
 - `Dataset` accepts a list of 2-D NumPy matrices and concatenates them by rows, as upstream does; the result is identical to one matrix holding the same rows.
