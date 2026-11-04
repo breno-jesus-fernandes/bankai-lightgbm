@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `Booster(model_file=...)` and `Booster(model_str=...)` take their parameters from the model's `parameters:` block, skipping empty values and nested lists typed as upstream does. An unknown name is dropped with upstream's warning, and passing `params` with a model warns that it is ignored.
+
 - A Dataset records the categorical feature indices it resolved (including pandas category columns) in `params["categorical_column"]`, as upstream does.
 
 - Pandas input with a column of an unsupported dtype (string, timezone-aware datetime, period or interval) raises upstream's `ValueError` naming the bad columns, after categorical columns are converted to codes.

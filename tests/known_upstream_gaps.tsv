@@ -55,7 +55,6 @@ tests/python_package_test/test_engine.py::test_monotone_penalty_max	monotone con
 tests/python_package_test/test_engine.py::test_multiclass_rf	RF parity with upstream, not triaged (ROADMAP P5 RF)
 tests/python_package_test/test_engine.py::test_pandas_nullable_dtypes	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
 tests/python_package_test/test_engine.py::test_pandas_with_numpy_regular_dtypes	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_engine.py::test_parameters_are_loaded_from_model_file	Booster Python surface, pending items (ROADMAP P6 Booster)
 tests/python_package_test/test_engine.py::test_ranking_with_position_information_with_dataset_constructor	position bias in ranking (ROADMAP P4 position bias)
 tests/python_package_test/test_engine.py::test_ranking_with_position_information_with_file	position bias in ranking (ROADMAP P4 position bias)
 tests/python_package_test/test_engine.py::test_refit	refit (ROADMAP P3 refit)
