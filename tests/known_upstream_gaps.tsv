@@ -70,4 +70,3 @@ tests/python_package_test/test_engine.py::test_save_and_load_linear	linear_tree 
 tests/python_package_test/test_engine.py::test_string_serialized_params_retrieval	Booster Python surface, pending items (ROADMAP P6 Booster)
 tests/python_package_test/test_engine.py::test_trees_to_dataframe	Booster Python surface, pending items (ROADMAP P6 Booster)
 tests/python_package_test/test_engine.py::test_validate_features	not triaged (ROADMAP P6 Python package)
-tests/python_package_test/test_pandas.py::test_pandas_categorical_encoding	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)

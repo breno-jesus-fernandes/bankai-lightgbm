@@ -1388,8 +1388,14 @@ class Dataset:
         if self.reference is not None:
             categorical = self.reference._categorical.copy()
         self._categorical = categorical
+        if categorical:
+            # upstream: basic.py (v4.7.0) Dataset._lazy_init records the resolved indices in params
+            self.params["categorical_column"] = sorted(int(c) for c in categorical)
         params = _params_to_strings(self.params)
         if categorical:
+            # one categorical key reaches the native layer; a second alias would be ignored with a warning
+            for alias in _CATEGORICAL_FEATURE_ALIASES:
+                params.pop(alias, None)
             params["categorical_feature"] = ",".join(str(c) for c in categorical)
         weight = None
         if self.weight is not None:
@@ -1711,6 +1717,9 @@ class Booster:
             dataset = self._train_set.construct()
             merged = {**dataset.params, **self.params}
             if dataset._categorical:
+                # one categorical key only; a second alias is reported as ignored by the native config
+                for alias in _CATEGORICAL_FEATURE_ALIASES:
+                    merged.pop(alias, None)
                 merged["categorical_feature"] = ",".join(str(c) for c in dataset._categorical)
             self._handle = NativeBooster.create_training(
                 _params_to_strings(merged), dataset._handle_or_raise(), self._init_model
