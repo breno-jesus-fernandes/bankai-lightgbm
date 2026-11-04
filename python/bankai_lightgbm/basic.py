@@ -1519,14 +1519,24 @@ class Booster:
             return
         if model_file is not None:
             self._handle = NativeBooster.from_file(str(model_file))
+            source = "file"
         elif model_str is not None:
             self._handle = NativeBooster.from_string(model_str)
+            source = "string"
         else:
             raise TypeError(
                 "Need at least one training dataset or model file or model string "
                 "to create Booster instance"
             )
+        if params:
+            warnings.warn(
+                f"Ignoring params argument, using parameters from model {source}.",
+                UserWarning,
+                stacklevel=2,
+            )
         self.pandas_categorical = _load_pandas_categorical(self._native().pandas_categorical())
+        # upstream: Booster.__init__ takes the parameters from the model (GetLoadedParam).
+        self.params = self._get_loaded_param()
 
     def _native(self) -> NativeBooster:
         if self._handle is None:
@@ -1673,8 +1683,9 @@ class Booster:
     def _get_loaded_param(self) -> dict[str, Any]:
         """Parameters of the ``parameters:`` block of the model text (upstream ``GetLoadedParam``).
 
-        upstream: src/boosting/gbdt.h (v4.7.0) ``GetLoadedParam`` returns the same block as a
-        JSON object typed by ``Config::ParameterTypes``; here the types are read from the text.
+        upstream: src/boosting/gbdt.h (v4.7.0) ``GetLoadedParam``: empty values are skipped and
+        unknown names are dropped with a warning. Values are typed from the text, as upstream
+        types them by ``Config::ParameterTypes``: nested ``[a,b],[c]`` lists become lists.
         """
         text = self.model_to_string()
         header = "\nparameters:\n"
@@ -1682,10 +1693,22 @@ class Booster:
         if start < 0:
             return {}
         block = text[start + len(header) : text.find("\nend of parameters", start)]
+        known = _known_parameter_names()
         out: dict[str, Any] = {}
         for line in block.splitlines():
-            if line.startswith("[") and line.endswith("]") and ": " in line:
-                key, _, value = line[1:-1].partition(": ")
+            if not (line.startswith("[") and line.endswith("]") and ": " in line):
+                continue
+            key, _, value = line[1:-1].partition(": ")
+            if value == "":
+                continue
+            if key not in known:
+                _log_info(
+                    f"[LightGBM] [Warning] Ignoring unrecognized parameter '{key}' found in model string."
+                )
+                continue
+            if value.startswith("["):
+                out[key] = json.loads(f"[{value}]")
+            else:
                 out[key] = _typed_param_value(value)
         return out
 
