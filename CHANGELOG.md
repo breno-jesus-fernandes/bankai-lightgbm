@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Pandas input with a column of an unsupported dtype (string, timezone-aware datetime, period or interval) raises upstream's `ValueError` naming the bad columns, after categorical columns are converted to codes.
+
 - `Dataset` accepts a list of 2-D NumPy matrices and concatenates them by rows, as upstream does; the result is identical to one matrix holding the same rows.
 
 - `train` resolves `early_stopping_round` from the global parameters (and its aliases) before the Booster is built, drops it when it is `None`, and rejects a non-integer value with upstream's `TypeError`. A single string passed as `valid_names` names the one validation set.

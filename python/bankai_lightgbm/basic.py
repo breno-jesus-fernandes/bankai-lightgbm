@@ -380,6 +380,8 @@ def _pandas_to_matrix(data: Any, pandas_categorical: list[list[Any]] | None) -> 
         for col in cat_cols:
             codes = data[col].cat.codes.astype(np.float64)
             data[col] = codes.where(codes != -1, np.nan)
+    # upstream: basic.py (v4.7.0) _pandas_to_numpy checks the converted frame's dtypes
+    _check_for_bad_pandas_dtypes(data.dtypes)
     return np.asarray(data.to_numpy(dtype=np.float64, na_value=np.nan))
 
 
