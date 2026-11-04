@@ -71,7 +71,3 @@ tests/python_package_test/test_engine.py::test_string_serialized_params_retrieva
 tests/python_package_test/test_engine.py::test_trees_to_dataframe	Booster Python surface, pending items (ROADMAP P6 Booster)
 tests/python_package_test/test_engine.py::test_validate_features	not triaged (ROADMAP P6 Python package)
 tests/python_package_test/test_pandas.py::test_pandas_categorical_encoding	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_unsupported_dtypes[dtype0-values0]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_unsupported_dtypes[dtype1-values1]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_unsupported_dtypes[dtype2-values2]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
-tests/python_package_test/test_pandas.py::test_pandas_unsupported_dtypes[dtype3-values3]	pandas dtype and categorical handling, not triaged (ROADMAP P6 Dataset)
