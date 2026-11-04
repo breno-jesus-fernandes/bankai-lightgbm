@@ -1337,6 +1337,13 @@ class Dataset:
             matrix = _pandas_to_matrix(self.data, self.pandas_categorical)
         elif _is_sequence_data(self.data):
             matrix = _rows_from_sequences(self.data)
+        elif (
+            isinstance(self.data, list)
+            and self.data
+            and all(isinstance(x, np.ndarray) and x.ndim == 2 for x in self.data)
+        ):
+            # upstream: Dataset.__init_from_list_np2d concatenates the matrices by rows
+            matrix = np.vstack(self.data)
         else:
             # upstream: _data_from_pyarrow_table and _data_from_polars_frame take the column names.
             table_columns = _table_column_names(self.data)
