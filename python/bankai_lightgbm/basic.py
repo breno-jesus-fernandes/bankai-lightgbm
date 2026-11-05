@@ -1799,6 +1799,17 @@ class Booster:
             )
         return results
 
+    def eval_train(self, feval: Any = None) -> list[tuple[str, str, float, bool]]:
+        """Evaluate configured and custom metrics on the training data (upstream ``eval_train``).
+
+        upstream: python-package/lightgbm/basic.py (v4.7.0) ``Booster.eval_train``; the results
+        are ``(dataset_name, metric_name, value, is_higher_better)`` tuples.
+        """
+        if self._train_set is None:
+            raise LightGBMError("Cannot eval training data: the Booster has no training Dataset")
+        results = self.eval(self._train_set, self._train_data_name, feval=feval)
+        return [(r[0], r[1], r[2], r[3]) for r in results]
+
     def eval_valid(self, feval: Any = None) -> list[tuple[str, str, float, bool]]:
         """Evaluate configured and custom metrics on registered validation data."""
         custom_metrics = _custom_metrics(feval)
