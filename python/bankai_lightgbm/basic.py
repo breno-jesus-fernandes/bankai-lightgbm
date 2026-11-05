@@ -1597,9 +1597,14 @@ class Booster:
         self._handle: NativeBooster | None = None
         # Trees of the model that continued training starts from (``init_model``).
         self._init_model: NativeBooster | None = None
+        # upstream: Booster.__init__ tracks the validation Datasets and their names; the count
+        # includes the training Dataset (1) once the Booster trains. The lists exist only on a
+        # Booster that trains (free_dataset removes them).
+        self.__num_dataset = 0
         if train_set is not None:
-            # Validation Datasets are tracked only for a booster that trains (see free_dataset).
-            self.valid_sets: list[tuple[Dataset, str]] = []
+            self.valid_sets: list[Dataset] = []
+            self.name_valid_sets: list[str] = []
+            self.__num_dataset = 1
             if model_file is not None or model_str is not None:
                 raise TypeError("Booster cannot take both a training set and a model")
             merged_params = {**getattr(train_set, "params", {}), **self.params}
@@ -1916,7 +1921,30 @@ class Booster:
         """
         self._train_set = None
         self.__dict__.pop("valid_sets", None)
+        self.__dict__.pop("name_valid_sets", None)
         return self
+
+    def _ensure_training_handle(self) -> None:
+        """Create the native booster for the training Dataset when it does not exist yet.
+
+        upstream: ``Booster.__init__`` creates the C++ booster, so evaluation works before the
+        first iteration. The handle holds no trees until ``update`` adds them.
+        """
+        if self._handle is not None:
+            return
+        if self._train_set is None:
+            raise LightGBMError("Booster has no training Dataset")
+        dataset = self._train_set.construct()
+        merged = {**dataset.params, **self.params}
+        if dataset._categorical:
+            # one categorical key only; a second alias is reported as ignored by the native config
+            for alias in _CATEGORICAL_FEATURE_ALIASES:
+                merged.pop(alias, None)
+            merged["categorical_feature"] = ",".join(str(c) for c in dataset._categorical)
+        self._handle = NativeBooster.create_training(
+            _params_to_strings(merged), dataset._handle_or_raise(), self._init_model
+        )
+        self.pandas_categorical = dataset.pandas_categorical
 
     def update(self, train_set: Dataset | None = None, fobj: Any = None) -> bool:
         """Train one additional iteration and return whether training has finished."""
@@ -1928,20 +1956,7 @@ class Booster:
             if self._train_set is not None and train_set is not self._train_set:
                 raise NotImplementedError("changing the training Dataset is not implemented yet")
             self._train_set = train_set
-        if self._handle is None:
-            if self._train_set is None:
-                raise LightGBMError("Booster has no training Dataset")
-            dataset = self._train_set.construct()
-            merged = {**dataset.params, **self.params}
-            if dataset._categorical:
-                # one categorical key only; a second alias is reported as ignored by the native config
-                for alias in _CATEGORICAL_FEATURE_ALIASES:
-                    merged.pop(alias, None)
-                merged["categorical_feature"] = ",".join(str(c) for c in dataset._categorical)
-            self._handle = NativeBooster.create_training(
-                _params_to_strings(merged), dataset._handle_or_raise(), self._init_model
-            )
-            self.pandas_categorical = dataset.pandas_categorical
+        self._ensure_training_handle()
         if fobj is not None:
             # upstream: fobj(self.__inner_predict(data_idx=0), ...) -- the internal raw
             # training score (init score included; DART drops this iteration's trees first),
@@ -1971,8 +1986,10 @@ class Booster:
         return self._native().update()
 
     def add_valid(self, data: Dataset, name: str) -> None:
-        """Register a validation dataset for :meth:`eval_valid`."""
-        self.__dict__.setdefault("valid_sets", []).append((data, name))
+        """Register a validation dataset for :meth:`eval_valid` (upstream ``add_valid``)."""
+        self.__dict__.setdefault("valid_sets", []).append(data)
+        self.__dict__.setdefault("name_valid_sets", []).append(name)
+        self.__num_dataset += 1
 
     def eval(self, data: Dataset, name: str, feval: Any = None) -> list[EvalResult]:
         """Evaluate the configured metrics on ``data`` (upstream ``Booster.eval``).
@@ -1981,6 +1998,13 @@ class Booster:
         """
         if not isinstance(data, Dataset):
             raise TypeError("Can only eval for Dataset instance")
+        # upstream: data that is neither the training set nor a registered validation set is added.
+        if data is not self._train_set and not any(
+            data is v for v in self.__dict__.get("valid_sets", [])
+        ):
+            self.add_valid(data, name)
+        if self._train_set is not None:
+            self._ensure_training_handle()
         params = {**data.params, **self.params}
         native = self._native().eval(data._construct_for_eval(), _params_to_strings(params), name)
         results = [EvalResult(*item) for item in native]
@@ -2008,7 +2032,9 @@ class Booster:
         """Evaluate configured and custom metrics on registered validation data."""
         custom_metrics = _custom_metrics(feval)
         results: list[tuple[str, str, float, bool]] = []
-        for dataset, name in self.__dict__.get("valid_sets", []):
+        valid_sets = self.__dict__.get("valid_sets", [])
+        names = self.__dict__.get("name_valid_sets", [])
+        for dataset, name in zip(valid_sets, names, strict=True):
             native_dataset = dataset._construct_for_eval()
             params = {**dataset.params, **self.params}
             results.extend(self._native().eval(native_dataset, _params_to_strings(params), name))
@@ -2049,6 +2075,7 @@ class Booster:
         # upstream: Booster.__getstate__ drops the Datasets, which hold native handles
         this.pop("_train_set", None)
         this.pop("valid_sets", None)
+        this.pop("name_valid_sets", None)
         this.pop("_init_model", None)
         this["_handle"] = self.model_to_string(num_iteration=-1)
         return this
@@ -2059,6 +2086,7 @@ class Booster:
             state["_handle"] = NativeBooster.from_string(model_str)
         state.setdefault("_train_set", None)
         state.setdefault("valid_sets", [])
+        state.setdefault("name_valid_sets", [])
         state.setdefault("_init_model", None)
         self.__dict__.update(state)
 
