@@ -22,7 +22,13 @@ import numpy as np
 import numpy.typing as npt
 import scipy.sparse
 
-from bankai_lightgbm._lib import LightGBMError, NativeBooster, NativeDataset, validate_params
+from bankai_lightgbm._lib import (
+    LightGBMError,
+    NativeBooster,
+    NativeDataset,
+    dataset_check_reset_config,
+    validate_params,
+)
 from bankai_lightgbm.compat import PANDAS_INSTALLED
 from bankai_lightgbm.compat import pd_DataFrame as pd_DataFrame
 from bankai_lightgbm.compat import pd_Series as pd_Series
@@ -1016,6 +1022,21 @@ class Dataset:
     def get_data(self) -> Any:
         """Return the raw data this Dataset was created from (upstream ``get_data``)."""
         return self.data
+
+    def _check_update_params(self, params: dict[str, Any]) -> None:
+        """Raise if ``params`` cannot be applied to this constructed Dataset (upstream ``_update_params``).
+
+        upstream: python-package/lightgbm/basic.py (v4.7.0) ``Dataset._update_params`` calls
+        ``LGBM_DatasetUpdateParamChecking``; a failure is raised only once the raw data is freed,
+        because otherwise the Dataset can be rebuilt from its data. bankai keeps the raw data, so
+        "freed" stands for ``free_raw_data=True`` on a constructed Dataset, which is when upstream
+        frees it.
+        """
+        if self._handle is None or not self.free_raw_data or not params:
+            return
+        # bankai records its resolved categorical indices under its own key; upstream has none.
+        old = {k: v for k, v in self.params.items() if k != "categorical_column"}
+        dataset_check_reset_config(_params_to_strings(old), _params_to_strings(params))
 
     def set_reference(self, reference: Dataset) -> Dataset:
         """Use ``reference``'s bin mappers, categorical features and feature names (upstream ``set_reference``).

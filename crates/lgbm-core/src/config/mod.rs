@@ -718,6 +718,66 @@ impl fmt::Display for Config {
     }
 }
 
+/// Check that a Dataset built with `old` can take the parameters in `new_params`.
+///
+/// upstream: src/c_api.cpp (v4.7.0) `Booster::CheckDatasetResetConfig`. A key is only checked
+/// when it is present in `new_params`; the dataset-binning keys cannot change once the Dataset
+/// is constructed, and `min_data_in_leaf` cannot drop below its old value while
+/// `feature_pre_filter` is on.
+pub fn check_dataset_reset_config(
+    old: &Config,
+    new_params: &HashMap<String, String>,
+) -> Result<()> {
+    let new = Config::from_params(new_params)?;
+    macro_rules! unchanged {
+        ($key:literal, $field:ident) => {
+            if new_params.contains_key($key) && new.$field != old.$field {
+                return Err(Error::InvalidParameter(format!(
+                    "Cannot change {} after constructed Dataset handle.",
+                    $key
+                )));
+            }
+        };
+    }
+    unchanged!("data_random_seed", data_random_seed);
+    unchanged!("max_bin", max_bin);
+    unchanged!("max_bin_by_feature", max_bin_by_feature);
+    unchanged!("bin_construct_sample_cnt", bin_construct_sample_cnt);
+    unchanged!("min_data_in_bin", min_data_in_bin);
+    unchanged!("use_missing", use_missing);
+    unchanged!("zero_as_missing", zero_as_missing);
+    unchanged!("categorical_feature", categorical_feature);
+    unchanged!("feature_pre_filter", feature_pre_filter);
+    unchanged!("is_enable_sparse", is_enable_sparse);
+    unchanged!("pre_partition", pre_partition);
+    unchanged!("enable_bundle", enable_bundle);
+    unchanged!("header", header);
+    unchanged!("two_round", two_round);
+    unchanged!("label_column", label_column);
+    unchanged!("weight_column", weight_column);
+    unchanged!("group_column", group_column);
+    unchanged!("ignore_column", ignore_column);
+    if new_params.contains_key("forcedbins_filename") {
+        return Err(Error::InvalidParameter(
+            "Cannot change forced bins after constructed Dataset handle.".to_string(),
+        ));
+    }
+    if new_params.contains_key("min_data_in_leaf")
+        && new.min_data_in_leaf < old.min_data_in_leaf
+        && old.feature_pre_filter
+    {
+        return Err(Error::InvalidParameter(
+            "Reducing `min_data_in_leaf` with `feature_pre_filter=true` may cause unexpected \
+             behaviour for features that were pre-filtered by the larger `min_data_in_leaf`. \
+             You need to set `feature_pre_filter=false` to dynamically change the `min_data_in_leaf`."
+                .to_string(),
+        ));
+    }
+    unchanged!("linear_tree", linear_tree);
+    unchanged!("precise_float_parser", precise_float_parser);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -826,5 +886,52 @@ mod tests {
             c.interaction_constraints_vector,
             vec![vec![0, 1], vec![2, 3]]
         );
+    }
+
+    // Red tests for `check_dataset_reset_config` (upstream: src/c_api.cpp (v4.7.0)
+    // `Booster::CheckDatasetResetConfig`). Written before the function existed.
+    #[test]
+    fn dataset_reset_rejects_changed_max_bin() {
+        let old = Config::from_str_params("max_bin=255").unwrap();
+        let err = check_dataset_reset_config(&old, &p(&[("max_bin", "100")])).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot change max_bin after constructed Dataset handle.")
+        );
+    }
+
+    #[test]
+    fn dataset_reset_allows_unchanged_values() {
+        let old = Config::from_str_params("max_bin=255").unwrap();
+        assert!(check_dataset_reset_config(&old, &p(&[("max_bin", "255")])).is_ok());
+        assert!(check_dataset_reset_config(&old, &p(&[("num_leaves", "7")])).is_ok());
+    }
+
+    #[test]
+    fn dataset_reset_rejects_any_forced_bins_file() {
+        let old = Config::default();
+        let err =
+            check_dataset_reset_config(&old, &p(&[("forcedbins_filename", "x.json")])).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot change forced bins after constructed Dataset handle.")
+        );
+    }
+
+    #[test]
+    fn dataset_reset_min_data_in_leaf_reduction_depends_on_pre_filter() {
+        let filtered =
+            Config::from_str_params("min_data_in_leaf=10 feature_pre_filter=true").unwrap();
+        let err =
+            check_dataset_reset_config(&filtered, &p(&[("min_data_in_leaf", "5")])).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Reducing `min_data_in_leaf` with `feature_pre_filter=true` may")
+        );
+        assert!(check_dataset_reset_config(&filtered, &p(&[("min_data_in_leaf", "20")])).is_ok());
+
+        let unfiltered =
+            Config::from_str_params("min_data_in_leaf=10 feature_pre_filter=false").unwrap();
+        assert!(check_dataset_reset_config(&unfiltered, &p(&[("min_data_in_leaf", "5")])).is_ok());
     }
 }
