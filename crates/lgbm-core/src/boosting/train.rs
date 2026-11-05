@@ -66,6 +66,35 @@ impl Gbdt {
     }
 }
 
+/// Validate a forced-splits file against the dataset's features (upstream: src/boosting/gbdt.cpp
+/// (v4.7.0) `GBDT::CheckForcedSplitFeatures`). Forced splits are not implemented yet, so a file
+/// that passes the check is reported as unsupported rather than ignored.
+pub fn check_forced_split_features(path: &str, max_feature_idx: i32) -> Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let root: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| Error::Parse(format!("forced splits file {path}: {e}")))?;
+    let mut queue = std::collections::VecDeque::from([root]);
+    while let Some(node) = queue.pop_front() {
+        let feature = node
+            .get("feature")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        if feature > i64::from(max_feature_idx) {
+            return Err(Error::InvalidParameter(format!(
+                "Forced splits file includes feature index {feature}, but maximum feature index in dataset is {max_feature_idx}"
+            )));
+        }
+        for side in ["left", "right"] {
+            if let Some(child) = node.get(side) {
+                queue.push_back(child.clone());
+            }
+        }
+    }
+    Err(Error::Unsupported(
+        "forced splits (forcedsplits_filename)".into(),
+    ))
+}
+
 /// A booster that trains one iteration at a time (upstream `Booster::UpdateOneIter`).
 /// It owns its configuration and training data, so it can outlive the caller's references.
 pub struct GbdtTrainer {
@@ -83,6 +112,10 @@ impl GbdtTrainer {
                 "RF mode do not support custom objective function, please use built-in objectives."
                     .into(),
             ));
+        }
+        if !cfg.forcedsplits_filename.is_empty() {
+            let max_feature_idx = ds.layout.num_total_features as i32 - 1;
+            check_forced_split_features(&cfg.forcedsplits_filename, max_feature_idx)?;
         }
         let objective = create_objective(&cfg, &ds.metadata)?;
         Ok(GbdtTrainer {
@@ -884,5 +917,38 @@ mod tests {
             incremental.save_model_to_string(0, -1, 0).unwrap(),
             batch.save_model_to_string(0, -1, 0).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod forced_split_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    fn write(name: &str, body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("lgbm-forced-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("forced.json");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    // Red tests for `check_forced_split_features` (upstream: src/boosting/gbdt.cpp (v4.7.0)
+    // `GBDT::CheckForcedSplitFeatures`), written before the function existed.
+    #[test]
+    fn forced_split_feature_beyond_the_dataset_is_rejected() {
+        let path = write("bad", r#"{"feature": 0, "left": {"feature": 2}}"#);
+        let err = check_forced_split_features(path.to_str().unwrap(), 1).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Forced splits file includes feature index 2")
+        );
+    }
+
+    #[test]
+    fn valid_forced_splits_file_is_reported_as_unsupported() {
+        let path = write("ok", r#"{"feature": 0, "right": {"feature": 1}}"#);
+        let err = check_forced_split_features(path.to_str().unwrap(), 1).unwrap_err();
+        assert!(matches!(err, Error::Unsupported(_)));
     }
 }
