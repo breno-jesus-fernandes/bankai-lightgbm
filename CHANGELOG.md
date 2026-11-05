@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A `forcedsplits_filename` is no longer ignored: the forced-splits file is checked against the dataset's features ("Forced splits file includes feature index ..."), and a valid file raises `not supported yet` because forced splits are not implemented. `serde_json` is now a runtime dependency of `lgbm-core` for this check.
+
 - `Dataset.subset` of a Dataset built from `Sequence` objects reads the selected rows from the sources, instead of indexing the list of sources.
 
 - `Booster.valid_sets` holds the validation Datasets and `name_valid_sets` their names, as upstream does. `Booster.eval` on a Dataset that is not registered adds it as a validation set, and a Booster evaluates before its first iteration (the native training handle is created on demand).
