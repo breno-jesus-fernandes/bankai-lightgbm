@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Before construction, `Dataset.get_label`, `get_weight`, `get_init_score`, `get_group` and `get_position` return the values as provided, and `get_field` raises `Cannot get <field> before construct Dataset`, as upstream does. After construction, label, weight, init score and group are read back from the native Dataset (NaN becomes 0, infinities are clamped, group becomes int32 sizes), so the Python attributes match what training uses.
+
 - A validation Dataset built with `reference=` takes the reference's parameters when it is constructed, as upstream does. A warning "Overriding the parameters from Reference Dataset." is emitted when they differ, except when only the categorical-feature settings differ.
 
 - `Booster.eval_train` returns the training data's metrics as `(dataset_name, metric_name, value, is_higher_better)` tuples, as upstream does. It raises `LightGBMError` when the Booster has no training Dataset (for example after `lgb.train` frees it).

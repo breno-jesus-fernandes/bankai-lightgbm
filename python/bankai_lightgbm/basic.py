@@ -962,6 +962,13 @@ class Dataset:
             # upstream: Dataset._lazy_init sets init_score through set_init_score, so it is read back.
             if self.init_score is not None:
                 self.init_score = self.get_init_score()
+            # upstream: the label and weight are re-read from the native Dataset too (sanitized values).
+            if self.label is not None:
+                self.label = self.get_label()
+            if self.weight is not None:
+                self.weight = self.get_weight()
+            if self.group is not None:
+                self.group = self.get_group()
         return self
 
     def num_data(self) -> int:
@@ -1068,8 +1075,14 @@ class Dataset:
         setters[field_name](data)
         return self
 
-    def get_field(self, field_name: str) -> npt.NDArray[Any] | None:
-        """Get a field by name; ``group`` returns the query boundaries (upstream ``get_field``)."""
+    def get_field(self, field_name: str) -> Any:
+        """Get a field by name; ``group`` returns the query boundaries (upstream ``get_field``).
+
+        upstream: python-package/lightgbm/basic.py (v4.7.0) ``Dataset.get_field`` raises
+        ``Cannot get <field> before construct Dataset`` for a Dataset that is not constructed.
+        """
+        if self._handle is None:
+            raise LightGBMError(f"Cannot get {field_name} before construct Dataset")
         if field_name == "label":
             return self.get_label()
         if field_name == "weight":
@@ -1089,17 +1102,16 @@ class Dataset:
             return np.concatenate(([0], np.cumsum(group))).astype(np.int32)
         raise NotImplementedError(f"field '{field_name}' is not supported yet (roadmap P2)")
 
-    def get_label(self) -> npt.NDArray[np.float32] | None:
+    def get_label(self) -> Any:
         """Return the dataset labels as a one-dimensional float32 array.
 
         Once constructed, the labels are read back from the native Dataset, as upstream's
         ``set_label`` does, so non-finite values come back sanitized (NaN -> 0, +-1e38).
         """
-        if self._handle is not None:
-            return np.asarray(self._handle.label(), dtype=np.float32)
-        if self.label is None:
-            return None
-        return np.asarray(self.label, dtype=np.float32).reshape(-1)
+        if self._handle is None:
+            # upstream: before construction the labels are returned as they were provided.
+            return self.label
+        return np.asarray(self._handle.label(), dtype=np.float32)
 
     def subset(self, used_indices: Any, params: dict[str, Any] | None = None) -> Dataset:
         """Select rows while reusing this Dataset's bin mappers."""
@@ -1184,27 +1196,40 @@ class Dataset:
             raise LightGBMError("Dataset is not constructed")
         return self._handle
 
-    def get_weight(self) -> npt.NDArray[np.float32] | None:
+    def get_weight(self) -> Any:
         """Return the sample weights as a one-dimensional float32 array (read back from the
         native Dataset once constructed, sanitized like upstream)."""
-        if self._handle is not None:
-            native = self._handle.weight()
-            return None if native is None else np.asarray(native, dtype=np.float32)
-        if self.weight is None:
-            return None
-        return np.asarray(self.weight, dtype=np.float32).reshape(-1)
+        if self._handle is None:
+            # upstream: before construction the weights are returned as they were provided.
+            return self.weight
+        native = self._handle.weight()
+        return None if native is None else np.asarray(native, dtype=np.float32)
 
-    def get_group(self) -> npt.NDArray[np.int32] | None:
-        """Return the query group sizes as a one-dimensional int32 array."""
+    def get_group(self) -> Any:
+        """Return the query group sizes as a one-dimensional int32 array once constructed.
+
+        upstream: python-package/lightgbm/basic.py (v4.7.0) ``Dataset.get_group``: before
+        construction the group is returned as it was provided.
+        """
+        if self._handle is None:
+            return self.group
         if self.group is None:
             return None
         return np.asarray(self.group, dtype=np.int32).reshape(-1)
 
-    def get_init_score(self) -> npt.NDArray[np.float64] | None:
-        """Return init scores; multiclass scores are ``(num_data, num_class)``."""
+    def get_init_score(self) -> Any:
+        """Return init scores; multiclass scores are ``(num_data, num_class)``.
+
+        upstream: ``Dataset.get_init_score``: before construction the value is returned as provided.
+        """
+        if self._handle is None:
+            return self.init_score
         if self.init_score is None:
             return None
         values = np.asarray(self.init_score, dtype=np.float64).ravel(order="F")
+        if self._handle is not None:
+            # upstream: Metadata::SetInitScore stores Common::AvoidInf(x): NaN -> 0, +-1e300 clamp.
+            values = np.where(np.isnan(values), 0.0, np.clip(values, -1e300, 1e300))
         num_data = self.num_data()
         num_classes = values.size // num_data if num_data else 0
         if num_classes > 1:
@@ -1234,6 +1259,8 @@ class Dataset:
         if self._handle is not None or self._evaluation_handle is not None:
             values = np.asarray(label, dtype=np.float64).reshape(-1).tolist()
             self._update_native_fields(label=values)
+            # upstream: set_label re-reads the field ("original values can be modified at cpp side")
+            self.label = self.get_label()
         return self
 
     def set_weight(self, weight: Any) -> Dataset:
@@ -1247,6 +1274,8 @@ class Dataset:
                 else [float(w) for w in np.asarray(weight, np.float32).reshape(-1)]
             )
             self._update_native_fields(weight=values)
+            # upstream: set_weight re-reads the field ("original values can be modified at cpp side")
+            self.weight = self.get_weight()
         return self
 
     def set_position(self, position: Any) -> Dataset:
@@ -1265,8 +1294,13 @@ class Dataset:
         self.construct()
         self._handle_or_raise().dump_text(str(filename))
 
-    def get_position(self) -> npt.NDArray[np.int32] | None:
-        """Return the position of each row as dense int32 ids (upstream ``get_position``)."""
+    def get_position(self) -> Any:
+        """Return the position of each row as dense int32 ids (upstream ``get_position``).
+
+        Before construction the positions are returned as they were provided.
+        """
+        if self._handle is None:
+            return self.position
         return self.get_field("position")
 
     def set_group(self, group: Any) -> Dataset:
