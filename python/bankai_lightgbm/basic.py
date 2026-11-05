@@ -2046,6 +2046,8 @@ class Booster:
     def __getstate__(self) -> dict[str, Any]:
         this = self.__dict__.copy()
         this.pop("train_set", None)
+        # upstream: Booster.__getstate__ drops the Datasets, which hold native handles
+        this.pop("_train_set", None)
         this.pop("valid_sets", None)
         this.pop("_init_model", None)
         this["_handle"] = self.model_to_string(num_iteration=-1)
