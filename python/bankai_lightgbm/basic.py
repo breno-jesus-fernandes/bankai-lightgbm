@@ -1610,6 +1610,12 @@ class Booster:
             self.__num_dataset = 1
             if model_file is not None or model_str is not None:
                 raise TypeError("Booster cannot take both a training set and a model")
+            # upstream: basic.py Booster.__init__ constructs the Dataset and copies its
+            # parameters, which include the resolved ``categorical_column``.
+            if hasattr(train_set, "construct"):
+                train_set.construct()
+            if "categorical_column" in getattr(train_set, "params", {}):
+                self.params["categorical_column"] = train_set.params["categorical_column"]
             merged_params = {**getattr(train_set, "params", {}), **self.params}
             _log_unknown_params(merged_params)
             # upstream: Booster.__init__ creates the C++ booster (LGBM_BoosterCreate), which
@@ -1637,6 +1643,17 @@ class Booster:
         self.pandas_categorical = _load_pandas_categorical(self._native().pandas_categorical())
         # upstream: Booster.__init__ takes the parameters from the model (GetLoadedParam).
         self.params = self._get_loaded_param()
+
+    @property
+    def train_set(self) -> Dataset:
+        """The training Dataset this Booster was created with (upstream ``Booster.train_set``).
+
+        Like upstream, the attribute is absent once the Booster holds no training Dataset.
+        """
+        if self._train_set is None:
+            raise AttributeError("'Booster' object has no attribute 'train_set'")
+        dataset: Dataset = self._train_set
+        return dataset
 
     def _native(self) -> NativeBooster:
         if self._handle is None:
@@ -1948,6 +1965,93 @@ class Booster:
             _params_to_strings(merged), dataset._handle_or_raise(), self._init_model
         )
         self.pandas_categorical = dataset.pandas_categorical
+
+    def refit(
+        self,
+        data: Any,
+        label: Any,
+        decay_rate: float = 0.9,
+        reference: Dataset | None = None,
+        weight: Any = None,
+        group: Any = None,
+        init_score: Any = None,
+        feature_name: Any = "auto",
+        categorical_feature: Any = "auto",
+        dataset_params: dict[str, Any] | None = None,
+        free_raw_data: bool = True,
+        validate_features: bool = False,
+        **kwargs: Any,
+    ) -> Booster:
+        """Refit the existing trees on new data and return a new Booster.
+
+        Each tree keeps its structure; its leaf outputs become
+        ``decay_rate * old + (1 - decay_rate) * new``, where ``new`` is fitted from the new
+        data's gradients in each leaf. Same semantics as ``lightgbm.Booster.refit``.
+        """
+        # upstream: basic.py Booster.refit (v4.7.0)
+        if str(self.params.get("objective", "")) == "none":
+            raise LightGBMError("Cannot refit due to null objective function.")
+        if dataset_params is None:
+            dataset_params = {}
+        leaf_preds = np.asarray(
+            self.predict(
+                data,
+                start_iteration=0,
+                num_iteration=-1,
+                pred_leaf=True,
+                validate_features=validate_features,
+                **kwargs,
+            )
+        )
+        nrow = leaf_preds.shape[0]
+        ncol = leaf_preds.size // nrow if nrow else 0
+        new_params = dict(self.params)
+        new_params.update(dataset_params)
+        # upstream: basic.py Booster.refit reconciles the categorical columns stored in the
+        # parameters with the keyword argument; the keyword wins when it is given.
+        cat_features_from_params = None
+        for alias in _CATEGORICAL_FEATURE_ALIASES:
+            value = new_params.pop(alias, None)
+            if cat_features_from_params is None:
+                cat_features_from_params = value
+        if cat_features_from_params:
+            if categorical_feature == "auto":
+                categorical_feature = cat_features_from_params
+            elif cat_features_from_params != categorical_feature:
+                raise LightGBMError(
+                    "'categorical_feature' value passed to Booster.refit() is different from  "
+                    "'categorical_feature' value found in Booster.params. "
+                    "Preferring the value passed via keyword argument. "
+                    "Using refit() to change which columns are treated as categorical is not supported. "
+                    "If you have a valid use case for this, please open an issue at https://github.com/lightgbm-org/LightGBM/issues."
+                )
+        train_set = Dataset(
+            data=data,
+            label=label,
+            reference=reference,
+            weight=weight,
+            group=group,
+            init_score=init_score,
+            feature_name=feature_name,
+            categorical_feature=categorical_feature,
+            params=new_params,
+            free_raw_data=free_raw_data,
+        )
+        new_params["refit_decay_rate"] = decay_rate
+        new_booster = Booster(params=new_params, train_set=train_set)
+        dataset = train_set.construct()
+        merged = {**dataset.params, **new_params}
+        if dataset._categorical:
+            merged["categorical_feature"] = ",".join(str(c) for c in dataset._categorical)
+        new_booster._handle = NativeBooster.refit(
+            _params_to_strings(merged),
+            dataset._handle_or_raise(),
+            self._native(),
+            [int(v) for v in leaf_preds.reshape(-1)],
+            ncol,
+        )
+        new_booster.pandas_categorical = dataset.pandas_categorical
+        return new_booster
 
     def update(self, train_set: Dataset | None = None, fobj: Any = None) -> bool:
         """Train one additional iteration and return whether training has finished."""

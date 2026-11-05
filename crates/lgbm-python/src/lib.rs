@@ -378,6 +378,34 @@ impl NativeBooster {
         })
     }
 
+    /// Refit the trees of `source` on `dataset` (upstream `LGBM_BoosterMerge` followed by
+    /// `LGBM_BoosterRefit`). `leaf_pred` holds the leaf of every row in every tree, row-major
+    /// with `ncol` columns (one per tree).
+    #[staticmethod]
+    #[pyo3(signature = (params, dataset, source, leaf_pred, ncol))]
+    fn refit(
+        py: Python<'_>,
+        params: HashMap<String, String>,
+        dataset: PyRef<'_, NativeDataset>,
+        source: PyRef<'_, NativeBooster>,
+        leaf_pred: Vec<i32>,
+        ncol: usize,
+    ) -> PyResult<Self> {
+        let ds = Arc::clone(&dataset.ds);
+        let init = source.model.clone();
+        let trainer = py
+            .allow_threads(|| -> lgbm_core::Result<GbdtTrainer> {
+                let cfg = Arc::new(Config::from_params(&params)?);
+                GbdtTrainer::refit(cfg, ds, &init, &leaf_pred, ncol)
+            })
+            .map_err(to_py)?;
+        let model = trainer.snapshot();
+        Ok(NativeBooster {
+            model,
+            trainer: Some(trainer),
+        })
+    }
+
     /// Shuffle iterations in `[start, end)` in the model and the trainer (upstream
     /// `LGBM_BoosterShuffleModels`).
     fn shuffle_models(&mut self, start: i32, end: i32) {
