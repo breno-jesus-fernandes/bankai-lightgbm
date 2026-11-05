@@ -9,7 +9,6 @@ tests/python_package_test/test_basic.py::test_add_features_same_booster_behaviou
 tests/python_package_test/test_basic.py::test_add_features_throws_if_datasets_unconstructed	Dataset.add_features_from (ROADMAP P6 Dataset)
 tests/python_package_test/test_basic.py::test_add_features_throws_if_num_data_unequal	Dataset.add_features_from (ROADMAP P6 Dataset)
 tests/python_package_test/test_basic.py::test_basic	not triaged (ROADMAP P6 Python package)
-tests/python_package_test/test_basic.py::test_booster_eval_adds_new_valid_dataset	Booster Python surface, pending items (ROADMAP P6 Booster)
 tests/python_package_test/test_basic.py::test_cegb_scaling_equalities	CEGB cegb_* (ROADMAP P3 CEGB)
 tests/python_package_test/test_basic.py::test_no_copy_in_dataset_from_numpy_2d[float32-C]	zero-copy input from numpy (AGENTS.md section 7)
 tests/python_package_test/test_basic.py::test_no_copy_in_dataset_from_numpy_2d[float32-F]	zero-copy input from numpy (AGENTS.md section 7)

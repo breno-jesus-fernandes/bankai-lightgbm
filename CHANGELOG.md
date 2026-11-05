@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `Booster.valid_sets` holds the validation Datasets and `name_valid_sets` their names, as upstream does. `Booster.eval` on a Dataset that is not registered adds it as a validation set, and a Booster evaluates before its first iteration (the native training handle is created on demand).
+
 - `CVBooster` can be pickled (`pickle`, `joblib`, `cloudpickle`) and loaded with `CVBooster(model_file=...)`, as upstream does. A pickled Booster drops its training Dataset, which holds native handles, so a `cv(return_cvbooster=True)` result can be saved.
 
 - `Booster.trees_to_dataframe` returns one row per node of the fitted trees, with upstream's columns and node names (`<tree>-S<split>`, `<tree>-L<leaf>`), built from `dump_model()`.
