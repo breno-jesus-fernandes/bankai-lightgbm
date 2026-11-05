@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `Booster.eval_train` returns the training data's metrics as `(dataset_name, metric_name, value, is_higher_better)` tuples, as upstream does. It raises `LightGBMError` when the Booster has no training Dataset (for example after `lgb.train` frees it).
+
 - `Booster(model_file=...)` and `Booster(model_str=...)` take their parameters from the model's `parameters:` block, skipping empty values and nested lists typed as upstream does. An unknown name is dropped with upstream's warning, and passing `params` with a model warns that it is ignored.
 
 - A Dataset records the categorical feature indices it resolved (including pandas category columns) in `params["categorical_column"]`, as upstream does.
