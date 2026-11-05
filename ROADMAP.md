@@ -21,7 +21,7 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
       Done: all ported files in `tests/python_package_test` (`test_plotting`, `test_sklearn`, `test_basic`,
       `test_engine`, `test_callback`, `test_utilities`, `test_consistency`, `test_pandas`, `test_arrow`, `test_polars`,
       `test_dual`), run unmodified except imports. Upstream cases that still fail are strict `xfail`s listed in
-      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (51 node ids; a fix turns them into
+      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (44 node ids; a fix turns them into
       failing XPASS, so the line is removed with the fix). `test_dask.py` belongs to P7 (distributed).
       Arrow/polars ports pass in full (`Dataset._dump_text` is byte-identical to upstream). `get_data` on pyarrow/polars subsets now keeps the table type. Done: all-ones weights become `None`, as upstream; arrow/polars column names feed categorical features; pyarrow/polars predict densely.
       Open work from the list: the "not triaged" entries (RF value mismatch, pandas dtypes, early-stopping
@@ -105,7 +105,8 @@ checkbox open until every behavior it names and its applicable performance gates
 - [ ] `forcedsplits_filename`, CEGB (`cegb_*`)
 - [ ] `linear_tree` (`linear_lambda`); training currently refuses `linear_tree=true` with an explicit error
 - [ ] Quantized training (`use_quantized_grad`, `num_grad_quant_bins`, ...)
-- [ ] `refit`, `deterministic`
+- [x] `refit` (byte-identical leaves vs upstream on upstream models, decay 0/0.9/1; `validate_features`; categorical reconciliation; `linear_tree` and `boosting=rf|dart` raise `Unsupported`)
+- [ ] `deterministic`
 - **Gate:** identical trees on fixed seeds; training as fast as upstream
 - Bench note (`benches/bench_train.py`, linux/x86_64 2 vCPU, training only, 50 rounds): 1 thread at parity (dense 1.04x, multi-value group 0.95–0.97x); no thread scaling yet (0.47–0.68x at 2 threads): split finding, sparse partition and single-group histograms run serially, while upstream parallelizes them. Benchmark a release build (`maturin develop -r`); `scripts/check.sh` installs a debug build.
 - Thread scaling (open): upstream's OpenMP threads spin between regions, rayon's sleep. Rayon fork/join after serial work cost 15-30 us here, which cancelled the gain of the parallel split search and partition (reverted). `utils::spin_pool` (allowlisted module, safe helpers for the learner) runs search, partition and dense histograms on spinning workers, and the sparse partition seeks each block's cursor through the fast index. Interleaved medians, 50 rounds, 2-vCPU VM: dense 2-thread scaling 1.18x (upstream 1.46x), multi-value 1.21x (upstream 1.68x); one thread at 0.85-1.0x of upstream. Open: the multi-value histogram and merge still scale poorly, and per-thread throughput drops when both threads run (the dense histogram kernel alone scales 1.49x).

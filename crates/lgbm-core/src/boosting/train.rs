@@ -13,6 +13,7 @@ use crate::meta::K_EPSILON;
 use crate::objective::LoadedObjective;
 use crate::objective::train::{Objective, create_objective};
 use crate::tree::Tree;
+use crate::treelearner::feature_histogram::calculate_splitted_leaf_output;
 use crate::treelearner::serial::{SerialTreeLearner, SplitRecord};
 use crate::utils::format::format_g;
 use crate::utils::random::Random;
@@ -143,6 +144,35 @@ impl GbdtTrainer {
             ));
         }
         trainer.trainer.models = init.models.clone();
+        Ok(trainer)
+    }
+
+    /// Refit `init`'s trees to the training data (upstream `GBDT::RefitTree`): every tree keeps
+    /// its structure, and its leaf outputs are re-fitted on `ds` from the rows that
+    /// `leaf_pred` routes to each leaf. `leaf_pred` is row-major, `ncol` columns (one per tree).
+    /// Unlike continued training, the scores start from the dataset's `init_score` only.
+    pub fn refit(
+        cfg: Arc<Config>,
+        ds: Arc<Dataset>,
+        init: &Gbdt,
+        leaf_pred: &[i32],
+        ncol: usize,
+    ) -> Result<Self> {
+        if matches!(cfg.boosting.as_str(), "rf" | "dart") {
+            return Err(Error::Unsupported(format!(
+                "refit with boosting={}",
+                cfg.boosting
+            )));
+        }
+        let mut trainer = Self::new(cfg, ds)?;
+        let ntpi = trainer.trainer.num_tree_per_iteration;
+        if !init.models.len().is_multiple_of(ntpi) {
+            return Err(Error::InvalidParameter(
+                "refit tree count does not match the number of classes".into(),
+            ));
+        }
+        trainer.trainer.models = init.models.clone();
+        trainer.trainer.refit_trees(leaf_pred, ncol)?;
         Ok(trainer)
     }
 
@@ -596,6 +626,95 @@ impl Trainer {
         false
     }
 
+    /// upstream: `GBDT::RefitTree` with `SerialTreeLearner::FitByExistingTree`. Gradients are
+    /// computed once per iteration on the current scores; each class's tree is then refitted
+    /// and its new output added to the scores.
+    fn refit_trees(&mut self, leaf_pred: &[i32], ncol: usize) -> Result<()> {
+        let n = self.ds.num_data();
+        let ntpi = self.num_tree_per_iteration;
+        if ncol != self.models.len() || leaf_pred.len() != n * ncol {
+            return Err(Error::InvalidParameter(format!(
+                "refit needs {n} x {} leaf predictions, got {} values for {} trees",
+                self.models.len(),
+                leaf_pred.len(),
+                self.models.len()
+            )));
+        }
+        let (l1, l2) = (self.cfg.lambda_l1, self.cfg.lambda_l2);
+        let (max_delta_step, path_smooth) = (self.cfg.max_delta_step, self.cfg.path_smooth);
+        let decay = self.cfg.refit_decay_rate;
+        let epsilon = f64::from(K_EPSILON);
+        for iter in 0..self.models.len() / ntpi.max(1) {
+            self.objective
+                .get_gradients(&self.score, &mut self.gradients, &mut self.hessians);
+            for k in 0..ntpi {
+                let model_index = iter * ntpi + k;
+                let off = k * n;
+                let num_leaves = self.models[model_index].num_leaves;
+                // upstream: `ResetByLeafPred` routes rows to leaves in ascending row order.
+                let mut leaf_of = Vec::with_capacity(n);
+                for row in 0..n {
+                    let raw = leaf_pred[row * ncol + model_index];
+                    let leaf = usize::try_from(raw).ok().filter(|&l| l < num_leaves);
+                    let Some(leaf) = leaf else {
+                        return Err(Error::InvalidParameter(format!(
+                            "refit leaf index {raw} is outside tree {model_index} with {num_leaves} leaves"
+                        )));
+                    };
+                    leaf_of.push(leaf);
+                }
+                let mut sum_grad = vec![0.0_f64; num_leaves];
+                let mut sum_hess = vec![epsilon; num_leaves];
+                let mut count = vec![0_i32; num_leaves];
+                for (row, &leaf) in leaf_of.iter().enumerate() {
+                    sum_grad[leaf] += f64::from(self.gradients[off + row]);
+                    sum_hess[leaf] += f64::from(self.hessians[off + row]);
+                    count[leaf] += 1;
+                }
+                let tree = &mut self.models[model_index];
+                for leaf in 0..num_leaves {
+                    // upstream: `FitByExistingTree` passes `tree->leaf_parent(i)`, a node index,
+                    // as the parent output of the smoothing; it is ported as written.
+                    let output = if path_smooth > epsilon && leaf > 0 {
+                        calculate_splitted_leaf_output::<true, true, true>(
+                            sum_grad[leaf],
+                            sum_hess[leaf],
+                            l1,
+                            l2,
+                            max_delta_step,
+                            path_smooth,
+                            count[leaf],
+                            f64::from(tree.leaf_parent[leaf]),
+                        )
+                    } else {
+                        calculate_splitted_leaf_output::<true, true, false>(
+                            sum_grad[leaf],
+                            sum_hess[leaf],
+                            l1,
+                            l2,
+                            max_delta_step,
+                            path_smooth,
+                            count[leaf],
+                            0.0,
+                        )
+                    };
+                    let new_output = output * tree.shrinkage;
+                    let old_output = tree.leaf_value[leaf];
+                    tree.set_leaf_output(leaf, decay * old_output + (1.0 - decay) * new_output);
+                }
+                // upstream: `ScoreUpdater::AddScore` -> `AddPredictionToScore`, which skips
+                // single-leaf trees.
+                if num_leaves > 1 {
+                    let tree = &self.models[model_index];
+                    for (row, &leaf) in leaf_of.iter().enumerate() {
+                        self.score[off + row] += tree.leaf_value[leaf];
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Adds model `idx` (class `k`) to the training score for all rows, through its
     /// recorded splits (upstream: `ScoreUpdater::AddScore(tree, cur_tree_id)`).
     fn add_model_to_train_score(&mut self, idx: usize, k: usize) {
@@ -950,5 +1069,78 @@ mod forced_split_tests {
         let path = write("ok", r#"{"feature": 0, "right": {"feature": 1}}"#);
         let err = check_forced_split_features(path.to_str().unwrap(), 1).unwrap_err();
         assert!(matches!(err, Error::Unsupported(_)));
+    }
+}
+
+#[cfg(test)]
+mod refit_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::GbdtTrainer;
+    use crate::boosting::Gbdt;
+    use crate::config::Config;
+    use crate::io::dataset::Dataset;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// Trains two regression iterations on one feature and returns the model, the training
+    /// dataset and the leaf index of every row in every tree (row-major, one column per tree).
+    fn trained(extra: &[(&str, &str)]) -> (Arc<Config>, Arc<Dataset>, Gbdt, Vec<i32>) {
+        let mut params = HashMap::from([
+            ("objective".to_owned(), "regression".to_owned()),
+            ("num_leaves".to_owned(), "4".to_owned()),
+            ("min_data_in_leaf".to_owned(), "1".to_owned()),
+            ("min_data_in_bin".to_owned(), "1".to_owned()),
+            ("max_bin".to_owned(), "8".to_owned()),
+            ("num_iterations".to_owned(), "2".to_owned()),
+        ]);
+        for (k, v) in extra {
+            params.insert((*k).to_owned(), (*v).to_owned());
+        }
+        let config = Arc::new(Config::from_params(&params).unwrap());
+        let features = (0..8).map(f64::from).collect::<Vec<_>>();
+        let labels = vec![0.0, 1.0, 0.0, 2.0, 5.0, 4.0, 6.0, 5.0];
+        let dataset =
+            Arc::new(Dataset::from_dense(&features, 8, 1, &labels, &config, &[]).unwrap());
+        let model = super::Gbdt::train_shared(Arc::clone(&config), Arc::clone(&dataset)).unwrap();
+        let ncol = model.trees().len();
+        let mut leaf_pred = Vec::with_capacity(8 * ncol);
+        for row in &features {
+            for tree in model.trees() {
+                leaf_pred.push(tree.predict_leaf_index(&[*row]) as i32);
+            }
+        }
+        (config, dataset, model, leaf_pred)
+    }
+
+    fn leaf_values(model: &Gbdt) -> Vec<f64> {
+        let mut out = Vec::new();
+        for (t, tree) in model.trees().iter().enumerate() {
+            for l in 0..tree.num_leaves {
+                out.push(model.leaf_value(t, l).unwrap());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn refit_with_decay_one_keeps_every_leaf_value() {
+        let (config, dataset, model, leaf_pred) = trained(&[("refit_decay_rate", "1.0")]);
+        let ncol = model.trees().len();
+        let refit = GbdtTrainer::refit(config, dataset, &model, &leaf_pred, ncol)
+            .unwrap()
+            .snapshot();
+        assert_eq!(leaf_values(&refit), leaf_values(&model));
+    }
+
+    #[test]
+    fn refit_rejects_a_leaf_index_outside_the_tree() {
+        let (config, dataset, model, mut leaf_pred) = trained(&[]);
+        leaf_pred[0] = 99;
+        let ncol = model.trees().len();
+        let err = GbdtTrainer::refit(config, dataset, &model, &leaf_pred, ncol)
+            .err()
+            .unwrap();
+        assert!(matches!(err, crate::Error::InvalidParameter(_)));
     }
 }

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `Booster.refit` is implemented (upstream `GBDT::RefitTree`): each tree keeps its structure and its leaf outputs are re-fitted on the new data with `refit_decay_rate`. Parity with `lightgbm==4.7.0` is checked by `tests/parity/test_refit_parity.py`. `Booster.train_set` is available on a Booster that holds a training Dataset.
+
 - `cv(fpreproc=...)` is supported: the callback receives each fold's train and validation datasets and a copy of the parameters, and its returned datasets and parameters are used for that fold (upstream: `engine.py` `_make_n_folds`).
 
 - A `forcedsplits_filename` is no longer ignored: the forced-splits file is checked against the dataset's features ("Forced splits file includes feature index ..."), and a valid file raises `not supported yet` because forced splits are not implemented. `serde_json` is now a runtime dependency of `lgbm-core` for this check.
