@@ -27,6 +27,7 @@ from bankai_lightgbm._lib import (
     NativeBooster,
     NativeDataset,
     dataset_check_reset_config,
+    param_types,
     validate_params,
 )
 from bankai_lightgbm.compat import PANDAS_INSTALLED
@@ -212,17 +213,29 @@ def _validate_feature_names(booster_names: list[str], data_names: list[str]) -> 
             raise LightGBMError(f"Expected '{expected}' at position {i} but found '{found}'")
 
 
-def _typed_param_value(text: str) -> Any:
-    """Type a value from the model text's ``parameters:`` block (bool, int, float, list or str)."""
-    if text in ("true", "false"):
-        return text == "true"
-    for cast in (int, float):
-        try:
-            return cast(text)
-        except ValueError:
-            pass
-    if "," in text and "[" not in text:
-        return [_typed_param_value(v) for v in text.split(",")]
+@cache
+def _native_param_types() -> dict[str, str]:
+    """Parameter name to its type (``bool``, ``int``, ``double``, ``string``, ``vector<...>``)."""
+    return dict(param_types())
+
+
+def _typed_loaded_value(type_name: str, text: str) -> Any:
+    """Type one value of a model's ``parameters:`` block as upstream's ``GetLoadedParam`` does."""
+    if type_name == "bool":
+        return text == "1"
+    if type_name == "int":
+        return int(text)
+    if type_name == "double":
+        return float(text)
+    if type_name.startswith("vector<"):
+        element = type_name[len("vector<") : -1]
+        if element == "string":
+            return text.split(",")
+        if element.startswith("vector"):
+            return json.loads(f"[{text}]")
+        if element == "int":
+            return [int(v) for v in text.split(",")]
+        return [float(v) for v in text.split(",")]
     return text
 
 
@@ -1762,9 +1775,8 @@ class Booster:
     def _get_loaded_param(self) -> dict[str, Any]:
         """Parameters of the ``parameters:`` block of the model text (upstream ``GetLoadedParam``).
 
-        upstream: src/boosting/gbdt.h (v4.7.0) ``GetLoadedParam``: empty values are skipped and
-        unknown names are dropped with a warning. Values are typed from the text, as upstream
-        types them by ``Config::ParameterTypes``: nested ``[a,b],[c]`` lists become lists.
+        upstream: src/boosting/gbdt.h (v4.7.0) ``GetLoadedParam``: empty values are skipped, unknown
+        names are dropped with a warning, and each value is typed by ``Config::ParameterTypes``.
         """
         text = self.model_to_string()
         header = "\nparameters:\n"
@@ -1772,7 +1784,7 @@ class Booster:
         if start < 0:
             return {}
         block = text[start + len(header) : text.find("\nend of parameters", start)]
-        known = _known_parameter_names()
+        types = _native_param_types()
         out: dict[str, Any] = {}
         for line in block.splitlines():
             if not (line.startswith("[") and line.endswith("]") and ": " in line):
@@ -1780,16 +1792,119 @@ class Booster:
             key, _, value = line[1:-1].partition(": ")
             if value == "":
                 continue
-            if key not in known:
+            if key not in types:
                 _log_info(
                     f"[LightGBM] [Warning] Ignoring unrecognized parameter '{key}' found in model string."
                 )
                 continue
-            if value.startswith("["):
-                out[key] = json.loads(f"[{value}]")
-            else:
-                out[key] = _typed_param_value(value)
+            out[key] = _typed_loaded_value(types[key], value)
         return out
+
+    def trees_to_dataframe(self) -> pd_DataFrame:
+        """Parse the fitted model into a pandas DataFrame with one row per node (upstream ``trees_to_dataframe``).
+
+        upstream: python-package/lightgbm/basic.py (v4.7.0) ``Booster.trees_to_dataframe``. The
+        records are built from ``dump_model()`` with the same columns and node names
+        (``<tree>-S<split>`` for splits, ``<tree>-L<leaf>`` for leaves).
+        """
+        if not PANDAS_INSTALLED:
+            raise LightGBMError(
+                "This method cannot be run without pandas installed. "
+                "You must install pandas and restart your session to use this method."
+            )
+        if self.num_trees() == 0:
+            raise LightGBMError("There are no trees in this Booster and thus nothing to parse")
+
+        def is_split(tree: dict[str, Any]) -> bool:
+            return "split_index" in tree
+
+        def node_index(tree: dict[str, Any], tree_index: int | None) -> str:
+            tree_num = f"{tree_index}-" if tree_index is not None else ""
+            node_type = "S" if is_split(tree) else "L"
+            # a single-node tree has no leaf_index, so it is leaf 0
+            node_num = tree.get("split_index" if is_split(tree) else "leaf_index", 0)
+            return f"{tree_num}{node_type}{node_num}"
+
+        def create_node_record(
+            tree: dict[str, Any],
+            node_depth: int,
+            tree_index: int | None,
+            feature_names: list[str] | None,
+            parent_node: str | None,
+        ) -> dict[str, Any]:
+            if is_split(tree):
+                split_feature: Any = (
+                    feature_names[tree["split_feature"]]
+                    if feature_names is not None
+                    else tree["split_feature"]
+                )
+            else:
+                split_feature = None
+            node: dict[str, Any] = {
+                "tree_index": tree_index,
+                "node_depth": node_depth,
+                "node_index": node_index(tree, tree_index),
+                "left_child": None,
+                "right_child": None,
+                "parent_index": parent_node,
+                "split_feature": split_feature,
+                "split_gain": None,
+                "threshold": None,
+                "decision_type": None,
+                "missing_direction": None,
+                "missing_type": None,
+                "value": None,
+                "weight": None,
+                "count": None,
+            }
+            if is_split(tree):
+                node["left_child"] = node_index(tree["left_child"], tree_index)
+                node["right_child"] = node_index(tree["right_child"], tree_index)
+                node["split_gain"] = tree["split_gain"]
+                node["threshold"] = tree["threshold"]
+                node["decision_type"] = tree["decision_type"]
+                node["missing_direction"] = "left" if tree["default_left"] else "right"
+                node["missing_type"] = tree["missing_type"]
+                node["value"] = tree["internal_value"]
+                node["weight"] = tree["internal_weight"]
+                node["count"] = tree["internal_count"]
+            else:
+                node["value"] = tree["leaf_value"]
+                if set(tree.keys()) != {"leaf_value", "leaf_count"}:
+                    node["weight"] = tree["leaf_weight"]
+                    node["count"] = tree["leaf_count"]
+            return node
+
+        def node_records(
+            tree: dict[str, Any],
+            node_depth: int,
+            tree_index: int | None,
+            feature_names: list[str] | None,
+            parent_node: str | None,
+        ) -> list[dict[str, Any]]:
+            node = create_node_record(tree, node_depth, tree_index, feature_names, parent_node)
+            records = [node]
+            if is_split(tree):
+                for child in ("left_child", "right_child"):
+                    records.extend(
+                        node_records(
+                            tree[child],
+                            node_depth + 1,
+                            tree_index,
+                            feature_names,
+                            node["node_index"],
+                        )
+                    )
+            return records
+
+        model_dict = self.dump_model()
+        feature_names = model_dict["feature_names"]
+        model_list: list[dict[str, Any]] = []
+        for tree in model_dict["tree_info"]:
+            model_list.extend(
+                node_records(tree["tree_structure"], 1, tree["tree_index"], feature_names, None)
+            )
+        return pd_DataFrame(model_list, columns=list(model_list[0].keys()))
 
     def free_dataset(self) -> Booster:
         """Drop the references to the training and validation Datasets (upstream ``free_dataset``).
