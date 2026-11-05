@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `Dataset.subset` of a Dataset built from `Sequence` objects reads the selected rows from the sources, instead of indexing the list of sources.
+
 - `Booster.valid_sets` holds the validation Datasets and `name_valid_sets` their names, as upstream does. `Booster.eval` on a Dataset that is not registered adds it as a validation set, and a Booster evaluates before its first iteration (the native training handle is created on demand).
 
 - `CVBooster` can be pickled (`pickle`, `joblib`, `cloudpickle`) and loaded with `CVBooster(model_file=...)`, as upstream does. A pickled Booster drops its training Dataset, which holds native handles, so a `cv(return_cvbooster=True)` result can be saved.
