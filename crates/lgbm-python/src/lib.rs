@@ -844,6 +844,13 @@ fn param_aliases() -> HashMap<&'static str, Vec<&'static str>> {
         .collect()
 }
 
+/// Every parameter's type name (`bool`, `int`, `double`, `string`, `vector<...>`), from the table
+/// generated from upstream's `config.h` (upstream `Config::ParameterTypes`).
+#[pyfunction]
+fn param_types() -> HashMap<&'static str, &'static str> {
+    lgbm_core::config::PARAMETER_TYPES.iter().copied().collect()
+}
+
 /// Forwards the core crate's `log` records (parameter warnings) to the Python logger, as
 /// upstream's log callback does. Routed through `bankai_lightgbm.basic._native_log`.
 struct PyLogger;
@@ -927,6 +934,7 @@ fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeBooster>()?;
     m.add_class::<NativeDataset>()?;
     m.add_function(wrap_pyfunction!(param_aliases, m)?)?;
+    m.add_function(wrap_pyfunction!(param_types, m)?)?;
     m.add_function(wrap_pyfunction!(validate_params, m)?)?;
     m.add_function(wrap_pyfunction!(dataset_check_reset_config, m)?)?;
     Ok(())
