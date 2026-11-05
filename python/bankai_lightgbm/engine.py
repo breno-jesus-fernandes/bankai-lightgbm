@@ -94,6 +94,7 @@ def train(
         train_set.categorical_feature = categorical_feature
     # upstream: engine.py (v4.7.0) train(), `train_set._reverse_update_params()` in `finally`:
     # the training parameters are only applied to the Dataset while it trains.
+    train_set._check_update_params(params)
     params_back_up = dict(train_set.params)
     train_set.params.update(params)
     # upstream: engine.py (v4.7.0) train(), validation params are reversed in `finally`.
@@ -455,6 +456,7 @@ def cv(
             params.pop(alias, None)
         params["metric"] = metrics
     # upstream: engine.py (v4.7.0) cv(), the Dataset update is reversed when cv returns.
+    train_set._check_update_params(params)
     params_back_up = dict(train_set.params)
     train_set.params.update(params)
     try:

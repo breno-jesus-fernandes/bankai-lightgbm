@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Changing a constructed Dataset's binning parameters (`max_bin`, `min_data_in_bin`, `categorical_feature`, `feature_pre_filter`, ...) through `train`/`cv` raises upstream's "Cannot change ... after constructed Dataset handle." error, and reducing `min_data_in_leaf` with `feature_pre_filter=true` is rejected. The check is native (`lgbm-core` `check_dataset_reset_config`, port of upstream `CheckDatasetResetConfig`) and runs when the Dataset's `free_raw_data=True` (upstream frees the raw data then); bankai keeps raw data, so the condition stands in for upstream's freed state.
+
 - Before construction, `Dataset.get_label`, `get_weight`, `get_init_score`, `get_group` and `get_position` return the values as provided, and `get_field` raises `Cannot get <field> before construct Dataset`, as upstream does. After construction, label, weight, init score and group are read back from the native Dataset (NaN becomes 0, infinities are clamped, group becomes int32 sizes), so the Python attributes match what training uses.
 
 - A validation Dataset built with `reference=` takes the reference's parameters when it is constructed, as upstream does. A warning "Overriding the parameters from Reference Dataset." is emitted when they differ, except when only the categorical-feature settings differ.

@@ -904,6 +904,17 @@ fn validate_params(params: HashMap<String, String>) -> PyResult<()> {
     Config::from_params(&params).map(|_| ()).map_err(to_py)
 }
 
+/// upstream: `LGBM_DatasetUpdateParamChecking`: raise when `new` cannot be applied to a Dataset built with `old`.
+#[pyfunction]
+#[pyo3(signature = (old_params, new_params))]
+fn dataset_check_reset_config(
+    old_params: HashMap<String, String>,
+    new_params: HashMap<String, String>,
+) -> PyResult<()> {
+    let old = Config::from_params(&old_params).map_err(to_py)?;
+    lgbm_core::config::check_dataset_reset_config(&old, &new_params).map_err(to_py)
+}
+
 #[pymodule]
 fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Install once per process; a second module init keeps the first logger.
@@ -917,5 +928,6 @@ fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeDataset>()?;
     m.add_function(wrap_pyfunction!(param_aliases, m)?)?;
     m.add_function(wrap_pyfunction!(validate_params, m)?)?;
+    m.add_function(wrap_pyfunction!(dataset_check_reset_config, m)?)?;
     Ok(())
 }
