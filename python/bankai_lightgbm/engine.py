@@ -96,6 +96,8 @@ def train(
     # the training parameters are only applied to the Dataset while it trains.
     params_back_up = dict(train_set.params)
     train_set.params.update(params)
+    # upstream: engine.py (v4.7.0) train(), validation params are reversed in `finally`.
+    valid_params_back_up: list[tuple[Dataset, dict[str, Any]]] = []
     try:
         if train_set.position is not None and str(
             params.get("objective", params.get("application", ""))
@@ -141,7 +143,9 @@ def train(
                 named.append((valid_set, given if given is not None else f"valid_{i}"))
         for valid_set, name in named:
             if valid_set is not train_set:
-                # upstream: engine.py (v4.7.0) train() sets the training Dataset as reference.
+                # upstream: engine.py (v4.7.0) train(): _update_params, then set_reference.
+                valid_params_back_up.append((valid_set, dict(valid_set.params)))
+                valid_set.params.update(params)
                 valid_set.set_reference(train_set)
             booster.add_valid(valid_set, name)
 
@@ -200,6 +204,8 @@ def train(
         return _finish_training(booster, keep_training_booster)
     finally:
         train_set.params = params_back_up
+        for valid_set, back_up in valid_params_back_up:
+            valid_set.params = back_up
 
 
 def _finish_training(booster: Booster, keep_training_booster: bool) -> Booster:

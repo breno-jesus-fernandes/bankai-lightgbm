@@ -1303,9 +1303,33 @@ class Dataset:
             self._evaluation_handle = self._build(evaluation=True)
         return self._evaluation_handle
 
+    def _sync_params_with_reference(self) -> None:
+        """Take the reference Dataset's parameters, as upstream's ``construct`` does.
+
+        upstream: python-package/lightgbm/basic.py (v4.7.0) ``Dataset.construct`` compares the
+        parameters with the reference's (ignoring the categorical keys), warns "Overriding the
+        parameters from Reference Dataset." when they differ, and updates them with the reference's.
+        ``categorical_column`` is bankai's own bookkeeping, so it is neither compared nor copied.
+        """
+        if self.reference is None:
+            return
+        reference_params = {
+            k: v for k, v in self.reference.get_params().items() if k != "categorical_column"
+        }
+        params = self.get_params()
+        if params == reference_params:
+            return
+        ignored = set(_CATEGORICAL_FEATURE_ALIASES)
+        comparable = {k: v for k, v in params.items() if k not in ignored | {"categorical_column"}}
+        expected = {k: v for k, v in reference_params.items() if k not in ignored}
+        if comparable != expected:
+            _log_warning("Overriding the parameters from Reference Dataset.")
+        self.params.update(reference_params)
+
     def _build(self, *, evaluation: bool = False) -> NativeDataset:
         if self.reference is not None:
             self.reference.construct()
+            self._sync_params_with_reference()
         if self.data is None:
             raise ValueError("Cannot construct a Dataset without data")
         feature_names: list[str] | None = None
