@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `cv(fpreproc=...)` is supported: the callback receives each fold's train and validation datasets and a copy of the parameters, and its returned datasets and parameters are used for that fold (upstream: `engine.py` `_make_n_folds`).
+
 - A `forcedsplits_filename` is no longer ignored: the forced-splits file is checked against the dataset's features ("Forced splits file includes feature index ..."), and a valid file raises `not supported yet` because forced splits are not implemented. `serde_json` is now a runtime dependency of `lgbm-core` for this check.
 
 - `Dataset.subset` of a Dataset built from `Sequence` objects reads the selected rows from the sources, instead of indexing the list of sources.
