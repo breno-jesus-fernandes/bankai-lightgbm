@@ -8,3 +8,4 @@ pub mod dump;
 pub mod parser;
 pub mod sample;
 pub mod sparse;
+pub mod text_loader;
