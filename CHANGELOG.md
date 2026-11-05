@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `CVBooster` can be pickled (`pickle`, `joblib`, `cloudpickle`) and loaded with `CVBooster(model_file=...)`, as upstream does. A pickled Booster drops its training Dataset, which holds native handles, so a `cv(return_cvbooster=True)` result can be saved.
+
 - `Booster.trees_to_dataframe` returns one row per node of the fitted trees, with upstream's columns and node names (`<tree>-S<split>`, `<tree>-L<leaf>`), built from `dump_model()`.
 
 - A Booster loaded from a model file or string types each `parameters:` value by upstream's `Config::ParameterTypes` (new `param_types()` binding): `bool` values come back as `True`/`False`, `int` and `double` as numbers, and vectors as lists.

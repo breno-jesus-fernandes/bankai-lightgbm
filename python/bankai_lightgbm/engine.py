@@ -222,9 +222,19 @@ def _finish_training(booster: Booster, keep_training_booster: bool) -> Booster:
 class CVBooster:
     """Collection of fold boosters returned by :func:`cv`."""
 
-    def __init__(self, boosters: list[Booster] | None = None) -> None:
+    def __init__(
+        self,
+        boosters: list[Booster] | None = None,
+        model_file: str | Path | None = None,
+    ) -> None:
+        """Create a CVBooster from fold boosters, or load one from ``model_file``.
+
+        upstream: python-package/lightgbm/engine.py (v4.7.0) ``CVBooster.__init__``.
+        """
         self.boosters = boosters or []
         self.best_iteration = -1
+        if model_file is not None:
+            self.model_from_string(Path(model_file).read_text())
 
     def update(self, fobj: Any = None) -> list[bool]:
         """Update every fold model by one boosting iteration."""
@@ -287,6 +297,14 @@ class CVBooster:
             return [getattr(booster, name)(*args, **kwargs) for booster in self.boosters]
 
         return apply_to_boosters
+
+    # upstream: python-package/lightgbm/engine.py (v4.7.0) CVBooster.__getstate__/__setstate__.
+    # Defined explicitly so pickle does not hit ``__getattr__`` before ``boosters`` exists.
+    def __getstate__(self) -> dict[str, Any]:
+        return vars(self)
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        vars(self).update(state)
 
 
 def _make_cv_folds(
