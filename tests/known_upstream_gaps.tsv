@@ -18,7 +18,6 @@ tests/python_package_test/test_basic.py::test_no_copy_when_single_float_dtype_da
 tests/python_package_test/test_basic.py::test_no_copy_when_single_float_dtype_dataframe[feature_name0-float32]	zero-copy input from pandas (AGENTS.md section 7)
 tests/python_package_test/test_basic.py::test_refit_correctly_handles_categorical_features_in_params	refit (ROADMAP P3 refit)
 tests/python_package_test/test_basic.py::test_save_dataset_subset_and_load_from_file	Step 2: text parsers and file input (ROADMAP Step 2)
-tests/python_package_test/test_basic.py::test_sequence_get_data[2]	Dataset Python surface, pending items (ROADMAP P6 Dataset)
 tests/python_package_test/test_basic.py::test_smoke_custom_parser	Step 2: text parsers and file input (ROADMAP Step 2)
 tests/python_package_test/test_consistency.py::test_binary	Step 2: text parsers and file input (ROADMAP Step 2)
 tests/python_package_test/test_consistency.py::test_binary_linear	linear_tree training and model I/O (ROADMAP P3 linear_tree)

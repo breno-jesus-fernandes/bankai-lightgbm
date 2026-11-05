@@ -1163,7 +1163,10 @@ class Dataset:
                 f"[#{position} = {indices[position]}] outside [0, {num_rows - 1}]"
             )
         native = self._handle_or_raise().subset(indices.tolist())
-        if _is_pandas_df(self.data):
+        if _is_sequence_data(self.data):
+            # upstream: the subset of a Sequence-backed Dataset is read row by row from its sources.
+            subset_data = _rows_from_sequences(self.data)[indices]
+        elif _is_pandas_df(self.data):
             subset_data = self.data.iloc[indices]
         elif _is_scipy_sparse(self.data):
             subset_data = self.data.tocsr()[indices]
