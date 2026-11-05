@@ -448,9 +448,8 @@ def cv(
         raise TypeError(
             f"cv() only accepts Dataset object, train_set has type '{type(train_set).__name__}'."
         )
-    for name, value in (("init_model", init_model), ("fpreproc", fpreproc)):
-        if value is not None:
-            raise NotImplementedError(f"{name} is not implemented yet")
+    if init_model is not None:
+        raise NotImplementedError("init_model is not implemented yet")
     params = dict(params)
     # upstream: engine.py::_choose_param_value, objective aliases (v4.7.0).
     objective_aliases = ("objective", "app", "loss", "application", "objective_type")
@@ -491,7 +490,14 @@ def cv(
         for train_rows, valid_rows in folds_list:
             fold_train = train_set.subset(train_rows, params)
             fold_valid = train_set.subset(valid_rows, params)
-            booster = Booster(params=params, train_set=fold_train)
+            fold_params = params
+            if fpreproc is not None:
+                # upstream: engine.py (v4.7.0) _make_n_folds, fpreproc(train, valid, params.copy())
+                # returns the datasets and parameters used for this fold.
+                fold_train, fold_valid, fold_params = fpreproc(
+                    fold_train, fold_valid, params.copy()
+                )
+            booster = Booster(params=fold_params, train_set=fold_train)
             if eval_train_metric:
                 booster.add_valid(fold_train, "train")
             booster.add_valid(fold_valid, "valid")
