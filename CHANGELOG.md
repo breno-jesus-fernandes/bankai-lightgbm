@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `lgb.Dataset` accepts a text data file path (CSV, TSV or LibSVM) with `header`, `label_column`, `weight_column`, `group_column`, `ignore_column` and `precise_float_parser`; training from the file gives the same model text as upstream. `two_round=true` and the side files `.init`, `.weight` and `.query` raise `NotImplementedError` for now.
+
 - `Booster.refit` is implemented (upstream `GBDT::RefitTree`): each tree keeps its structure and its leaf outputs are re-fitted on the new data with `refit_decay_rate`. Parity with `lightgbm==4.7.0` is checked by `tests/parity/test_refit_parity.py`. `Booster.train_set` is available on a Booster that holds a training Dataset.
 
 - `cv(fpreproc=...)` is supported: the callback receives each fold's train and validation datasets and a copy of the parameters, and its returned datasets and parameters are used for that fold (upstream: `engine.py` `_make_n_folds`).

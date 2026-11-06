@@ -27,6 +27,7 @@ from bankai_lightgbm._lib import (
     NativeBooster,
     NativeDataset,
     dataset_check_reset_config,
+    load_text_file,
     param_types,
     validate_params,
 )
@@ -466,6 +467,36 @@ def _is_scipy_sparse(data: Any) -> bool:
 # numpy array, or a scipy.sparse matrix / list of them for pred_contrib on sparse input
 # (upstream: ``_LGBM_PredictReturnType``; scipy is untyped here, hence ``Any``).
 _PredictReturnType = npt.NDArray[Any] | Any
+
+
+_TEXT_SIDE_FILE_SUFFIXES = (".init", ".weight", ".query")
+
+
+def _load_text_data(
+    path: str | Path, params: dict[str, Any]
+) -> tuple[Any, Any, Any, Any, list[str]]:
+    """Read a text data file as upstream's in-memory loader does (``two_round`` is not supported).
+
+    upstream: basic.py Dataset._lazy_init with a file path and dataset_loader.cpp LoadFromFile.
+    """
+    if _to_bool(params.get("two_round", False)):
+        raise NotImplementedError("two_round=true is not implemented yet (roadmap Step 2)")
+    for suffix in _TEXT_SIDE_FILE_SUFFIXES:
+        side = Path(f"{path}{suffix}")
+        if side.exists():
+            raise NotImplementedError(
+                f"side file {side} is not supported yet (roadmap Step 2); remove it or load the data without it"
+            )
+    matrix, label, weight, group, names = load_text_file(
+        str(path),
+        _to_bool(params.get("header", False)),
+        str(params.get("label_column", "")),
+        str(params.get("weight_column", "")),
+        str(params.get("group_column", "")),
+        str(params.get("ignore_column", "")),
+        _to_bool(params.get("precise_float_parser", False)),
+    )
+    return np.asarray(matrix, dtype=np.float64), label, weight, group, names
 
 
 def _dataset_sparse(data: Any) -> Any:
@@ -1411,6 +1442,20 @@ class Dataset:
         matrix: npt.NDArray[np.float64] | None = None
         if sparse is not None:
             n = int(sparse.shape[0])
+        elif isinstance(self.data, (str, Path)):
+            matrix, file_label, file_weight, file_group, file_names = _load_text_data(
+                self.data, self.params
+            )
+            n = matrix.shape[0]
+            # Explicit label, weight and group arguments win over the file's columns.
+            if self.label is None:
+                self.label = file_label
+            if self.weight is None and file_weight is not None:
+                self.weight = np.asarray(file_weight, dtype=np.float32)
+            if self.group is None and file_group is not None:
+                self.group = file_group
+            if file_names:
+                feature_names = file_names
         elif _is_pandas_df(self.data):
             import pandas as pd
 
