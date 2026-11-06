@@ -864,6 +864,55 @@ fn predict_config(
 
 /// Every parameter's aliases (excluding the parameter itself), from the table generated
 /// from upstream's `config.h` (upstream `Config::parameter2aliases`).
+/// `load_text_file` result: features, labels, weight, group sizes and feature names.
+type TextFileArrays<'py> = (
+    Bound<'py, PyArray2<f64>>,
+    Vec<f64>,
+    Option<Vec<f32>>,
+    Option<Vec<i32>>,
+    Vec<String>,
+);
+
+/// Load a text data file (upstream `DatasetLoader::LoadFromFile`, in-memory path): the dense
+/// features, labels, the weight and group columns when requested, and the header names.
+#[pyfunction]
+#[pyo3(signature = (path, header, label_column, weight_column, group_column, ignore_column,
+    precise_float_parser))]
+#[allow(clippy::too_many_arguments)] // Python `load_text_file` arguments.
+fn load_text_file<'py>(
+    py: Python<'py>,
+    path: String,
+    header: bool,
+    label_column: String,
+    weight_column: String,
+    group_column: String,
+    ignore_column: String,
+    precise_float_parser: bool,
+) -> PyResult<TextFileArrays<'py>> {
+    let content = std::fs::read_to_string(&path)
+        .map_err(|_| LightGBMError::new_err(format!("Data file {path} doesn't exist.")))?;
+    let opts = lgbm_core::io::text_loader::TextLoadOptions {
+        header,
+        label_column: &label_column,
+        weight_column: &weight_column,
+        group_column: &group_column,
+        ignore_column: &ignore_column,
+        precise_float_parser,
+    };
+    let loaded = py
+        .allow_threads(|| lgbm_core::io::text_loader::load_text(&content, &opts))
+        .map_err(to_py)?;
+    let matrix = numpy::PyArray1::from_vec(py, loaded.features)
+        .reshape([loaded.num_data, loaded.num_features])?;
+    Ok((
+        matrix,
+        loaded.label,
+        loaded.weight,
+        loaded.group,
+        loaded.feature_names,
+    ))
+}
+
 #[pyfunction]
 fn param_aliases() -> HashMap<&'static str, Vec<&'static str>> {
     lgbm_core::config::PARAMETER_TO_ALIASES
@@ -962,6 +1011,7 @@ fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeBooster>()?;
     m.add_class::<NativeDataset>()?;
     m.add_function(wrap_pyfunction!(param_aliases, m)?)?;
+    m.add_function(wrap_pyfunction!(load_text_file, m)?)?;
     m.add_function(wrap_pyfunction!(param_types, m)?)?;
     m.add_function(wrap_pyfunction!(validate_params, m)?)?;
     m.add_function(wrap_pyfunction!(dataset_check_reset_config, m)?)?;

@@ -32,7 +32,7 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
 
 ### Step 2: Text input and file prediction (P2/P1)
 Goal: load CSV/TSV/LibSVM files and predict from a file path, as upstream does.
-- [ ] Parsers: CSV/TSV/LibSVM, header, `label_column`, `weight_column`, `group_column`, `ignore_column`, `two_round`
+- [ ] Parsers: CSV/TSV/LibSVM, header, `label_column`, `weight_column`, `group_column`, `ignore_column`, `two_round` (in progress: format detection, line parsers and column handling are ported and `Dataset(path)` trains byte-identically to upstream; `two_round=true` and side files `.init`/`.weight`/`.query` raise `NotImplementedError`)
 - [ ] Predict from file (`data` as path)
 - Gate: parity tests against `lightgbm==4.7.0` on the same files (model text and predictions match as the parity tolerances in `AGENTS.md`).
 
