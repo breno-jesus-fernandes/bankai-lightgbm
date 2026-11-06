@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `cv(init_model=...)` continues each fold from the init model (a Booster or a model file), as upstream does: the fold's validation scores start from the init model's predictions. `test_cv_works_with_init_model` now passes.
+
 - RF validation metrics are computed on the averaged score, as upstream's RF validation score updater does (`test_rf`, `test_multiclass_rf`, `test_sample_strategy_with_boosting` now pass). Before, `eval_valid` and `record_evaluation` reported the sum of the trees, so RF metrics during training disagreed with `predict`.
 
 - `Dataset.add_features_from` appends another constructed Dataset's features in place, as upstream's `AddFeaturesFrom` does: groups, bins, feature names (clashes get a `D<n>_` prefix) and the data type of the raw data are merged. Both Datasets must have the same number of rows. Adding features when both sides have multi-value feature bundles raises `NotImplementedError`; upstream re-bundles both sides there, which is not ported yet.

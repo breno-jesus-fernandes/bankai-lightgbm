@@ -448,8 +448,14 @@ def cv(
         raise TypeError(
             f"cv() only accepts Dataset object, train_set has type '{type(train_set).__name__}'."
         )
-    if init_model is not None:
-        raise NotImplementedError("init_model is not implemented yet")
+    # upstream: engine.py (v4.7.0) cv() resolves init_model into a predictor shared by all folds.
+    init_booster: Booster | None = None
+    if isinstance(init_model, Booster):
+        init_booster = init_model
+    elif isinstance(init_model, (str, Path)):
+        init_booster = Booster(model_file=init_model)
+    elif init_model is not None:
+        raise TypeError("init_model should be a Booster or a path to a model file")
     params = dict(params)
     # upstream: engine.py::_choose_param_value, objective aliases (v4.7.0).
     objective_aliases = ("objective", "app", "loss", "application", "objective_type")
@@ -497,7 +503,12 @@ def cv(
                 fold_train, fold_valid, fold_params = fpreproc(
                     fold_train, fold_valid, params.copy()
                 )
+            if init_booster is not None:
+                # upstream: the fold's validation init score is the init model's prediction.
+                fold_valid.set_init_score(init_booster.predict(fold_valid.data, raw_score=True))
             booster = Booster(params=fold_params, train_set=fold_train)
+            if init_booster is not None:
+                booster._continue_from(init_booster)
             if eval_train_metric:
                 booster.add_valid(fold_train, "train")
             booster.add_valid(fold_valid, "valid")

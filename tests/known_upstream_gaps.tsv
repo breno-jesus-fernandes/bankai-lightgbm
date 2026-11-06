@@ -6,7 +6,6 @@ tests/python_package_test/test_basic.py::test_cegb_scaling_equalities	CEGB cegb_
 tests/python_package_test/test_consistency.py::test_binary_linear	linear_tree training and model I/O (ROADMAP P3 linear_tree)
 tests/python_package_test/test_engine.py::test_bagging_by_query_in_lambdarank	bagging_by_query (ROADMAP P3 bagging_by_query)
 tests/python_package_test/test_engine.py::test_continue_train_dart	continued training / init_model (ROADMAP P5 continued training)
-tests/python_package_test/test_engine.py::test_cv_works_with_init_model	continued training / init_model (ROADMAP P5 continued training)
 tests/python_package_test/test_engine.py::test_dump_model_linear	linear_tree training and model I/O (ROADMAP P3 linear_tree)
 tests/python_package_test/test_engine.py::test_dump_model_stump[True]	not triaged (ROADMAP P6 Python package)
 tests/python_package_test/test_engine.py::test_force_split_with_feature_fraction	forced splits (ROADMAP P3 forcedsplits_filename)
