@@ -15,7 +15,6 @@ tests/python_package_test/test_basic.py::test_no_copy_in_dataset_from_numpy_2d[i
 tests/python_package_test/test_basic.py::test_no_copy_in_dataset_from_numpy_2d[int64-F]	zero-copy input from numpy (AGENTS.md section 7)
 tests/python_package_test/test_basic.py::test_no_copy_when_single_float_dtype_dataframe[auto-float32]	zero-copy input from pandas (AGENTS.md section 7)
 tests/python_package_test/test_basic.py::test_no_copy_when_single_float_dtype_dataframe[feature_name0-float32]	zero-copy input from pandas (AGENTS.md section 7)
-tests/python_package_test/test_basic.py::test_save_dataset_subset_and_load_from_file	Step 2: text parsers and file input (ROADMAP Step 2)
 tests/python_package_test/test_consistency.py::test_binary_linear	linear_tree training and model I/O (ROADMAP P3 linear_tree)
 tests/python_package_test/test_consistency.py::test_xendcg	not triaged (ROADMAP P6 Python package)
 tests/python_package_test/test_engine.py::test_bagging_by_query_in_lambdarank	bagging_by_query (ROADMAP P3 bagging_by_query)

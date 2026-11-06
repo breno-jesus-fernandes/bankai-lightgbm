@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `Dataset(path)` loads a binary dataset file written by `save_binary` (upstream `LoadFromBinFile`), with dense single-value feature groups. Sparse and multi-value groups, raw data (`linear_tree`), and a reference Dataset or explicit metadata with a binary file raise `NotImplementedError`/`not supported yet`. Training from a binary file matches upstream model text. Scoring validation sets built from a binary file is not supported yet.
+
 - `Dataset(path)` with a `parser_config_file` raises upstream's `Cannot find parser class ...` error: no custom parser can be registered yet, so any configured parser class is unknown (upstream: `Parser::CreateParser`).
 
 - `lgb.Dataset` accepts a text data file path (CSV, TSV or LibSVM) with `header`, `label_column`, `weight_column`, `group_column`, `ignore_column` and `precise_float_parser`; training from the file gives the same model text as upstream. The side files `.init`, `.weight` and `.query` next to the data are loaded as upstream does (explicit `weight`, `group` and `init_score` arguments take precedence). `two_round=true` raises `NotImplementedError` for now.
