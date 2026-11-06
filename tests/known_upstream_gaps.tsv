@@ -16,7 +16,6 @@ tests/python_package_test/test_engine.py::test_cv_works_with_init_model	continue
 tests/python_package_test/test_engine.py::test_dump_model_linear	linear_tree training and model I/O (ROADMAP P3 linear_tree)
 tests/python_package_test/test_engine.py::test_dump_model_stump[True]	not triaged (ROADMAP P6 Python package)
 tests/python_package_test/test_engine.py::test_force_split_with_feature_fraction	forced splits (ROADMAP P3 forcedsplits_filename)
-tests/python_package_test/test_engine.py::test_forced_bins	forcedbins_filename (ROADMAP P2 forcedbins_filename)
 tests/python_package_test/test_engine.py::test_linear_single_leaf	linear_tree training and model I/O (ROADMAP P3 linear_tree)
 tests/python_package_test/test_engine.py::test_linear_trees	linear_tree training and model I/O (ROADMAP P3 linear_tree)
 tests/python_package_test/test_engine.py::test_linear_trees_num_threads	linear_tree training and model I/O (ROADMAP P3 linear_tree)

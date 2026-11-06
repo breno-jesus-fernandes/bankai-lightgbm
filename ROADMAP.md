@@ -91,7 +91,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] Parsers: CSV/TSV/LibSVM, header, `label_column`, `weight_column`, `group_column`, `ignore_column`, `two_round`
 - [x] Binary dataset file (`save_binary`) byte-identical to upstream (20 fixtures); reader for upstream files
 - [ ] Load a `Dataset` from an upstream `.bin` file (decode bin data)
-- [ ] `forcedbins_filename`, `linear_tree` raw-data retention, Arrow ingest
+- [ ] `linear_tree` raw-data retention, Arrow ingest (`forcedbins_filename`: forced upper bounds are ported and the model matches upstream; `Dataset.forced_bin_bounds` for the text dump is still empty)
 - **Gate:** identical bin upper bounds and feature groups ✅
 
 ## P3: Serial tree learner + GBDT

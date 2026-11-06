@@ -5,6 +5,7 @@ pub mod bin_data;
 pub mod binary;
 pub mod dataset;
 pub mod dump;
+pub mod forced_bins;
 pub mod parser;
 pub mod sample;
 pub mod side_files;
