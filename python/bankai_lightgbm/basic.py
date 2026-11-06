@@ -510,12 +510,10 @@ def _check_parser_config(params: dict[str, Any]) -> None:
 def _load_text_data(
     path: str | Path, params: dict[str, Any]
 ) -> tuple[Any, Any, Any, Any, list[str]]:
-    """Read a text data file as upstream's in-memory loader does (``two_round`` is not supported).
+    """Read a text data file as upstream's in-memory loader does (``two_round`` is handled by the caller).
 
     upstream: basic.py Dataset._lazy_init with a file path and dataset_loader.cpp LoadFromFile.
     """
-    if _to_bool(params.get("two_round", False)):
-        raise NotImplementedError("two_round=true is not implemented yet (roadmap Step 2)")
     _check_parser_config(params)
     matrix, label, weight, group, names = load_text_file(
         str(path),
@@ -1533,6 +1531,7 @@ class Dataset:
         pandas_auto_cat_cols: list[int] = []
         sparse = _dataset_sparse(self.data)
         matrix: npt.NDArray[np.float64] | None = None
+        two_round_file = False
         if sparse is not None:
             n = int(sparse.shape[0])
         elif isinstance(self.data, (str, Path)):
@@ -1540,6 +1539,11 @@ class Dataset:
                 self.data, self.params
             )
             n = matrix.shape[0]
+            # upstream: two_round only changes how a text file is read for training; the reference
+            # (validation) path aligns with the training bins instead.
+            two_round_file = (
+                _to_bool(self.params.get("two_round", False)) and self.reference is None
+            )
             # Explicit label, weight, group and init_score arguments win over the file's columns
             # and side files; side files fill only the fields that are still unset.
             if self.label is None:
@@ -1694,6 +1698,7 @@ class Dataset:
             reference,
             init_score,
             feature_names=names,
+            two_round=two_round_file,
         )
 
 

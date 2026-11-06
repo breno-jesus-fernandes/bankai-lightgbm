@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `two_round=true` with a text data file trains like upstream: the bin mappers come from a reservoir sample of the file's lines (upstream `TextReader::SampleFromFile`), so the model matches `lightgbm==4.7.0` with `two_round` set (`tests/parity/test_two_round_parity.py`). Validation sets built from a reference are unchanged.
+
 - `Dataset(path)` loads a binary dataset file written by `save_binary` (upstream `LoadFromBinFile`), with dense single-value feature groups. Sparse and multi-value groups, raw data (`linear_tree`), and a reference Dataset or explicit metadata with a binary file raise `NotImplementedError`/`not supported yet`. Training from a binary file matches upstream model text. Scoring validation sets built from a binary file is not supported yet.
 
 - `Dataset(path)` with a `parser_config_file` raises upstream's `Cannot find parser class ...` error: no custom parser can be registered yet, so any configured parser class is unknown (upstream: `Parser::CreateParser`).

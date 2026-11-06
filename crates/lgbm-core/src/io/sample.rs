@@ -37,11 +37,50 @@ impl SampleSet {
         }
         let total =
             i32::try_from(nrow).map_err(|_| Error::InvalidParameter("too many rows".into()))?;
-        let rows = create_sample_indices(total, cfg);
+        let rows: Vec<usize> = create_sample_indices(total, cfg)
+            .into_iter()
+            .map(|idx| idx as usize)
+            .collect();
+        Ok(Self::from_rows(data, nrow, ncol, &rows))
+    }
+
+    /// Sample a row-major dense matrix the way upstream's two-round loader does: a reservoir
+    /// over the rows in file order, drawing `Random::NextInt(0, line + 1)` for every line past the
+    /// first `bin_construct_sample_cnt` (upstream: `TextReader::SampleFromFile`). The sample keeps
+    /// the reservoir's slot order.
+    pub fn from_dense_reservoir(
+        data: &[f64],
+        nrow: usize,
+        ncol: usize,
+        cfg: &Config,
+    ) -> Result<SampleSet> {
+        if data.len() != nrow * ncol {
+            return Err(Error::InvalidParameter(
+                "data size does not match nrow x ncol".into(),
+            ));
+        }
+        let sample_cnt = usize::try_from(cfg.bin_construct_sample_cnt).unwrap_or(0);
+        let mut random = Random::new(cfg.data_random_seed);
+        let mut slots: Vec<usize> = Vec::with_capacity(sample_cnt.min(nrow));
+        for line in 0..nrow {
+            if slots.len() < sample_cnt {
+                slots.push(line);
+            } else {
+                let idx = random.next_int(0, (line + 1) as i32) as usize;
+                if idx < sample_cnt {
+                    slots[idx] = line;
+                }
+            }
+        }
+        Ok(Self::from_rows(data, nrow, ncol, &slots))
+    }
+
+    /// Gather the non-zero (or NaN) values of the given rows, in the given order.
+    fn from_rows(data: &[f64], nrow: usize, ncol: usize, rows: &[usize]) -> SampleSet {
         let mut values: Vec<Vec<f64>> = vec![Vec::new(); ncol];
         let mut indices: Vec<Vec<i32>> = vec![Vec::new(); ncol];
-        for (i, &idx) in rows.iter().enumerate() {
-            let row = &data[idx as usize * ncol..(idx as usize + 1) * ncol];
+        for (i, &row_idx) in rows.iter().enumerate() {
+            let row = &data[row_idx * ncol..(row_idx + 1) * ncol];
             for (k, &v) in row.iter().enumerate() {
                 if v.abs() > K_ZERO_THRESHOLD || v.is_nan() {
                     values[k].push(v);
@@ -49,12 +88,12 @@ impl SampleSet {
                 }
             }
         }
-        Ok(SampleSet {
+        SampleSet {
             num_data: nrow,
             sample_cnt: rows.len(),
             values,
             indices,
-        })
+        }
     }
 
     /// Sample a CSR matrix the way `LGBM_DatasetCreateFromCSR` does: each sampled row's
@@ -155,4 +194,29 @@ pub fn construct_bin_mappers_dense(
     categorical: &[i32],
 ) -> Result<Vec<Option<BinMapper>>> {
     SampleSet::from_dense(data, nrow, ncol, cfg)?.find_bins(cfg, categorical)
+}
+
+#[cfg(test)]
+mod reservoir_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn reservoir_sample_keeps_cnt_distinct_rows_of_the_file() -> Result<()> {
+        let nrow = 100;
+        // Column 0 holds the row index, so the sampled values name the sampled rows.
+        let data: Vec<f64> = (0..nrow).map(|i| (i + 1) as f64).collect();
+        let mut params = HashMap::new();
+        params.insert("bin_construct_sample_cnt".to_string(), "10".to_string());
+        let cfg = Config::from_params(&params)?;
+        let sample = SampleSet::from_dense_reservoir(&data, nrow, 1, &cfg)?;
+        assert_eq!(sample.sample_cnt, 10);
+        let mut rows: Vec<i64> = sample.values[0].iter().map(|&v| v as i64).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        assert_eq!(rows.len(), 10);
+        assert!(rows.iter().all(|&r| (1..=100).contains(&r)));
+        Ok(())
+    }
 }
