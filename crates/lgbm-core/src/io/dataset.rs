@@ -873,7 +873,38 @@ impl Dataset {
         categorical: &[i32],
     ) -> Result<Dataset> {
         check_label_len(label, nrow)?;
-        let layout = DatasetLayout::construct_dense(data, nrow, ncol, cfg, categorical)?;
+        let sample = SampleSet::from_dense(data, nrow, ncol, cfg)?;
+        Self::from_dense_with_sample(data, nrow, ncol, label, cfg, categorical, sample)
+    }
+
+    /// Bin a dense matrix the way upstream's `two_round` text loading does: the bin mappers come
+    /// from a reservoir sample over the rows in file order (upstream: `TextReader::SampleFromFile`).
+    pub fn from_dense_two_round(
+        data: &[f64],
+        nrow: usize,
+        ncol: usize,
+        label: &[f64],
+        cfg: &Config,
+        categorical: &[i32],
+    ) -> Result<Dataset> {
+        check_label_len(label, nrow)?;
+        let sample = SampleSet::from_dense_reservoir(data, nrow, ncol, cfg)?;
+        Self::from_dense_with_sample(data, nrow, ncol, label, cfg, categorical, sample)
+    }
+
+    /// Build the layout from `sample` and fill the groups from the dense rows.
+    #[allow(clippy::too_many_arguments)] // mirrors `from_dense` plus the sample.
+    fn from_dense_with_sample(
+        data: &[f64],
+        nrow: usize,
+        ncol: usize,
+        label: &[f64],
+        cfg: &Config,
+        categorical: &[i32],
+        mut sample: SampleSet,
+    ) -> Result<Dataset> {
+        let mappers = sample.find_bins(cfg, categorical)?;
+        let layout = DatasetLayout::construct(mappers, &sample, cfg);
         let group_data: Vec<GroupData> = layout
             .groups
             .par_iter()

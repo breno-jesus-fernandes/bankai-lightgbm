@@ -115,7 +115,7 @@ impl NativeDataset {
     /// Bin a dense row-major `float64` matrix (`LGBM_DatasetCreateFromMat`). `params` are
     /// the dataset parameters as strings; `categorical` are column indices.
     #[staticmethod]
-    #[pyo3(signature = (data, label, params, categorical, weight=None, group=None, reference=None, init_score=None, feature_names=None))]
+    #[pyo3(signature = (data, label, params, categorical, weight=None, group=None, reference=None, init_score=None, feature_names=None, two_round=false))]
     #[allow(clippy::too_many_arguments)] // Python Dataset constructor arguments.
     fn from_dense(
         py: Python<'_>,
@@ -128,6 +128,7 @@ impl NativeDataset {
         reference: Option<PyRef<'_, NativeDataset>>,
         init_score: Option<Vec<f64>>,
         feature_names: Option<Vec<String>>,
+        two_round: bool,
     ) -> PyResult<Self> {
         let shape = data.shape().to_vec();
         let values = data
@@ -141,6 +142,8 @@ impl NativeDataset {
                 let cfg = Config::from_params(&params)?;
                 let ds = if let Some(reference) = reference {
                     Dataset::from_dense_reference(&values, nrow, ncol, &label, &reference)?
+                } else if two_round {
+                    Dataset::from_dense_two_round(&values, nrow, ncol, &label, &cfg, &categorical)?
                 } else {
                     Dataset::from_dense(&values, nrow, ncol, &label, &cfg, &categorical)?
                 };

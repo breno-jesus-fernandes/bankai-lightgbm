@@ -22,6 +22,7 @@ class NativeDataset:
         reference: NativeDataset | None = None,
         init_score: list[float] | None = None,
         feature_names: list[str] | None = None,
+        two_round: bool = False,
     ) -> NativeDataset: ...
     @staticmethod
     def from_sparse(
