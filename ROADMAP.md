@@ -21,12 +21,13 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
       Done: all ported files in `tests/python_package_test` (`test_plotting`, `test_sklearn`, `test_basic`,
       `test_engine`, `test_callback`, `test_utilities`, `test_consistency`, `test_pandas`, `test_arrow`, `test_polars`,
       `test_dual`), run unmodified except imports. Upstream cases that still fail are strict `xfail`s listed in
-      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (37 node ids; a fix turns them into
+      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (31 node ids; a fix turns them into
       failing XPASS, so the line is removed with the fix). `test_dask.py` belongs to P7 (distributed).
       Arrow/polars ports pass in full (`Dataset._dump_text` is byte-identical to upstream). `get_data` on pyarrow/polars subsets now keeps the table type. Done: all-ones weights become `None`, as upstream; arrow/polars column names feed categorical features; pyarrow/polars predict densely.
       Open work from the list: the "not triaged" entries (RF value mismatch, pandas dtypes, early-stopping
       naming, categorical handle).
 - Gap order: (1) the smaller Python-surface gaps ("not triaged" P6 entries, pandas dtypes, Dataset and Booster surface, early stopping, callbacks, zero-copy input, log callback); (2) the large features last: linear_tree, refit, cv/CVBooster, forced splits, monotone beyond basic, CEGB, continued training, RF, bagging_by_query, position bias.
+- Zero-copy input (AGENTS.md section 7): the Python helpers are ported (`_np2d_to_np1d` keeps float32/float64 and column-major layouts; pandas frames with one float dtype keep it, and the six `test_no_copy_*` cases pass). Open: the native layer still receives float64 row-major data, so float32 input is converted at the boundary; a native float32 or column-major path is not done.
 - [x] `Dataset.feature_num_bin` (index or name), matching upstream's `LGBM_DatasetGetFeatureNumBin`
 - Gate: the ported upstream suite passes for everything the step names; unsupported parts raise `NotImplementedError`.
 

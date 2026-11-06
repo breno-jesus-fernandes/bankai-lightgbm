@@ -406,7 +406,44 @@ def _pandas_to_matrix(data: Any, pandas_categorical: list[list[Any]] | None) -> 
             data[col] = codes.where(codes != -1, np.nan)
     # upstream: basic.py (v4.7.0) _pandas_to_numpy checks the converted frame's dtypes
     _check_for_bad_pandas_dtypes(data.dtypes)
+    # upstream: a frame whose columns all share one float dtype keeps it (no copy); anything
+    # else is converted to float64.
+    dtypes = list(data.dtypes)
+    first = dtypes[0] if dtypes else None
+    if (
+        isinstance(first, np.dtype)
+        and first.type in (np.float32, np.float64)
+        and all(dt == first for dt in dtypes)
+    ):
+        return np.asarray(data.to_numpy(dtype=first, na_value=np.nan))
     return np.asarray(data.to_numpy(dtype=np.float64, na_value=np.nan))
+
+
+# upstream: basic.py (v4.7.0) _C_API_IS_COL_MAJOR / _C_API_IS_ROW_MAJOR
+_C_API_IS_COL_MAJOR = 0
+_C_API_IS_ROW_MAJOR = 1
+
+
+def _np2d_to_np1d(mat: npt.NDArray[Any]) -> tuple[npt.NDArray[Any], int]:
+    """Flatten a 2-D array without copying when its dtype and order already fit.
+
+    upstream: basic.py (v4.7.0) ``_np2d_to_np1d``. float32 and float64 keep their dtype; any other
+    dtype becomes float32. Column-major input keeps its order and reports ``_C_API_IS_COL_MAJOR``.
+    Returns ``(flat_array, layout)``.
+    """
+    dtype: np.dtype[Any] = (
+        mat.dtype if mat.dtype in (np.float32, np.float64) else np.dtype(np.float32)
+    )
+    order: Literal["C", "F"]
+    if mat.flags["F_CONTIGUOUS"]:
+        order = "F"
+        layout = _C_API_IS_COL_MAJOR
+    else:
+        order = "C"
+        layout = _C_API_IS_ROW_MAJOR
+    # Copies only when the dtype or order does not already match.
+    data = np.asarray(mat, dtype=dtype, order=order)
+    return data.ravel(order=order), layout
 
 
 def _data_from_pandas(
