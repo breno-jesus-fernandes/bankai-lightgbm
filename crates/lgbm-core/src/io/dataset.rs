@@ -1296,6 +1296,114 @@ impl Dataset {
     }
 }
 
+impl Dataset {
+    /// Rebuild a Dataset from a parsed binary file, as upstream's binary constructor
+    /// (`DatasetLoader::LoadFromBinFile`, src/io/dataset_loader.cpp v4.7.0). Only dense
+    /// single-value feature groups without raw data are supported; anything else is an
+    /// explicit `Unsupported` error.
+    pub fn from_binary(bin: &crate::io::binary::BinaryDataset) -> Result<Dataset> {
+        let h = &bin.header;
+        if h.has_raw {
+            return Err(Error::Unsupported(
+                "binary dataset with raw data (linear_tree) is not supported yet".into(),
+            ));
+        }
+        let num_data = usize::try_from(h.num_data)
+            .map_err(|_| Error::Parse("negative num_data in binary dataset".into()))?;
+        let mut groups = Vec::with_capacity(bin.groups.len());
+        let mut data = Vec::with_capacity(bin.groups.len());
+        for (g, def) in bin.groups.iter().enumerate() {
+            if def.is_multi_val || def.is_dense_multi_val || def.is_sparse {
+                return Err(Error::Unsupported(
+                    "binary dataset with sparse or multi-value feature groups is not supported yet"
+                        .into(),
+                ));
+            }
+            let start = usize::try_from(h.group_feature_start[g])
+                .map_err(|_| Error::Parse("feature group start".into()))?;
+            let cnt = usize::try_from(h.group_feature_cnt[g])
+                .map_err(|_| Error::Parse("feature group count".into()))?;
+            let features: Vec<i32> = h.real_feature_idx[start..start + cnt].to_vec();
+            let group = FeatureGroupLayout::new(features, def.bin_mappers.clone(), false, g);
+            let bins = read_dense_bins(&def.data, num_data, group.num_total_bin)?;
+            data.push(GroupData::Single(BinData::Dense(bins)));
+            groups.push(group);
+        }
+        let layout = DatasetLayout {
+            num_data,
+            num_total_features: usize::try_from(h.num_total_features)
+                .map_err(|_| Error::Parse("num_total_features".into()))?,
+            num_features: usize::try_from(h.num_features)
+                .map_err(|_| Error::Parse("num_features".into()))?,
+            used_feature_map: h.used_feature_map.clone(),
+            real_feature_idx: h.real_feature_idx.clone(),
+            feature2group: h.feature2group.clone(),
+            feature2subfeature: h.feature2subfeature.clone(),
+            group_bin_boundaries: h.group_bin_boundaries.clone(),
+            group_feature_start: h.group_feature_start.clone(),
+            group_feature_cnt: h.group_feature_cnt.clone(),
+            groups,
+        };
+        let numeric_feature_map = numeric_feature_map(&layout);
+        // The writer stores -1 for every feature when no max_bin_by_feature was given.
+        let max_bin_by_feature = if h.max_bin_by_feature.iter().all(|&m| m == -1) {
+            Vec::new()
+        } else {
+            h.max_bin_by_feature.clone()
+        };
+        Ok(Dataset {
+            layout,
+            data,
+            metadata: Metadata {
+                label: bin.metadata.label.clone(),
+                weights: bin.metadata.weights.clone(),
+                query_boundaries: bin.metadata.query_boundaries.clone(),
+                init_score: Vec::new(),
+            },
+            feature_names: h.feature_names.clone(),
+            label_idx: h.label_idx,
+            max_bin: h.max_bin,
+            bin_construct_sample_cnt: h.bin_construct_sample_cnt,
+            min_data_in_bin: h.min_data_in_bin,
+            use_missing: h.use_missing,
+            zero_as_missing: h.zero_as_missing,
+            max_bin_by_feature,
+            forced_bin_bounds: h.forced_bin_bounds.clone(),
+            raw_data: Vec::new(),
+            numeric_feature_map,
+        })
+    }
+}
+
+/// Read one dense group's bins from its serialized bytes (upstream `DenseBin::LoadFromBinaryFile`).
+/// The width follows `DenseBin::new(num_data, num_total_bin)`, the same rule the writer used.
+fn read_dense_bins(bytes: &[u8], num_data: usize, num_total_bin: u32) -> Result<DenseBin> {
+    let short = || Error::Parse("binary dataset feature group data is truncated".into());
+    Ok(match DenseBin::new(0, num_total_bin) {
+        DenseBin::U4(_) => {
+            let need = num_data.div_ceil(2);
+            DenseBin::U4(bytes.get(..need).ok_or_else(short)?.to_vec())
+        }
+        DenseBin::U8(_) => DenseBin::U8(bytes.get(..num_data).ok_or_else(short)?.to_vec()),
+        DenseBin::U16(_) => {
+            let raw = bytes.get(..2 * num_data).ok_or_else(short)?;
+            DenseBin::U16(
+                raw.chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect(),
+            )
+        }
+        DenseBin::U32(_) => {
+            let raw = bytes.get(..4 * num_data).ok_or_else(short)?;
+            DenseBin::U32(
+                raw.chunks_exact(4)
+                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect(),
+            )
+        }
+    })
+}
+
 #[cfg(test)]
 mod subset_tests {
     use super::*;
@@ -1506,6 +1614,70 @@ mod subset_tests {
         dataset.set_init_score(&[0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0])?;
         let subset = dataset.subset(&[2, 0])?;
         assert_eq!(subset.metadata.init_score, vec![2.0, 0.0, 12.0, 10.0]);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod binary_load_tests {
+    #![allow(clippy::panic)]
+    use super::*;
+    use crate::io::binary::BinaryDataset;
+    use std::collections::HashMap;
+
+    fn bin_values(bin: &BinData) -> Vec<u32> {
+        match bin {
+            BinData::Dense(dense) => (0..dense.num_rows()).map(|row| dense.get(row)).collect(),
+            BinData::Sparse(sparse) => sparse.to_dense(),
+        }
+    }
+
+    fn sample(params: &HashMap<String, String>) -> crate::Result<Dataset> {
+        let nrow = 40;
+        let values: Vec<f64> = (0..nrow * 2)
+            .map(|i| ((i * 37) % 23) as f64 + (i % 2) as f64 * 0.5)
+            .collect();
+        let labels: Vec<f64> = (0..nrow).map(|i| (i % 3) as f64).collect();
+        let cfg = Config::from_params(params)?;
+        let mut dataset = Dataset::from_dense(&values, nrow, 2, &labels, &cfg, &[])?;
+        dataset.set_weights(&[0.5; 40])?;
+        Ok(dataset)
+    }
+
+    #[test]
+    fn binary_round_trip_rebuilds_the_same_layout_and_bins() -> crate::Result<()> {
+        let dataset = sample(&HashMap::new())?;
+        let bin = BinaryDataset::from_bytes(&dataset.to_binary_bytes())?;
+        let loaded = Dataset::from_binary(&bin)?;
+
+        assert_eq!(loaded.num_data(), dataset.num_data());
+        assert_eq!(loaded.metadata.label, dataset.metadata.label);
+        assert_eq!(loaded.metadata.weights, dataset.metadata.weights);
+        assert_eq!(loaded.feature_names, dataset.feature_names);
+        assert_eq!(loaded.layout.groups.len(), dataset.layout.groups.len());
+        for (a, b) in loaded.layout.groups.iter().zip(&dataset.layout.groups) {
+            assert_eq!(a.features, b.features);
+            assert_eq!(a.num_total_bin, b.num_total_bin);
+            assert_eq!(a.bin_offsets, b.bin_offsets);
+        }
+        for (a, b) in loaded.data.iter().zip(&dataset.data) {
+            let (GroupData::Single(x), GroupData::Single(y)) = (a, b) else {
+                panic!("expected single-value groups");
+            };
+            assert_eq!(bin_values(x), bin_values(y));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn binary_load_rejects_raw_data_until_supported() -> crate::Result<()> {
+        let mut params = HashMap::new();
+        params.insert("linear_tree".to_string(), "true".to_string());
+        let bin = BinaryDataset::from_bytes(&sample(&params)?.to_binary_bytes())?;
+        assert!(matches!(
+            Dataset::from_binary(&bin),
+            Err(Error::Unsupported(_))
+        ));
         Ok(())
     }
 }

@@ -42,6 +42,9 @@ enum RawRows {
     Dense(Vec<f64>),
     /// CSR arrays (`indptr`, `indices`, `values`), in the caller's storage order.
     Csr(Vec<i64>, Vec<i32>, Vec<f64>),
+    /// Binned only (a binary dataset file keeps no raw values): training works, but scoring
+    /// rows with this dataset is not supported yet.
+    Unavailable,
 }
 
 impl RawRows {
@@ -67,6 +70,7 @@ impl RawRows {
                 }
                 RawRows::Csr(out_ptr, out_cols, out_vals)
             }
+            RawRows::Unavailable => RawRows::Unavailable,
         }
     }
 
@@ -80,12 +84,34 @@ impl RawRows {
         match self {
             RawRows::Dense(data) => predictor.predict_dense(data, nrow, ncol),
             RawRows::Csr(indptr, cols, vals) => predictor.predict_csr(indptr, cols, vals),
+            RawRows::Unavailable => Err(lgbm_core::Error::Unsupported(
+                "scoring a validation set built from a binary dataset file is not supported yet"
+                    .into(),
+            )),
         }
     }
 }
 
 #[pymethods]
 impl NativeDataset {
+    /// Load a binary dataset file written by `save_binary` (upstream `DatasetLoader::LoadFromBinFile`).
+    #[staticmethod]
+    fn from_binary_file(py: Python<'_>, path: String) -> PyResult<Self> {
+        let ds = py
+            .allow_threads(|| -> lgbm_core::Result<Dataset> {
+                let bin = lgbm_core::io::binary::BinaryDataset::read_file(&path)?;
+                Dataset::from_binary(&bin)
+            })
+            .map_err(to_py)?;
+        let (nrow, ncol) = (ds.num_data(), ds.layout.num_total_features);
+        Ok(NativeDataset {
+            ds: Arc::new(ds),
+            data: Arc::new(RawRows::Unavailable),
+            nrow,
+            ncol,
+        })
+    }
+
     /// Bin a dense row-major `float64` matrix (`LGBM_DatasetCreateFromMat`). `params` are
     /// the dataset parameters as strings; `categorical` are column indices.
     #[staticmethod]
