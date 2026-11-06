@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A subset of a Dataset built from a file keeps the file path as its data (upstream logs a warning and returns the original raw data). Predicting from a binary dataset file raises upstream's `Unknown format of training data` error.
+
 - `Booster.params` includes the training Dataset's params, as upstream's `Booster.__init__` does (Booster params keep precedence). `reset_parameter` for other params than `learning_rate` is still not implemented.
 
 - `_np2d_to_np1d` and pandas frames with one float dtype keep their dtype without a copy, as upstream does. The native layer still converts to float64 at the boundary.
