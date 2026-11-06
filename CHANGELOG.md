@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-- `lgb.Dataset` accepts a text data file path (CSV, TSV or LibSVM) with `header`, `label_column`, `weight_column`, `group_column`, `ignore_column` and `precise_float_parser`; training from the file gives the same model text as upstream. `two_round=true` and the side files `.init`, `.weight` and `.query` raise `NotImplementedError` for now.
+- `lgb.Dataset` accepts a text data file path (CSV, TSV or LibSVM) with `header`, `label_column`, `weight_column`, `group_column`, `ignore_column` and `precise_float_parser`; training from the file gives the same model text as upstream. The side files `.init`, `.weight` and `.query` next to the data are loaded as upstream does (explicit `weight`, `group` and `init_score` arguments take precedence). `two_round=true` raises `NotImplementedError` for now.
+
+- `Booster.predict` accepts a text data file path. The label column is detected from the model's feature count, as upstream's `Parser::CreateParser` does, so a file with or without a label column gives the same predictions as upstream.
 
 - `Booster.refit` is implemented (upstream `GBDT::RefitTree`): each tree keeps its structure and its leaf outputs are re-fitted on the new data with `refit_decay_rate`. Parity with `lightgbm==4.7.0` is checked by `tests/parity/test_refit_parity.py`. `Booster.train_set` is available on a Booster that holds a training Dataset.
 

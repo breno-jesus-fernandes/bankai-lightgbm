@@ -144,7 +144,7 @@ pub fn label_index(ty: DataType, first_line: &str, num_features: i32, label_idx:
 
 /// Parse one float field with the legacy parser (upstream `Common::Atof`): an empty field
 /// is NaN, `na`/`nan`/`null` are NaN, `inf`/`infinity` are huge, anything else must be a number.
-fn parse_legacy(token: &str) -> Result<f64> {
+pub fn parse_legacy(token: &str) -> Result<f64> {
     let t = token.trim_matches(' ');
     if t.is_empty() {
         return Ok(f64::NAN);

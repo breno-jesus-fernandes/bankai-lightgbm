@@ -7,5 +7,6 @@ pub mod dataset;
 pub mod dump;
 pub mod parser;
 pub mod sample;
+pub mod side_files;
 pub mod sparse;
 pub mod text_loader;
