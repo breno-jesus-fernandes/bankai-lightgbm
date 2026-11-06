@@ -21,7 +21,7 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
       Done: all ported files in `tests/python_package_test` (`test_plotting`, `test_sklearn`, `test_basic`,
       `test_engine`, `test_callback`, `test_utilities`, `test_consistency`, `test_pandas`, `test_arrow`, `test_polars`,
       `test_dual`), run unmodified except imports. Upstream cases that still fail are strict `xfail`s listed in
-      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (44 node ids; a fix turns them into
+      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (39 node ids; a fix turns them into
       failing XPASS, so the line is removed with the fix). `test_dask.py` belongs to P7 (distributed).
       Arrow/polars ports pass in full (`Dataset._dump_text` is byte-identical to upstream). `get_data` on pyarrow/polars subsets now keeps the table type. Done: all-ones weights become `None`, as upstream; arrow/polars column names feed categorical features; pyarrow/polars predict densely.
       Open work from the list: the "not triaged" entries (RF value mismatch, pandas dtypes, early-stopping
@@ -32,8 +32,8 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
 
 ### Step 2: Text input and file prediction (P2/P1)
 Goal: load CSV/TSV/LibSVM files and predict from a file path, as upstream does.
-- [ ] Parsers: CSV/TSV/LibSVM, header, `label_column`, `weight_column`, `group_column`, `ignore_column`, `two_round` (in progress: format detection, line parsers and column handling are ported and `Dataset(path)` trains byte-identically to upstream; `two_round=true` and side files `.init`/`.weight`/`.query` raise `NotImplementedError`)
-- [ ] Predict from file (`data` as path)
+- [ ] Parsers: CSV/TSV/LibSVM, header, `label_column`, `weight_column`, `group_column`, `ignore_column`, `two_round` (in progress: format detection, line parsers, column handling and the `.init`/`.weight`/`.query` side files are ported and `Dataset(path)` trains byte-identically to upstream; `two_round=true` raises `NotImplementedError`)
+- [x] Predict from file (`data` as path)
 - Gate: parity tests against `lightgbm==4.7.0` on the same files (model text and predictions match as the parity tolerances in `AGENTS.md`).
 
 ### Step 3: Speed on sparse and dense data (P3/P2)
@@ -74,7 +74,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] Prediction early stopping (`pred_early_stop*`)
 - [x] Python `Booster`: load/predict/save/dump/importance/pickle (dense numpy, lists, pandas)
 - [x] Sparse (CSR/CSC) prediction input, sparse `pred_contrib` output (bit-exact vs upstream: per-row buffer like `CopyToPredictBuffer`, duplicates last-wins, other scipy formats converted with upstream's warning; float32 input gives float32 SHAP output; sparse path matches dense-path speed, see P3 bench note)
-- [ ] Predict from file (`data` as path) — needs P2 parsers
+- [x] Predict from file (`data` as path) — needs P2 parsers
 - **Gate:** every golden model predicts bit-exactly ✅ (24 fixtures; 1.25–1.33x faster predict, 1.05x SHAP)
 - Bench note: on linux/x86_64 (2-vCPU VM) dense predict measured 0.90–0.99x of upstream (both libraries' sparse/dense ratios match); profile the tree traversal on x86 before claiming the gate there.
 

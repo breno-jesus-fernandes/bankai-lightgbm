@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::parser::{
-    DataType, delimited_num_columns, detect_data_type, label_index_checked, parse_line,
+    DataType, delimited_num_columns, detect_data_type, label_index, label_index_checked, parse_line,
 };
 use crate::error::{Error, Result};
 
@@ -18,6 +18,10 @@ pub struct TextLoadOptions<'a> {
     pub group_column: &'a str,
     pub ignore_column: &'a str,
     pub precise_float_parser: bool,
+    /// Feature count of the model when predicting from a file (upstream `num_features` of
+    /// `CreateParser`), so the label column is detected from the column count. `0` when
+    /// training, where column 0 is the label unless `label_column` says otherwise.
+    pub num_features: usize,
 }
 
 /// A loaded file: dense features (row-major, `num_data x num_features`), labels, and the
@@ -147,6 +151,11 @@ pub fn load_text(content: &str, opts: &TextLoadOptions<'_>) -> Result<LoadedText
         .map(|h| h.split(['\t', ',']).map(str::to_owned).collect())
         .unwrap_or_default();
     let label_idx = resolve_label(opts.label_column, &names)?;
+    let label_idx = if opts.num_features > 0 {
+        label_index(ty, first, opts.num_features as i32, label_idx)
+    } else {
+        label_idx
+    };
     label_index_checked(ty, label_idx)?;
     let mut feature_names = names;
     if !feature_names.is_empty() && label_idx >= 0 {
@@ -275,6 +284,7 @@ mod tests {
             group_column: "",
             ignore_column: "",
             precise_float_parser: false,
+            num_features: 0,
         }
     }
 
@@ -357,6 +367,21 @@ mod tests {
         let loaded = load_text("1,0,9\n", &o).unwrap();
         assert_eq!(loaded.weight, Some(vec![0.0]));
         assert_eq!(loaded.features, vec![9.0]);
+    }
+
+    #[test]
+    fn predicting_detects_the_label_column_from_the_model_feature_count() {
+        // upstream: Predictor reads a file with num_features = max_feature_idx + 1; the first
+        // line has exactly that many columns, so there is no label column.
+        let mut o = opts();
+        o.num_features = 2;
+        let loaded = load_text("1,2\n3,4\n", &o).unwrap();
+        assert_eq!(loaded.features, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(loaded.label, vec![0.0, 0.0]);
+        // One more column than the model uses: the first column is the label.
+        let loaded = load_text("9,1,2\n", &o).unwrap();
+        assert_eq!(loaded.features, vec![1.0, 2.0]);
+        assert_eq!(loaded.label, vec![9.0]);
     }
 
     #[test]

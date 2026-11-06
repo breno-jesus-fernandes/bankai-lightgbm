@@ -29,6 +29,9 @@ from bankai_lightgbm._lib import (
     dataset_check_reset_config,
     load_text_file,
     param_types,
+    parse_init_score_file,
+    parse_query_file,
+    parse_weights_file,
     validate_params,
 )
 from bankai_lightgbm.compat import PANDAS_INSTALLED
@@ -469,9 +472,6 @@ def _is_scipy_sparse(data: Any) -> bool:
 _PredictReturnType = npt.NDArray[Any] | Any
 
 
-_TEXT_SIDE_FILE_SUFFIXES = (".init", ".weight", ".query")
-
-
 def _load_text_data(
     path: str | Path, params: dict[str, Any]
 ) -> tuple[Any, Any, Any, Any, list[str]]:
@@ -481,12 +481,6 @@ def _load_text_data(
     """
     if _to_bool(params.get("two_round", False)):
         raise NotImplementedError("two_round=true is not implemented yet (roadmap Step 2)")
-    for suffix in _TEXT_SIDE_FILE_SUFFIXES:
-        side = Path(f"{path}{suffix}")
-        if side.exists():
-            raise NotImplementedError(
-                f"side file {side} is not supported yet (roadmap Step 2); remove it or load the data without it"
-            )
     matrix, label, weight, group, names = load_text_file(
         str(path),
         _to_bool(params.get("header", False)),
@@ -497,6 +491,58 @@ def _load_text_data(
         _to_bool(params.get("precise_float_parser", False)),
     )
     return np.asarray(matrix, dtype=np.float64), label, weight, group, names
+
+
+def _load_text_side_files(path: str | Path, num_data: int) -> dict[str, Any]:
+    """Read the ``<data>.weight``, ``.query`` and ``.init`` side files that exist next to a data file.
+
+    upstream: metadata.cpp Metadata::Init loads each side file when it is present; a missing or
+    empty file is ignored. Returns only the fields that were found: ``weight``, ``group``, ``init_score``.
+    """
+    found: dict[str, Any] = {}
+    weight_path = Path(f"{path}.weight")
+    if weight_path.is_file():
+        weights = np.asarray(parse_weights_file(weight_path.read_text()), dtype=np.float32)
+        if weights.shape[0] != num_data:
+            raise LightGBMError(
+                f"Initial weights size ({weights.shape[0]}) doesn't match data size ({num_data})"
+            )
+        found["weight"] = weights
+    query_path = Path(f"{path}.query")
+    if query_path.is_file():
+        found["group"] = parse_query_file(query_path.read_text())
+    init_path = Path(f"{path}.init")
+    if init_path.is_file():
+        num_class, values = parse_init_score_file(init_path.read_text())
+        if num_class > 0:
+            if len(values) // num_class != num_data:
+                raise LightGBMError(
+                    f"Initial score size doesn't match data size ({len(values) // num_class})"
+                )
+            # Class-major storage (values[k * num_data + i]) as a (num_data, num_class) array.
+            scores = np.asarray(values, dtype=np.float64).reshape(num_class, num_data).T
+            found["init_score"] = scores[:, 0] if num_class == 1 else scores
+    return found
+
+
+def _load_text_predict_data(
+    path: str | Path, header: bool, num_features: int, params: dict[str, Any]
+) -> npt.NDArray[np.float64]:
+    """Read a prediction file. The label column is detected from the model's feature count.
+
+    upstream: predictor.hpp Predictor::Predict with a data file (num_features = max_feature_idx + 1).
+    """
+    matrix, _, _, _, _ = load_text_file(
+        str(path),
+        header,
+        "",
+        "",
+        "",
+        "",
+        _to_bool(params.get("precise_float_parser", False)),
+        num_features,
+    )
+    return np.asarray(matrix, dtype=np.float64)
 
 
 def _dataset_sparse(data: Any) -> Any:
@@ -1447,13 +1493,21 @@ class Dataset:
                 self.data, self.params
             )
             n = matrix.shape[0]
-            # Explicit label, weight and group arguments win over the file's columns.
+            # Explicit label, weight, group and init_score arguments win over the file's columns
+            # and side files; side files fill only the fields that are still unset.
             if self.label is None:
                 self.label = file_label
             if self.weight is None and file_weight is not None:
                 self.weight = np.asarray(file_weight, dtype=np.float32)
             if self.group is None and file_group is not None:
                 self.group = file_group
+            side = _load_text_side_files(self.data, n)
+            if self.weight is None and "weight" in side:
+                self.weight = side["weight"]
+            if self.group is None and "group" in side:
+                self.group = side["group"]
+            if self.init_score is None and "init_score" in side:
+                self.init_score = side["init_score"]
             if file_names:
                 feature_names = file_names
         elif _is_pandas_df(self.data):
@@ -2356,7 +2410,9 @@ class Booster:
         if num_iteration is None:
             num_iteration = self.best_iteration if start_iteration <= 0 else -1
         if isinstance(data, (str, Path)):
-            raise NotImplementedError("Predicting from a file is not implemented yet (roadmap P2)")
+            data = _load_text_predict_data(
+                data, data_has_header, self.num_feature(), {**self.params, **kwargs}
+            )
         p = _resolve_predict_params({**self.params, **kwargs})
         predict_type = _C_API_PREDICT_NORMAL
         if raw_score:

@@ -49,9 +49,35 @@ def test_label_and_shape_match_upstream(data_file: Path) -> None:
     assert list(ours.get_label()) == list(theirs.get_label())
 
 
-def test_side_files_next_to_the_data_are_not_silently_ignored(tmp_path: Path) -> None:
+def test_init_and_weight_side_files_match_upstream(tmp_path: Path) -> None:
+    """``<data>.init`` and ``<data>.weight`` next to the data are loaded like upstream does."""
     path = tmp_path / "regression.train"
     shutil.copy(EXAMPLE, path)
-    (tmp_path / "regression.train.init").write_text("0.5\n")
-    with pytest.raises(NotImplementedError, match="side file"):
-        lgb.Dataset(str(path)).construct()
+    num_rows = sum(1 for _ in EXAMPLE.open())
+    init_lines = [f"{0.1 * (i % 5):.3f}" for i in range(num_rows)]
+    weight_lines = [f"{1.0 + 0.5 * (i % 3):.1f}" for i in range(num_rows)]
+    (tmp_path / "regression.train.init").write_text("\n".join(init_lines) + "\n")
+    (tmp_path / "regression.train.weight").write_text("\n".join(weight_lines) + "\n")
+
+    upstream = lightgbm.train(PARAMS, lightgbm.Dataset(str(path)), num_boost_round=10)
+    ours = lgb.train(PARAMS, lgb.Dataset(str(path)), num_boost_round=10)
+
+    assert ours.model_to_string() == upstream.model_to_string()
+
+
+def test_explicit_init_score_overrides_the_side_file(tmp_path: Path) -> None:
+    """An init_score passed to Dataset wins over ``<data>.init``, as in upstream."""
+    import numpy as np
+
+    path = tmp_path / "regression.train"
+    shutil.copy(EXAMPLE, path)
+    num_rows = sum(1 for _ in EXAMPLE.open())
+    (tmp_path / "regression.train.init").write_text("\n".join(["9.0"] * num_rows) + "\n")
+    explicit = np.full(num_rows, 0.25)
+
+    upstream = lightgbm.train(
+        PARAMS, lightgbm.Dataset(str(path), init_score=explicit), num_boost_round=10
+    )
+    ours = lgb.train(PARAMS, lgb.Dataset(str(path), init_score=explicit), num_boost_round=10)
+
+    assert ours.model_to_string() == upstream.model_to_string()

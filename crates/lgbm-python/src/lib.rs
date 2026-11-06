@@ -877,7 +877,7 @@ type TextFileArrays<'py> = (
 /// features, labels, the weight and group columns when requested, and the header names.
 #[pyfunction]
 #[pyo3(signature = (path, header, label_column, weight_column, group_column, ignore_column,
-    precise_float_parser))]
+    precise_float_parser, num_features=0))]
 #[allow(clippy::too_many_arguments)] // Python `load_text_file` arguments.
 fn load_text_file<'py>(
     py: Python<'py>,
@@ -888,6 +888,7 @@ fn load_text_file<'py>(
     group_column: String,
     ignore_column: String,
     precise_float_parser: bool,
+    num_features: usize,
 ) -> PyResult<TextFileArrays<'py>> {
     let content = std::fs::read_to_string(&path)
         .map_err(|_| LightGBMError::new_err(format!("Data file {path} doesn't exist.")))?;
@@ -898,6 +899,7 @@ fn load_text_file<'py>(
         group_column: &group_column,
         ignore_column: &ignore_column,
         precise_float_parser,
+        num_features,
     };
     let loaded = py
         .allow_threads(|| lgbm_core::io::text_loader::load_text(&content, &opts))
@@ -911,6 +913,25 @@ fn load_text_file<'py>(
         loaded.group,
         loaded.feature_names,
     ))
+}
+
+/// Parse the text of a `<data>.weight` side file (upstream `Metadata::LoadWeights`).
+#[pyfunction]
+fn parse_weights_file(content: &str) -> PyResult<Vec<f32>> {
+    lgbm_core::io::side_files::parse_weights(content).map_err(to_py)
+}
+
+/// Parse the text of a `<data>.query` side file into group sizes (upstream `LoadQueryBoundaries`).
+#[pyfunction]
+fn parse_query_file(content: &str) -> PyResult<Vec<i32>> {
+    lgbm_core::io::side_files::parse_query(content).map_err(to_py)
+}
+
+/// Parse the text of a `<data>.init` side file: `(num_class, class-major values)`
+/// (upstream `Metadata::LoadInitialScore`).
+#[pyfunction]
+fn parse_init_score_file(content: &str) -> PyResult<(usize, Vec<f64>)> {
+    lgbm_core::io::side_files::parse_init_score(content).map_err(to_py)
 }
 
 #[pyfunction]
@@ -1012,6 +1033,9 @@ fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeDataset>()?;
     m.add_function(wrap_pyfunction!(param_aliases, m)?)?;
     m.add_function(wrap_pyfunction!(load_text_file, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_weights_file, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_query_file, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_init_score_file, m)?)?;
     m.add_function(wrap_pyfunction!(param_types, m)?)?;
     m.add_function(wrap_pyfunction!(validate_params, m)?)?;
     m.add_function(wrap_pyfunction!(dataset_check_reset_config, m)?)?;
