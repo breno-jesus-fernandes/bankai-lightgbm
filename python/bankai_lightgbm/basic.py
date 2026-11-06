@@ -603,6 +603,11 @@ def _load_text_predict_data(
 
     upstream: predictor.hpp Predictor::Predict with a data file (num_features = max_feature_idx + 1).
     """
+    if _is_binary_dataset_file(path):
+        # upstream: Parser::CreateParser rejects a binary dataset file as a prediction input.
+        raise LightGBMError(
+            "Unknown format of training data. Only CSV, TSV, and LibSVM (zero-based) formatted text files are supported."
+        )
     matrix, _, _, _, _ = load_text_file(
         str(path),
         header,
@@ -1323,6 +1328,12 @@ class Dataset:
             subset_data = self.data.take(indices)
         elif _table_column_names(self.data) is not None:
             subset_data = self.data[indices]
+        elif isinstance(self.data, (str, Path)):
+            # upstream: Dataset.get_data keeps the original file path for a subset of file data.
+            _log_warning(
+                f"Cannot subset {type(self.data).__name__} type of raw data.\nReturning original raw data"
+            )
+            subset_data = self.data  # type: ignore[assignment]
         else:
             subset_data = np.asarray(self.data)[indices]
 
