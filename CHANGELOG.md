@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- RF validation metrics are computed on the averaged score, as upstream's RF validation score updater does (`test_rf`, `test_multiclass_rf`, `test_sample_strategy_with_boosting` now pass). Before, `eval_valid` and `record_evaluation` reported the sum of the trees, so RF metrics during training disagreed with `predict`.
+
 - `Dataset.add_features_from` appends another constructed Dataset's features in place, as upstream's `AddFeaturesFrom` does: groups, bins, feature names (clashes get a `D<n>_` prefix) and the data type of the raw data are merged. Both Datasets must have the same number of rows. Adding features when both sides have multi-value feature bundles raises `NotImplementedError`; upstream re-bundles both sides there, which is not ported yet.
 
 - `forcedbins_filename` sets per-feature upper bin bounds from the JSON file, as upstream's `GetForcedBins`; categorical features are skipped with a warning. The model matches `lightgbm==4.7.0`. The text dump's `forced_bins` line is still empty.
