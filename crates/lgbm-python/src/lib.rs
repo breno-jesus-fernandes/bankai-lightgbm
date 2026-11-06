@@ -601,7 +601,17 @@ impl NativeBooster {
                 ..PredictConfig::default()
             };
             let predictor = Predictor::new(model, &pred_cfg)?;
-            let row_scores = data.predict(&predictor, nrow, ncol)?;
+            let mut row_scores = data.predict(&predictor, nrow, ncol)?;
+            // upstream: the validation ScoreUpdater of a random forest holds the running mean of
+            // its trees (RF::TrainOneIter), so the metric is computed on the averaged score.
+            if model.average_output() {
+                let iterations = model.num_trees() / model.num_tree_per_iteration().max(1);
+                if iterations > 0 {
+                    for value in row_scores.iter_mut() {
+                        *value /= iterations as f64;
+                    }
+                }
+            }
             let nclass = model.num_class();
             let scores = if nclass > 1 {
                 let mut class_major = vec![0.0; row_scores.len()];
