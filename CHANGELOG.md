@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `Booster.params` includes the training Dataset's params, as upstream's `Booster.__init__` does (Booster params keep precedence). `reset_parameter` for other params than `learning_rate` is still not implemented.
+
 - `_np2d_to_np1d` and pandas frames with one float dtype keep their dtype without a copy, as upstream does. The native layer still converts to float64 at the boundary.
 
 - `two_round=true` with a text data file trains like upstream: the bin mappers come from a reservoir sample of the file's lines (upstream `TextReader::SampleFromFile`), so the model matches `lightgbm==4.7.0` with `two_round` set (`tests/parity/test_two_round_parity.py`). Validation sets built from a reference are unchanged.

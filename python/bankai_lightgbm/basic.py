@@ -1804,6 +1804,9 @@ class Booster:
                 train_set.construct()
             if "categorical_column" in getattr(train_set, "params", {}):
                 self.params["categorical_column"] = train_set.params["categorical_column"]
+            # upstream: Booster.__init__ copies the training Dataset's params into the Booster
+            # (``params.update(train_set.get_params())``). Booster params keep precedence here.
+            self.params = {**getattr(train_set, "params", {}), **self.params}
             merged_params = {**getattr(train_set, "params", {}), **self.params}
             _log_unknown_params(merged_params)
             # upstream: Booster.__init__ creates the C++ booster (LGBM_BoosterCreate), which
