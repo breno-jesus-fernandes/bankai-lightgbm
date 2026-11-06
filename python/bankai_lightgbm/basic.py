@@ -36,6 +36,7 @@ from bankai_lightgbm._lib import (
     validate_params,
 )
 from bankai_lightgbm.compat import PANDAS_INSTALLED
+from bankai_lightgbm.compat import concat as concat
 from bankai_lightgbm.compat import pd_DataFrame as pd_DataFrame
 from bankai_lightgbm.compat import pd_Series as pd_Series
 
@@ -1483,6 +1484,98 @@ class Dataset:
         ):
             self._position = _remap_positions(position, self.num_data())
             self.position = self._position
+        return self
+
+    def add_features_from(self, other: Dataset) -> Dataset:
+        """Add features from other Dataset to the current Dataset.
+
+        Both Datasets must be constructed before calling this method.
+
+        Parameters
+        ----------
+        other : Dataset
+            The Dataset to take features from.
+
+        Returns
+        -------
+        self : Dataset
+            Dataset with the new features added.
+        """
+        # upstream: python-package/lightgbm/basic.py (v4.7.0) ``Dataset.add_features_from``
+        if self._handle is None or other._handle is None:
+            raise ValueError(
+                "Both source and target Datasets must be constructed before adding features"
+            )
+        self._handle.add_features_from(other._handle)
+        self.feature_name = list(self._handle.feature_names())
+        # upstream frees the raw data of a constructed Dataset with free_raw_data=True, so the merge
+        # sees None there. bankai keeps the raw data, so that freed state is applied here.
+        if self.free_raw_data:
+            self.data = None
+        other_data = None if other.free_raw_data else other.data
+        was_none = self.data is None
+        old_self_data_type = type(self.data).__name__
+        if other_data is None:
+            self.data = None
+        elif self.data is not None:
+            if isinstance(self.data, np.ndarray):
+                if isinstance(other_data, np.ndarray):
+                    self.data = np.hstack((self.data, other_data))
+                elif isinstance(other_data, scipy.sparse.spmatrix):
+                    self.data = np.hstack((self.data, other_data.toarray()))
+                elif isinstance(other_data, pd_DataFrame):
+                    self.data = np.hstack((self.data, other_data.values))
+                else:
+                    self.data = None
+            elif isinstance(self.data, scipy.sparse.spmatrix):
+                sparse_format = self.data.getformat()
+                if isinstance(other_data, (np.ndarray, scipy.sparse.spmatrix)):
+                    self.data = scipy.sparse.hstack((self.data, other_data), format=sparse_format)
+                elif isinstance(other_data, pd_DataFrame):
+                    self.data = scipy.sparse.hstack(
+                        (self.data, other_data.values), format=sparse_format
+                    )
+                else:
+                    self.data = None
+            elif isinstance(self.data, pd_DataFrame):
+                if not PANDAS_INSTALLED:
+                    raise LightGBMError(
+                        "Cannot add features to DataFrame type of raw data "
+                        "without pandas installed. "
+                        "Install pandas and restart your session."
+                    )
+                if isinstance(other_data, np.ndarray):
+                    self.data = concat(
+                        (self.data, pd_DataFrame(other_data)), axis=1, ignore_index=True
+                    )
+                elif isinstance(other_data, scipy.sparse.spmatrix):
+                    self.data = concat(
+                        (self.data, pd_DataFrame(other_data.toarray())), axis=1, ignore_index=True
+                    )
+                elif isinstance(other_data, pd_DataFrame):
+                    self.data = concat((self.data, other_data), axis=1, ignore_index=True)
+                else:
+                    self.data = None
+            else:
+                self.data = None
+        if self.data is None:
+            err_msg = (
+                f"Cannot add features from {type(other_data).__name__} type of raw data to "
+                f"{old_self_data_type} type of raw data.\n"
+            )
+            err_msg += (
+                "Set free_raw_data=False when construct Dataset to avoid this"
+                if was_none
+                else "Freeing raw data"
+            )
+            _log_warning(err_msg)
+        self.feature_name = self.get_feature_name()
+        _log_warning(
+            "Resetting categorical features.\n"
+            "You can set new categorical features via ``set_categorical_feature`` method"
+        )
+        self.categorical_feature = "auto"
+        self.pandas_categorical = None
         return self
 
     def _dump_text(self, filename: str | Path) -> None:

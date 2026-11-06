@@ -170,7 +170,7 @@ try:
     from pandas import CategoricalDtype as pd_CategoricalDtype
     from pandas import DataFrame as pd_DataFrame
     from pandas import Series as pd_Series
-    from pandas import concat
+    from pandas import concat as concat
 
     PANDAS_INSTALLED = True
 except ImportError:

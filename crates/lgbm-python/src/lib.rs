@@ -28,7 +28,7 @@ fn to_py(err: lgbm_core::Error) -> PyErr {
 }
 
 /// Binned training data. Mirrors upstream's C API `DatasetHandle`.
-#[pyclass(module = "bankai_lightgbm._lib", frozen)]
+#[pyclass(module = "bankai_lightgbm._lib")]
 struct NativeDataset {
     ds: Arc<Dataset>,
     data: Arc<RawRows>,
@@ -309,6 +309,46 @@ impl NativeDataset {
             nrow: indices.len(),
             ncol: self.ncol,
         })
+    }
+
+    /// Append the features of `other` to this dataset in place (upstream:
+    /// `LGBM_DatasetAddFeaturesFrom`). Raw rows are kept only when both sides have dense raw rows.
+    fn add_features_from(&mut self, other: &NativeDataset) -> PyResult<()> {
+        Arc::make_mut(&mut self.ds)
+            .add_features_from(&other.ds)
+            .map_err(|err| match err {
+                lgbm_core::Error::Unsupported(msg) => {
+                    pyo3::exceptions::PyNotImplementedError::new_err(msg)
+                }
+                other => to_py(other),
+            })?;
+        let data = match (self.data.as_ref(), other.data.as_ref()) {
+            (RawRows::Dense(a), RawRows::Dense(b)) => {
+                let width = self.ncol + other.ncol;
+                let mut out = Vec::with_capacity(self.nrow * width);
+                for row in 0..self.nrow {
+                    out.extend_from_slice(&a[row * self.ncol..(row + 1) * self.ncol]);
+                    out.extend_from_slice(&b[row * other.ncol..(row + 1) * other.ncol]);
+                }
+                RawRows::Dense(out)
+            }
+            _ => RawRows::Unavailable,
+        };
+        self.data = Arc::new(data);
+        self.ncol += other.ncol;
+        Ok(())
+    }
+
+    /// The feature names of the binned dataset (upstream: `LGBM_DatasetGetFeatureNames`).
+    fn feature_names(&self) -> Vec<String> {
+        self.ds.feature_names.clone()
+    }
+
+    /// Identity of the underlying dataset. `add_features_from` updates it in place, so the value
+    /// stays the same (upstream: the `value` of the Dataset handle).
+    #[getter]
+    fn value(&self) -> usize {
+        Arc::as_ptr(&self.ds) as usize
     }
 }
 

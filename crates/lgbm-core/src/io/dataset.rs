@@ -1067,6 +1067,118 @@ impl Dataset {
         };
     }
 
+    /// Append the features of `other` to this dataset, keeping this dataset's rows.
+    ///
+    /// upstream: `Dataset::AddFeaturesFrom` (src/io/dataset.cpp, v4.7.0), the branch where at most
+    /// one side has a multi-value group: groups, bins and feature indices are appended with
+    /// offsets, and clashing feature names get a `D<n>_` prefix. When both sides have a multi-value
+    /// group, upstream re-bundles every group; that path is not ported yet and is rejected.
+    pub fn add_features_from(&mut self, other: &Dataset) -> Result<()> {
+        if other.num_data() != self.num_data() {
+            return Err(Error::InvalidParameter(
+                "Cannot add features from other Dataset with a different number of rows".into(),
+            ));
+        }
+        if self.raw_data.is_empty() != other.raw_data.is_empty() {
+            return Err(Error::InvalidParameter(
+                "Can only add features from other Dataset if both or neither have raw data.".into(),
+            ));
+        }
+        let self_multi = self.layout.groups.iter().any(|g| g.is_multi_val);
+        let other_multi = other.layout.groups.iter().any(|g| g.is_multi_val);
+        if self_multi && other_multi {
+            return Err(Error::Unsupported(
+                "adding features when both Datasets have multi-value feature groups is not supported yet"
+                    .into(),
+            ));
+        }
+
+        let feat_off = self.layout.num_features as i32;
+        let total_off = self.layout.num_total_features as i32;
+        let group_off = self.layout.groups.len() as i32;
+        if self.layout.group_bin_boundaries.is_empty() {
+            self.layout.group_bin_boundaries.push(0);
+        }
+        let bin_off = self
+            .layout
+            .group_bin_boundaries
+            .last()
+            .copied()
+            .unwrap_or(0);
+        let num_numeric = self.numeric_feature_map.iter().filter(|&&v| v >= 0).count() as i32;
+
+        let l = &mut self.layout;
+        let o = &other.layout;
+        l.used_feature_map.extend(
+            o.used_feature_map
+                .iter()
+                .map(|&f| if f >= 0 { f + feat_off } else { -1 }),
+        );
+        l.real_feature_idx
+            .extend(o.real_feature_idx.iter().map(|&r| r + total_off));
+        l.feature2group
+            .extend(o.feature2group.iter().map(|&g| g + group_off));
+        l.feature2subfeature
+            .extend_from_slice(&o.feature2subfeature);
+        l.group_feature_start
+            .extend(o.group_feature_start.iter().map(|&s| s + feat_off));
+        l.group_feature_cnt.extend_from_slice(&o.group_feature_cnt);
+        l.group_bin_boundaries
+            .extend(o.group_bin_boundaries.iter().skip(1).map(|&b| b + bin_off));
+        l.groups.extend(o.groups.iter().cloned());
+        l.num_features += o.num_features;
+        l.num_total_features += o.num_total_features;
+        self.data.extend(other.data.iter().cloned());
+
+        let mut names: std::collections::HashSet<String> =
+            self.feature_names.iter().cloned().collect();
+        for val in &other.feature_names {
+            let mut new_name = val.clone();
+            let mut cnt = 2;
+            while names.contains(&new_name) {
+                new_name = format!("D{cnt}_{val}");
+                cnt += 1;
+            }
+            if new_name != *val {
+                log::warn!(
+                    "Find the same feature name ({val}) in Dataset::AddFeaturesFrom, change its name to ({new_name})"
+                );
+            }
+            names.insert(new_name.clone());
+            self.feature_names.push(new_name);
+        }
+
+        self.forced_bin_bounds
+            .extend(other.forced_bin_bounds.iter().cloned());
+        // upstream: PushClearIfEmpty(&max_bin_by_feature_, ...), with -1 as the default.
+        match (
+            self.max_bin_by_feature.is_empty(),
+            other.max_bin_by_feature.is_empty(),
+        ) {
+            (false, false) => self
+                .max_bin_by_feature
+                .extend_from_slice(&other.max_bin_by_feature),
+            (false, true) => self
+                .max_bin_by_feature
+                .extend(std::iter::repeat_n(-1, other.layout.num_total_features)),
+            (true, false) => {
+                self.max_bin_by_feature
+                    .extend(std::iter::repeat_n(-1, total_off as usize));
+                self.max_bin_by_feature
+                    .extend_from_slice(&other.max_bin_by_feature);
+            }
+            (true, true) => {}
+        }
+        for &v in &other.numeric_feature_map {
+            self.numeric_feature_map
+                .push(if v >= 0 { v + num_numeric } else { -1 });
+        }
+        if !self.raw_data.is_empty() {
+            self.raw_data.extend(other.raw_data.iter().cloned());
+        }
+        Ok(())
+    }
+
     pub fn num_data(&self) -> usize {
         self.layout.num_data
     }
@@ -1710,5 +1822,86 @@ mod binary_load_tests {
             Err(Error::Unsupported(_))
         ));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod add_features_tests {
+    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::panic)]
+    use super::*;
+    use std::collections::HashMap;
+
+    fn dense(nrow: usize, ncol: usize, offset: usize) -> Dataset {
+        let values: Vec<f64> = (0..nrow * ncol)
+            .map(|i| (((i + offset) * 2_654_435_761usize) % 1009) as f64)
+            .collect();
+        let labels: Vec<f64> = (0..nrow).map(|i| (i % 3) as f64).collect();
+        let mut params = HashMap::new();
+        params.insert("min_data_in_leaf".to_string(), "1".to_string());
+        params.insert("min_data_in_bin".to_string(), "1".to_string());
+        let cfg = Config::from_params(&params).unwrap();
+        Dataset::from_dense(&values, nrow, ncol, &labels, &cfg, &[]).unwrap()
+    }
+
+    #[test]
+    fn appends_the_other_datasets_groups_with_shifted_indices() -> Result<()> {
+        let mut a = dense(40, 2, 0);
+        let b = dense(40, 3, 7);
+        let a_real = a.layout.real_feature_idx.clone();
+        let b_real: Vec<i32> = b.layout.real_feature_idx.iter().map(|&r| r + 2).collect();
+        let a_groups = a.layout.groups.len();
+        let b_groups = b.layout.groups.len();
+        let a_bins = *a.layout.group_bin_boundaries.last().unwrap();
+        let b_bins = *b.layout.group_bin_boundaries.last().unwrap();
+
+        a.add_features_from(&b)?;
+
+        assert_eq!(a.layout.num_total_features, 5);
+        assert_eq!(a.layout.num_features, 5);
+        assert_eq!(a.layout.groups.len(), a_groups + b_groups);
+        assert_eq!(a.data.len(), a_groups + b_groups);
+        assert_eq!(a.layout.real_feature_idx, [a_real, b_real].concat());
+        assert_eq!(
+            *a.layout.group_bin_boundaries.last().unwrap(),
+            a_bins + b_bins
+        );
+        assert_eq!(a.layout.group_bin_boundaries.len(), a_groups + b_groups + 1);
+        assert_eq!(a.layout.feature2group.len(), 5);
+        assert_eq!(a.feature_names.len(), 5);
+        assert_eq!(a.feature_names[0], "Column_0");
+        assert_eq!(a.feature_names[2], "D2_Column_0");
+        Ok(())
+    }
+
+    #[test]
+    fn appended_groups_keep_their_bins() -> Result<()> {
+        let mut a = dense(40, 2, 0);
+        let b = dense(40, 3, 7);
+        let a_groups = a.layout.groups.len();
+        a.add_features_from(&b)?;
+        for (i, g) in b.data.iter().enumerate() {
+            let (GroupData::Single(x), GroupData::Single(y)) = (&a.data[a_groups + i], g) else {
+                panic!("expected single-value groups");
+            };
+            let (BinData::Dense(x), BinData::Dense(y)) = (x, y) else {
+                panic!("expected dense bins");
+            };
+            assert_eq!(x.num_rows(), y.num_rows());
+            for row in 0..y.num_rows() {
+                assert_eq!(x.get(row), y.get(row));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_a_dataset_with_a_different_number_of_rows() {
+        let mut a = dense(40, 2, 0);
+        let b = dense(10, 2, 0);
+        assert!(matches!(
+            a.add_features_from(&b),
+            Err(Error::InvalidParameter(msg)) if msg.contains("different number of rows")
+        ));
     }
 }
