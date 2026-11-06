@@ -5,6 +5,7 @@ from __future__ import annotations
 import abc
 import ctypes
 import json
+import re
 import warnings
 from collections.abc import Callable
 from collections.abc import Sequence as _ABCSequence
@@ -472,6 +473,25 @@ def _is_scipy_sparse(data: Any) -> bool:
 _PredictReturnType = npt.NDArray[Any] | Any
 
 
+def _check_parser_config(params: dict[str, Any]) -> None:
+    """Reject a ``parser_config_file`` whose parser class is not registered.
+
+    upstream: parser.cpp Parser::CreateParser (custom parser add-on) and ParserFactory::getObject.
+    No custom parser can be registered here, so any non-empty config names an unknown class.
+    """
+    config_path = params.get("parser_config_file")
+    if not config_path:
+        return
+    content = Path(config_path).read_text().strip()
+    if not content:
+        return
+    match = re.search(r'"className"\s*:\s*"([^"]*)"', content)
+    class_name = match.group(1) if match else ""
+    raise LightGBMError(
+        f"Cannot find parser class '{class_name}', please register first or check config format."
+    )
+
+
 def _load_text_data(
     path: str | Path, params: dict[str, Any]
 ) -> tuple[Any, Any, Any, Any, list[str]]:
@@ -481,6 +501,7 @@ def _load_text_data(
     """
     if _to_bool(params.get("two_round", False)):
         raise NotImplementedError("two_round=true is not implemented yet (roadmap Step 2)")
+    _check_parser_config(params)
     matrix, label, weight, group, names = load_text_file(
         str(path),
         _to_bool(params.get("header", False)),
