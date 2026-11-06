@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- DART continued training (`init_model` with `boosting=dart`): the init model's trees are never dropped, and drop weights cover only the trees trained in the run, as upstream does. Matches `lightgbm==4.7.0` exactly (`tests/parity/test_dart_continue_parity.py`); `test_continue_train_dart` now passes.
+
 - `cv(init_model=...)` continues each fold from the init model (a Booster or a model file), as upstream does: the fold's validation scores start from the init model's predictions. `test_cv_works_with_init_model` now passes.
 
 - RF validation metrics are computed on the averaged score, as upstream's RF validation score updater does (`test_rf`, `test_multiclass_rf`, `test_sample_strategy_with_boosting` now pass). Before, `eval_valid` and `record_evaluation` reported the sum of the trees, so RF metrics during training disagreed with `predict`.

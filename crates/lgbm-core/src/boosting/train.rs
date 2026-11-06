@@ -128,9 +128,6 @@ impl GbdtTrainer {
     /// come first and new trees follow. The dataset's `init_score` must hold `init`'s raw
     /// predictions, as upstream's Python layer sets them; the trainer starts from those scores.
     pub fn with_init_model(cfg: Arc<Config>, ds: Arc<Dataset>, init: &Gbdt) -> Result<Self> {
-        if cfg.boosting == "dart" {
-            return Err(Error::Unsupported("init_model with boosting=dart".into()));
-        }
         if ds.metadata.init_score.is_empty() {
             return Err(Error::InvalidParameter(
                 "continued training needs the init model's predictions as init_score".into(),
@@ -144,6 +141,10 @@ impl GbdtTrainer {
             ));
         }
         trainer.trainer.models = init.models.clone();
+        let init_iterations = init.models.len() / ntpi;
+        if let Some(state) = trainer.trainer.dart.as_mut() {
+            state.init_iterations = init_iterations;
+        }
         Ok(trainer)
     }
 
@@ -309,6 +310,9 @@ struct DartState {
     /// Whether this iteration's trees were already dropped (upstream
     /// `is_update_score_cur_iter_`, which upstream leaves uninitialized; `false` here).
     dropped_this_iter: bool,
+    /// Iterations of the init model (upstream `num_init_iteration_`). They come first in the
+    /// model list and are never dropped; `tree_weight` covers only the trees trained here.
+    init_iterations: usize,
 }
 
 /// upstream `std::min(a, b)`: `b` only when strictly smaller.
@@ -376,6 +380,7 @@ impl Trainer {
                 drop_index: Vec::new(),
                 rng: Random::new(drop_seed),
                 dropped_this_iter: false,
+                init_iterations: 0,
             }),
             shrinkage: learning_rate,
             model_learning_rate: learning_rate,
@@ -720,9 +725,13 @@ impl Trainer {
     fn add_model_to_train_score(&mut self, idx: usize, k: usize) {
         let n = self.ds.num_data();
         let rows: Vec<i32> = (0..n as i32).collect();
+        // Split records cover only the trees trained here, after the init model's trees.
+        let init_trees = self.dart.as_ref().map_or(0, |state| {
+            state.init_iterations * self.num_tree_per_iteration
+        });
         self.learner.add_prediction_for_rows(
             &self.models[idx],
-            &self.tree_splits[idx],
+            &self.tree_splits[idx - init_trees],
             &rows,
             &mut self.score[k * n..(k + 1) * n],
         );
@@ -790,6 +799,8 @@ impl Trainer {
         let Some(state) = self.dart.as_mut() else {
             return;
         };
+        // upstream: `drop_index_.push_back(num_init_iteration_ + i)`; `tree_weight` stays relative.
+        let init_iterations = state.init_iterations;
         let mut drop_index: Vec<usize> = Vec::new();
         let is_skip = f64::from(state.rng.next_float()) < cfg.skip_drop;
         if !is_skip {
@@ -807,7 +818,7 @@ impl Trainer {
                 for i in 0..iter {
                     let w = state.tree_weight.get(i).copied().unwrap_or(0.0);
                     if f64::from(state.rng.next_float()) < drop_rate * w * inv_average_weight {
-                        drop_index.push(i);
+                        drop_index.push(init_iterations + i);
                         if drop_index.len() as u64 >= max_drop_size {
                             break;
                         }
@@ -819,7 +830,7 @@ impl Trainer {
                 }
                 for i in 0..iter {
                     if f64::from(state.rng.next_float()) < drop_rate {
-                        drop_index.push(i);
+                        drop_index.push(init_iterations + i);
                         if drop_index.len() as u64 >= max_drop_size {
                             break;
                         }
@@ -858,7 +869,10 @@ impl Trainer {
         };
         let k = drop_index.len() as f64;
         let lr = cfg.learning_rate;
+        let init_iterations = self.dart.as_ref().map_or(0, |state| state.init_iterations);
         for &i in &drop_index {
+            // upstream: `tree_weight_[i - num_init_iteration_]`
+            let rel = i - init_iterations;
             for c in 0..ntpi {
                 let idx = i * ntpi + c;
                 if !cfg.xgboost_dart_mode {
@@ -873,15 +887,15 @@ impl Trainer {
             if !cfg.uniform_drop
                 && let Some(state) = self.dart.as_mut()
             {
-                let w = state.tree_weight.get(i).copied().unwrap_or(0.0);
+                let w = state.tree_weight.get(rel).copied().unwrap_or(0.0);
                 if !cfg.xgboost_dart_mode {
                     state.sum_weight -= w * (1.0 / (k + 1.0));
-                    if let Some(t) = state.tree_weight.get_mut(i) {
+                    if let Some(t) = state.tree_weight.get_mut(rel) {
                         *t *= k / (k + 1.0);
                     }
                 } else {
                     state.sum_weight -= w * (1.0 / (k + lr));
-                    if let Some(t) = state.tree_weight.get_mut(i) {
+                    if let Some(t) = state.tree_weight.get_mut(rel) {
                         *t *= k / (k + lr);
                     }
                 }
