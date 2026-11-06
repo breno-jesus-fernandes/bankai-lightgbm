@@ -53,11 +53,12 @@ jobs:
     if: github.event_name != 'pull_request' || needs.changes.outputs.hot == 'true'
     runs-on: ubuntu-latest
     env:
-      # Intel code placement: where the linker puts a tight loop's branches changes its speed by
-      # about 30% (partition/numerical/200k on the 2-vCPU runners). Keeping branches inside 32-byte
-      # windows removes that swing. Base and candidate are both built with it, so the comparison
-      # stays fair; the product build is unchanged.
-      RUSTFLAGS: "-C llvm-args=-x86-branches-within-32B-boundaries"
+      # Code placement: where the linker puts a hot function changes its speed by up to 30%
+      # (partition/numerical/200k on the 2-vCPU runners). Aligning every function to 64 bytes
+      # makes placement deterministic. Base and candidate are both built with it, so the comparison
+      # stays fair; the product build is unchanged. (The 32-byte branch-boundary flag used before
+      # left a ~4% gap in local measurements and did not clear the CI gate.)
+      RUSTFLAGS: "-C llvm-args=-align-all-functions=6"
     steps:
       - uses: actions/checkout@v4
         with:
