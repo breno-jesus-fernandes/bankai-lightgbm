@@ -148,6 +148,10 @@ impl SampleSet {
         // upstream: filter_cnt = (int)((double)(min_data_in_leaf * total_sample_size) / num_data)
         let filter_cnt =
             ((f64::from(cfg.min_data_in_leaf) * sample_cnt as f64) / self.num_data as f64) as i32;
+        // upstream: DatasetLoader::GetForcedBins (forcedbins_filename), per feature.
+        let categorical_set: std::collections::HashSet<i32> = categorical.iter().copied().collect();
+        let forced =
+            super::forced_bins::get_forced_bins(&cfg.forcedbins_filename, ncol, &categorical_set)?;
         self.values
             .par_iter_mut()
             .enumerate()
@@ -176,7 +180,7 @@ impl SampleSet {
                     },
                     use_missing: cfg.use_missing,
                     zero_as_missing: cfg.zero_as_missing,
-                    forced_upper_bounds: &[],
+                    forced_upper_bounds: &forced[i],
                 };
                 Ok(Some(BinMapper::find_bin(values, &p)))
             })

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `forcedbins_filename` sets per-feature upper bin bounds from the JSON file, as upstream's `GetForcedBins`; categorical features are skipped with a warning. The model matches `lightgbm==4.7.0`. The text dump's `forced_bins` line is still empty.
+
 - A subset of a Dataset built from a file keeps the file path as its data (upstream logs a warning and returns the original raw data). Predicting from a binary dataset file raises upstream's `Unknown format of training data` error.
 
 - `Booster.params` includes the training Dataset's params, as upstream's `Booster.__init__` does (Booster params keep precedence). `reset_parameter` for other params than `learning_rate` is still not implemented.
