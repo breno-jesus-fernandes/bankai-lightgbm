@@ -21,7 +21,7 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
       Done: all ported files in `tests/python_package_test` (`test_plotting`, `test_sklearn`, `test_basic`,
       `test_engine`, `test_callback`, `test_utilities`, `test_consistency`, `test_pandas`, `test_arrow`, `test_polars`,
       `test_dual`), run unmodified except imports. Upstream cases that still fail are strict `xfail`s listed in
-      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (19 node ids; a fix turns them into
+      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (18 node ids; a fix turns them into
       failing XPASS, so the line is removed with the fix). `test_dask.py` belongs to P7 (distributed).
       Arrow/polars ports pass in full (`Dataset._dump_text` is byte-identical to upstream). `get_data` on pyarrow/polars subsets now keeps the table type. Done: all-ones weights become `None`, as upstream; arrow/polars column names feed categorical features; pyarrow/polars predict densely.
       Open work from the list: the "not triaged" entries (pandas dtypes, early-stopping
@@ -125,7 +125,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] RF (`boosting=rf`, byte-identical; known gap: a first tree with no split is scored on out-of-bag rows only, matching upstream's non-subset path, the subset path is not modelled)
 - [x] GOSS (`data_sample_strategy=goss`, byte-identical; both the subset and dense regimes)
 - [x] Early stopping (`early_stopping_round`, `first_metric_only`, `early_stopping_min_delta`; validation metrics and callback parity)
-- [ ] Continued training: `init_model` ✅ for gbdt/multiclass (file, Booster, validation and callbacks; DART rejected for now); `init_score` ✅ (byte-identical training, multiclass, validation metrics, subsets; RF rejects it like upstream)
+- [ ] Continued training: `init_model` ✅ for gbdt/multiclass (file, Booster, validation, callbacks and `cv`; DART rejected for now); `init_score` ✅ (byte-identical training, multiclass, validation metrics, subsets; RF rejects it like upstream)
 - [ ] Model merge; `shuffle_models` ✅ (upstream order with Random(17)); `set_leaf_output` ✅ (edits the model and continued training's trees); `rollback_one_iter` ✅ (gbdt, bagging and GOSS byte-identical scores; rejected for RF/DART and init_model trees)
 
 ## P6: Python package (drop-in)
