@@ -473,6 +473,21 @@ def _is_scipy_sparse(data: Any) -> bool:
 _PredictReturnType = npt.NDArray[Any] | Any
 
 
+_BINARY_FILE_TOKEN = b"______LightGBM_Binary_File_Token______\n"
+
+
+def _is_binary_dataset_file(path: str | Path) -> bool:
+    """True when the file starts with upstream's binary dataset token (``save_binary`` output).
+
+    upstream: dataset_loader.cpp DatasetLoader::CheckCanLoadFromBin.
+    """
+    candidate = Path(path)
+    if not candidate.is_file():
+        return False
+    with candidate.open("rb") as fin:
+        return fin.read(len(_BINARY_FILE_TOKEN)) == _BINARY_FILE_TOKEN
+
+
 def _check_parser_config(params: dict[str, Any]) -> None:
     """Reject a ``parser_config_file`` whose parser class is not registered.
 
@@ -1501,6 +1516,17 @@ class Dataset:
             self._sync_params_with_reference()
         if self.data is None:
             raise ValueError("Cannot construct a Dataset without data")
+        if isinstance(self.data, (str, Path)) and _is_binary_dataset_file(self.data):
+            # upstream: a binary file carries its own bins and metadata (DatasetLoader::LoadFromBinFile).
+            if self.reference is not None:
+                raise NotImplementedError(
+                    "a reference Dataset with a binary dataset file is not supported yet"
+                )
+            if any(v is not None for v in (self.label, self.weight, self.group, self.init_score)):
+                raise NotImplementedError(
+                    "label, weight, group or init_score with a binary dataset file is not supported yet"
+                )
+            return NativeDataset.from_binary_file(str(self.data))
         feature_names: list[str] | None = None
         pandas_cat_cols: list[int] = []
         # upstream: _data_from_pandas (v4.7.0) takes only the unordered columns for 'auto'.
