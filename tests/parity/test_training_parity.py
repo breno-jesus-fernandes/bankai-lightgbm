@@ -1296,16 +1296,17 @@ def test_conflicting_num_iterations_aliases_warn_like_upstream() -> None:
 
 
 @pytest.mark.parametrize("alias", ["linear_tree", "linear_trees"])
-def test_linear_tree_training_is_rejected_until_ported(alias: str) -> None:
-    # Upstream fits a linear model in every leaf. bankai does not train linear trees yet
-    # (ROADMAP P3 `linear_tree`), so it must refuse rather than silently train plain trees.
+def test_linear_tree_training_matches_upstream(alias: str) -> None:
+    # Upstream fits a linear model in every leaf. bankai trains the same linear leaves
+    # (ROADMAP P3 `linear_tree`); the full multi-round comparison lives in
+    # tests/parity/test_linear_tree_parity.py, this checks the alias path end to end.
     rng = np.random.default_rng(64)
     x = rng.normal(size=(200, 3))
-    params = {"verbosity": -1, alias: True}
-    with pytest.raises(lgb.LightGBMError, match="linear_tree"):
-        lgb.train(params, lgb.Dataset(x, label=x[:, 0]), num_boost_round=2)
-    booster = lightgbm.train(params, lightgbm.Dataset(x, label=x[:, 0]), num_boost_round=2)
-    assert "is_linear=1" in booster.model_to_string()
+    params = {"verbosity": -1, "num_threads": 1, "deterministic": True, "seed": 1, alias: True}
+    ours = lgb.train(params, lgb.Dataset(x, label=x[:, 0]), num_boost_round=2)
+    theirs = lightgbm.train(params, lightgbm.Dataset(x, label=x[:, 0]), num_boost_round=2)
+    assert "is_linear=1" in ours.model_to_string()
+    np.testing.assert_allclose(ours.predict(x), theirs.predict(x), rtol=1e-7, atol=1e-12)
 
 
 def _early_stopping_outcome(

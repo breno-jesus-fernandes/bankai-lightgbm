@@ -450,6 +450,14 @@ impl Tree {
             self.internal_value[i] = Tree::maybe_round_to_zero(self.internal_value[i] * rate);
         }
         self.leaf_value[n - 1] = Tree::maybe_round_to_zero(self.leaf_value[n - 1] * rate);
+        if self.is_linear {
+            for i in 0..n {
+                self.leaf_const[i] = Tree::maybe_round_to_zero(self.leaf_const[i] * rate);
+                for c in &mut self.leaf_coeff[i] {
+                    *c = Tree::maybe_round_to_zero(*c * rate);
+                }
+            }
+        }
         self.shrinkage *= rate;
     }
 
@@ -461,6 +469,11 @@ impl Tree {
             self.internal_value[i] = Tree::maybe_round_to_zero(self.internal_value[i] + val);
         }
         self.leaf_value[n - 1] = Tree::maybe_round_to_zero(self.leaf_value[n - 1] + val);
+        if self.is_linear {
+            for i in 0..n {
+                self.leaf_const[i] = Tree::maybe_round_to_zero(self.leaf_const[i] + val);
+            }
+        }
         self.shrinkage = 1.0;
     }
 

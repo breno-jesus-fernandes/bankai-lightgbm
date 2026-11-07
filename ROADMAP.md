@@ -21,7 +21,7 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
       Done: all ported files in `tests/python_package_test` (`test_plotting`, `test_sklearn`, `test_basic`,
       `test_engine`, `test_callback`, `test_utilities`, `test_consistency`, `test_pandas`, `test_arrow`, `test_polars`,
       `test_dual`), run unmodified except imports. Upstream cases that still fail are strict `xfail`s listed in
-      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (11 node ids; a fix turns them into
+      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (8 node ids; a fix turns them into
       failing XPASS, so the line is removed with the fix). `test_dask.py` belongs to P7 (distributed).
       Arrow/polars ports pass in full (`Dataset._dump_text` is byte-identical to upstream). `get_data` on pyarrow/polars subsets now keeps the table type. Done: all-ones weights become `None`, as upstream; arrow/polars column names feed categorical features; pyarrow/polars predict densely.
       Open work from the list: the "not triaged" entries (pandas dtypes, early-stopping
@@ -104,7 +104,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [ ] Monotone constraints: basic (done, byte-identical, with `monotone_penalty`); intermediate and advanced still missing
 - [x] `interaction_constraints` (byte-identical; by-tree and by-node sampling)
 - [ ] CEGB (`cegb_*`). `forcedsplits_filename` is done for numerical features (parity-tested with and without `feature_fraction` and with NaN values); categorical forced splits raise `NotImplementedError`
-- [ ] `linear_tree` (`linear_lambda`); training currently refuses `linear_tree=true` with an explicit error
+- [ ] `linear_tree` (`linear_lambda`): training and model text/JSON match upstream (parity-tested over several rounds, `tests/parity/test_linear_tree_parity.py`). Open: `save_and_load_linear` (binary dataset with raw data), `test_linear_trees`, `test_linear_trees_num_threads`, `test_linear_single_leaf`; refit with linear trees stays `Unsupported`
 - [ ] Quantized training (`use_quantized_grad`, `num_grad_quant_bins`, ...)
 - [x] `refit` (byte-identical leaves vs upstream on upstream models, decay 0/0.9/1; `validate_features`; categorical reconciliation; `linear_tree` and `boosting=rf|dart` raise `Unsupported`)
 - [ ] `deterministic`
