@@ -2,4 +2,4 @@
 # 'not triaged'). tests/conftest.py marks each as a strict xfail; a pass shows as XPASS and
 # fails the run, so delete the line when the gap is closed. Generated from a full run of
 # tests/python_package_test; keep it in sync with the ROADMAP.
-tests/python_package_test/test_engine.py::test_monotone_constraints[True]	monotone constraints beyond basic (ROADMAP P3 monotone)
+tests/python_package_test/test_engine.py::test_monotone_constraints[True]	documented exception: monotone_constraints_method=advanced with categorical features is refused with Unsupported, because upstream reads an uninitialised cumulative view in its categorical search (ROADMAP P3 monotone, decision 2026-11-07)
