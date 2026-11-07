@@ -591,6 +591,9 @@ pub struct Metadata {
     pub weights: Vec<f32>,
     pub query_boundaries: Vec<i32>,
     pub init_score: Vec<f64>,
+    /// Dense position id of each row (ranking position bias), numbered in first-seen order.
+    /// Empty when the dataset has no positions.
+    pub positions: Vec<i32>,
 }
 
 /// A binned training dataset. upstream: `Dataset`
@@ -816,6 +819,29 @@ impl Dataset {
 
     /// upstream: `Metadata::SetInitScore` (class-major; an empty slice clears the scores).
     /// Non-finite values are clamped like upstream's `Common::AvoidInf`.
+    /// Set the dense position id of each row (upstream: `Metadata::SetPosition`). The ids are
+    /// already densified by the caller; they must be non-negative and one per row.
+    pub fn set_positions(&mut self, positions: &[i32]) -> Result<()> {
+        if positions.is_empty() {
+            self.metadata.positions.clear();
+            return Ok(());
+        }
+        let num_data = self.num_data();
+        if positions.len() != num_data {
+            return Err(Error::InvalidParameter(format!(
+                "Positions size ({}) doesn't match data size ({num_data})",
+                positions.len()
+            )));
+        }
+        if positions.iter().any(|&p| p < 0) {
+            return Err(Error::InvalidParameter(
+                "Position ids must be non-negative".into(),
+            ));
+        }
+        self.metadata.positions = positions.to_vec();
+        Ok(())
+    }
+
     pub fn set_init_score(&mut self, scores: &[f64]) -> Result<()> {
         if scores.is_empty() {
             self.metadata.init_score.clear();
@@ -1301,6 +1327,13 @@ impl Dataset {
                 weights,
                 query_boundaries,
                 init_score,
+                positions: if self.metadata.positions.is_empty() {
+                    Vec::new()
+                } else {
+                    rows.iter()
+                        .map(|&row| self.metadata.positions[row])
+                        .collect()
+                },
             },
             feature_names: self.feature_names.clone(),
             label_idx: self.label_idx,
@@ -1502,6 +1535,7 @@ impl Dataset {
                 weights: bin.metadata.weights.clone(),
                 query_boundaries: bin.metadata.query_boundaries.clone(),
                 init_score: Vec::new(),
+                positions: Vec::new(),
             },
             feature_names: h.feature_names.clone(),
             label_idx: h.label_idx,
@@ -1903,5 +1937,50 @@ mod add_features_tests {
             a.add_features_from(&b),
             Err(Error::InvalidParameter(msg)) if msg.contains("different number of rows")
         ));
+    }
+}
+
+#[cfg(test)]
+mod position_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use std::collections::HashMap;
+
+    fn small(nrow: usize) -> Dataset {
+        let values: Vec<f64> = (0..nrow * 2).map(|i| ((i * 37) % 23) as f64).collect();
+        let labels: Vec<f64> = (0..nrow).map(|i| (i % 3) as f64).collect();
+        let params: HashMap<String, String> = HashMap::new();
+        let cfg = Config::from_params(&params).unwrap();
+        Dataset::from_dense(&values, nrow, 2, &labels, &cfg, &[]).unwrap()
+    }
+
+    #[test]
+    fn positions_are_stored_one_per_row() {
+        let mut ds = small(6);
+        ds.set_positions(&[0, 1, 0, 2, 1, 0]).unwrap();
+        assert_eq!(ds.metadata.positions, vec![0, 1, 0, 2, 1, 0]);
+    }
+
+    #[test]
+    fn positions_must_match_the_row_count_and_be_non_negative() {
+        let mut ds = small(6);
+        assert!(matches!(
+            ds.set_positions(&[0, 1, 2]),
+            Err(Error::InvalidParameter(_))
+        ));
+        assert!(matches!(
+            ds.set_positions(&[0, -1, 0, 0, 0, 0]),
+            Err(Error::InvalidParameter(_))
+        ));
+        assert!(ds.metadata.positions.is_empty());
+    }
+
+    #[test]
+    fn empty_positions_clear_the_field() {
+        let mut ds = small(4);
+        ds.set_positions(&[0, 0, 1, 1]).unwrap();
+        ds.set_positions(&[]).unwrap();
+        assert!(ds.metadata.positions.is_empty());
     }
 }

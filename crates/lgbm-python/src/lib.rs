@@ -253,6 +253,18 @@ impl NativeDataset {
         })
     }
 
+    /// A copy of this dataset with the dense position ids replaced (empty clears them).
+    fn with_positions(&self, positions: Vec<i32>) -> PyResult<Self> {
+        let mut ds = (*self.ds).clone();
+        ds.set_positions(&positions).map_err(to_py)?;
+        Ok(NativeDataset {
+            ds: Arc::new(ds),
+            data: Arc::clone(&self.data),
+            nrow: self.nrow,
+            ncol: self.ncol,
+        })
+    }
+
     /// A copy of this dataset with the init score replaced (class-major; empty clears it).
     /// The binned data is copied; the raw matrix is shared.
     fn with_init_score(&self, init_score: Vec<f64>) -> PyResult<Self> {

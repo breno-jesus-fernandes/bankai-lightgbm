@@ -583,6 +583,12 @@ def _load_text_side_files(path: str | Path, num_data: int) -> dict[str, Any]:
     query_path = Path(f"{path}.query")
     if query_path.is_file():
         found["group"] = parse_query_file(query_path.read_text())
+    position_path = Path(f"{path}.position")
+    if position_path.is_file():
+        # upstream: Metadata::LoadPositions reads one raw id per line; SetPosition checks the count.
+        found["position"] = [
+            line.strip() for line in position_path.read_text().splitlines() if line.strip()
+        ]
     init_path = Path(f"{path}.init")
     if init_path.is_file():
         num_class, values = parse_init_score_file(init_path.read_text())
@@ -1129,7 +1135,10 @@ class Dataset:
     def construct(self) -> Dataset:
         """Bin the data (no-op if already constructed)."""
         if self._handle is None:
-            self._handle = self._build()
+            built = self._build()
+            if self._position is not None:
+                built = built.with_positions([int(p) for p in self._position])
+            self._handle = built
             # upstream: Dataset._lazy_init ends with ``self.feature_name = self.get_feature_name()``
             self.feature_name = self.get_feature_name()
             # upstream: Dataset._lazy_init sets init_score through set_init_score, so it is read back.
@@ -1700,6 +1709,8 @@ class Dataset:
                 self.group = side["group"]
             if self.init_score is None and "init_score" in side:
                 self.init_score = side["init_score"]
+            if self.position is None and "position" in side:
+                self.position = side["position"]
             if file_names:
                 feature_names = file_names
         elif _is_pandas_df(self.data):
