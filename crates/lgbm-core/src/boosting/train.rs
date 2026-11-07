@@ -69,8 +69,7 @@ impl Gbdt {
 }
 
 /// Validate a forced-splits file against the dataset's features (upstream: src/boosting/gbdt.cpp
-/// (v4.7.0) `GBDT::CheckForcedSplitFeatures`). Forced splits are not implemented yet, so a file
-/// that passes the check is reported as unsupported rather than ignored.
+/// (v4.7.0) `GBDT::CheckForcedSplitFeatures`). The learner applies the splits.
 pub fn check_forced_split_features(path: &str, max_feature_idx: i32) -> Result<()> {
     let text = std::fs::read_to_string(path)?;
     let root: serde_json::Value = serde_json::from_str(&text)
@@ -92,9 +91,7 @@ pub fn check_forced_split_features(path: &str, max_feature_idx: i32) -> Result<(
             }
         }
     }
-    Err(Error::Unsupported(
-        "forced splits (forcedsplits_filename)".into(),
-    ))
+    Ok(())
 }
 
 /// A booster that trains one iteration at a time (upstream `Booster::UpdateOneIter`).
@@ -1184,10 +1181,9 @@ mod forced_split_tests {
     }
 
     #[test]
-    fn valid_forced_splits_file_is_reported_as_unsupported() {
+    fn valid_forced_splits_file_passes_the_check() {
         let path = write("ok", r#"{"feature": 0, "right": {"feature": 1}}"#);
-        let err = check_forced_split_features(path.to_str().unwrap(), 1).unwrap_err();
-        assert!(matches!(err, Error::Unsupported(_)));
+        check_forced_split_features(path.to_str().unwrap(), 1).unwrap();
     }
 }
 
