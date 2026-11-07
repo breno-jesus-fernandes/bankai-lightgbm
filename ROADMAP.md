@@ -101,7 +101,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] Regularization: `lambda_l1`, `lambda_l2`, `min_gain_to_split`, `max_delta_step`, `path_smooth`
 - [x] Categorical splits (`max_cat_threshold`, `cat_l2`, `cat_smooth`, `max_cat_to_onehot`, `min_data_per_group`; byte-identical, one-hot and sorted search, NaN categories, bagging; monotone + categorical still unsupported)
 - [ ] `feature_fraction`, `feature_fraction_bynode`, `bagging_fraction`/`bagging_freq`, pos/neg bagging (done, byte-identical; `extra_trees` byte-identical across seeds; `bagging_by_query` for lambdarank and other non-`rank_xendcg` objectives, parity-tested; `rank_xendcg` with `bagging_by_query` still missing)
-- [ ] Monotone constraints: basic (done, byte-identical, with `monotone_penalty`); intermediate and advanced still missing
+- [ ] Monotone constraints: basic (done, byte-identical, with `monotone_penalty`); intermediate (done, tree-by-tree parity with NaN and categorical features, `tests/parity/test_monotone_intermediate_parity.py`); advanced still missing
 - [x] `interaction_constraints` (byte-identical; by-tree and by-node sampling)
 - [ ] CEGB (`cegb_*`). `forcedsplits_filename` is done for numerical features (parity-tested with and without `feature_fraction` and with NaN values); categorical forced splits raise `NotImplementedError`
 - [ ] `linear_tree` (`linear_lambda`): training and model text/JSON match upstream (parity-tested over several rounds, `tests/parity/test_linear_tree_parity.py`). Open: `save_and_load_linear` (binary dataset with raw data), `test_linear_trees`, `test_linear_trees_num_threads`, `test_linear_single_leaf`; refit with linear trees stays `Unsupported`
