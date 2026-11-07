@@ -234,19 +234,36 @@ pub fn find_best_threshold_numerical(
     let use_l1 = p.lambda_l1 > 0.0;
     let use_max = p.max_delta_step > 0.0;
     let use_smooth = p.path_smooth > EPS;
+    // Two instantiations per variant: the unconstrained scan carries no bounds state (upstream:
+    // the `USE_MC` template), and the constrained one reads `mc`.
+    let mc_on = !matches!(mc, Mc::Off);
     macro_rules! go {
         ($r:literal, $l1:literal, $mx:literal, $sm:literal) => {
-            numerical::<$r, $l1, $mx, $sm>(
-                hist,
-                meta,
-                p,
-                sum_gradient,
-                sum_hessian,
-                num_data,
-                parent_output,
-                mc,
-                output,
-            )
+            if mc_on {
+                numerical::<$r, $l1, $mx, $sm, true>(
+                    hist,
+                    meta,
+                    p,
+                    sum_gradient,
+                    sum_hessian,
+                    num_data,
+                    parent_output,
+                    mc,
+                    output,
+                )
+            } else {
+                numerical::<$r, $l1, $mx, $sm, false>(
+                    hist,
+                    meta,
+                    p,
+                    sum_gradient,
+                    sum_hessian,
+                    num_data,
+                    parent_output,
+                    mc,
+                    output,
+                )
+            }
         };
     }
     let splittable = match (p.extra_trees, use_l1, use_max, use_smooth) {
@@ -273,7 +290,13 @@ pub fn find_best_threshold_numerical(
 
 /// upstream: the `find_best_threshold_fun_` lambdas built by `FuncForNumricalL3`.
 #[allow(clippy::too_many_arguments)]
-fn numerical<const RAND: bool, const L1: bool, const MAX_OUT: bool, const SMOOTH: bool>(
+fn numerical<
+    const RAND: bool,
+    const L1: bool,
+    const MAX_OUT: bool,
+    const SMOOTH: bool,
+    const MC: bool,
+>(
     hist: &[f64],
     meta: &mut FeatureMeta,
     p: &SplitParams,
@@ -312,7 +335,7 @@ fn numerical<const RAND: bool, const L1: bool, const MAX_OUT: bool, const SMOOTH
     );
     macro_rules! seq {
         ($rev:literal, $skip:literal, $na:literal) => {
-            splittable |= sequential::<RAND, L1, MAX_OUT, SMOOTH, $rev, $skip, $na>(
+            splittable |= sequential::<RAND, L1, MAX_OUT, SMOOTH, $rev, $skip, $na, MC>(
                 hist, meta, p, args, mc, output,
             )
         };
@@ -346,6 +369,7 @@ fn sequential<
     const REVERSE: bool,
     const SKIP_DEFAULT_BIN: bool,
     const NA_AS_MISSING: bool,
+    const MC: bool,
 >(
     hist: &[f64],
     meta: &FeatureMeta,
@@ -372,12 +396,13 @@ fn sequential<
     let grad = |t: i32| hist[(t as usize) << 1];
     let hess = |t: i32| hist[((t as usize) << 1) + 1];
     let mono = meta.monotone_type;
+    // Without monotone constraints (`MC = false`) none of this state exists.
     let mut cum: Option<Cumulative> = match mc {
-        Mc::Cumulative(feature) => Some(Cumulative::new(feature, REVERSE)),
+        Mc::Cumulative(feature) if MC => Some(Cumulative::new(feature, REVERSE)),
         _ => None,
     };
     // upstream: `constraint_update_necessary`
-    let varies = matches!(mc, Mc::Cumulative(feature) if feature.varies_by_threshold());
+    let varies = MC && matches!(mc, Mc::Cumulative(feature) if feature.varies_by_threshold());
     // the bounds of the best candidate so far (upstream: `best_left/right_constraints`)
     let mut best_bounds: Option<ChildBounds> = None;
     let gains =
@@ -476,7 +501,11 @@ fn sequential<
             if let Some(c) = cum.as_mut().filter(|_| varies) {
                 c.update(t + offset);
             }
-            let bounds = child_bounds(mc, cum.as_ref());
+            let bounds = if MC {
+                child_bounds(mc, cum.as_ref())
+            } else {
+                None
+            };
             let current_gain = gains(
                 sum_left_gradient,
                 sum_left_hessian,
@@ -556,7 +585,11 @@ fn sequential<
             if let Some(c) = cum.as_mut().filter(|_| varies) {
                 c.update(t + offset);
             }
-            let bounds = child_bounds(mc, cum.as_ref());
+            let bounds = if MC {
+                child_bounds(mc, cum.as_ref())
+            } else {
+                None
+            };
             let current_gain = gains(
                 sum_left_gradient,
                 sum_left_hessian,
