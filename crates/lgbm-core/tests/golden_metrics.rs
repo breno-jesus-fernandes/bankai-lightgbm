@@ -96,6 +96,7 @@ fn metrics_match_upstream() {
             weights,
             query_boundaries,
             init_score: Vec::new(),
+            positions: Vec::new(),
         };
         // Ranking objectives are not ported yet; their metrics ignore the objective.
         let objective = create_objective(&cfg, &md).ok().and_then(|o| {
