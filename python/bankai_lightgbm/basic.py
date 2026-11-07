@@ -1130,6 +1130,8 @@ class Dataset:
         # upstream: True when feature names came from the data or `feature_name` (sklearn reads it).
         self._has_non_default_feature_names: bool = False
         self._handle: NativeDataset | None = None
+        # the parameters the native Dataset was built with (upstream: its config is fixed here)
+        self._built_params: dict[str, Any] | None = None
         self._evaluation_handle: NativeDataset | None = None
 
     def construct(self) -> Dataset:
@@ -1139,6 +1141,7 @@ class Dataset:
             if self._position is not None:
                 built = built.with_positions([int(p) for p in self._position])
             self._handle = built
+            self._built_params = deepcopy(self.params)
             # upstream: Dataset._lazy_init ends with ``self.feature_name = self.get_feature_name()``
             self.feature_name = self.get_feature_name()
             # upstream: Dataset._lazy_init sets init_score through set_init_score, so it is read back.
@@ -1211,7 +1214,10 @@ class Dataset:
         if self._handle is None or not self.free_raw_data or not params:
             return
         # bankai records its resolved categorical indices under its own key; upstream has none.
-        old = {k: v for k, v in self.params.items() if k != "categorical_column"}
+        # the handle keeps the configuration it was built with, so a parameter that the training
+        # run changed (for example `linear_tree`) is checked against that, not the restored params
+        built = self._built_params if self._built_params is not None else self.params
+        old = {k: v for k, v in built.items() if k != "categorical_column"}
         dataset_check_reset_config(_params_to_strings(old), _params_to_strings(params))
 
     def set_reference(self, reference: Dataset) -> Dataset:

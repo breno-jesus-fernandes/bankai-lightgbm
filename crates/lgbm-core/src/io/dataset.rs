@@ -1479,11 +1479,6 @@ impl Dataset {
     /// explicit `Unsupported` error.
     pub fn from_binary(bin: &crate::io::binary::BinaryDataset) -> Result<Dataset> {
         let h = &bin.header;
-        if h.has_raw {
-            return Err(Error::Unsupported(
-                "binary dataset with raw data (linear_tree) is not supported yet".into(),
-            ));
-        }
         let num_data = usize::try_from(h.num_data)
             .map_err(|_| Error::Parse("negative num_data in binary dataset".into()))?;
         let mut groups = Vec::with_capacity(bin.groups.len());
@@ -1521,6 +1516,22 @@ impl Dataset {
             groups,
         };
         let numeric_feature_map = numeric_feature_map(&layout);
+        // upstream: the raw block is row-major over the numeric features, in feature order
+        let raw_data = if h.has_raw {
+            let num_numeric = numeric_feature_map.iter().filter(|&&m| m >= 0).count();
+            if bin.raw_data.len() != num_data * num_numeric {
+                return Err(Error::Parse("binary dataset raw data is truncated".into()));
+            }
+            (0..num_numeric)
+                .map(|k| {
+                    (0..num_data)
+                        .map(|r| bin.raw_data[r * num_numeric + k])
+                        .collect()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         // The writer stores -1 for every feature when no max_bin_by_feature was given.
         let max_bin_by_feature = if h.max_bin_by_feature.iter().all(|&m| m == -1) {
             Vec::new()
@@ -1546,7 +1557,7 @@ impl Dataset {
             zero_as_missing: h.zero_as_missing,
             max_bin_by_feature,
             forced_bin_bounds: h.forced_bin_bounds.clone(),
-            raw_data: Vec::new(),
+            raw_data,
             numeric_feature_map,
         })
     }
@@ -1847,14 +1858,21 @@ mod binary_load_tests {
     }
 
     #[test]
-    fn binary_load_rejects_raw_data_until_supported() -> crate::Result<()> {
+    fn binary_round_trip_keeps_raw_data_for_linear_trees() -> crate::Result<()> {
+        // upstream: `Dataset::SaveBinaryFile` writes the raw values row-major over the numeric
+        // features, and `DatasetLoader::LoadFromBinFile` reads them back.
         let mut params = HashMap::new();
         params.insert("linear_tree".to_string(), "true".to_string());
-        let bin = BinaryDataset::from_bytes(&sample(&params)?.to_binary_bytes())?;
-        assert!(matches!(
-            Dataset::from_binary(&bin),
-            Err(Error::Unsupported(_))
-        ));
+        let original = sample(&params)?;
+        assert!(!original.raw_data.is_empty());
+        let bin = BinaryDataset::from_bytes(&original.to_binary_bytes())?;
+        let loaded = Dataset::from_binary(&bin)?;
+        assert_eq!(loaded.raw_data.len(), original.raw_data.len());
+        for (a, b) in loaded.raw_data.iter().zip(&original.raw_data) {
+            let a: Vec<u32> = a.iter().map(|v| v.to_bits()).collect();
+            let b: Vec<u32> = b.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(a, b);
+        }
         Ok(())
     }
 }
