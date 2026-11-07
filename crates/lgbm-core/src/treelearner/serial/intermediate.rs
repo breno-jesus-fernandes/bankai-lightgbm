@@ -2,6 +2,9 @@
 //! bounds of the leaves on the other side are tightened to the new children's outputs, and
 //! the leaves whose bounds moved are returned so their best splits get recomputed.
 //!
+//! The advanced method shares this walk; it differs only in the bounds it stores (see
+//! `advanced.rs`), so the walk is generic over [`LeafBounds`].
+//!
 //! upstream: src/treelearner/monotone_constraints.hpp (`IntermediateLeafConstraints`,
 //! `GoUpToFindLeavesToUpdate`, `GoDownToFindLeavesToUpdate`, `ShouldKeepGoingLeftRight`).
 //! The port keeps upstream's names and recursion so the two files can be read side by side.
@@ -42,6 +45,44 @@ fn update_max(b: &mut Bounds, new_max: f64) {
     b.1 = if b.1 < new_max { b.1 } else { new_max };
 }
 
+/// The bounds of every leaf, as the entry operations of upstream's `ConstraintEntry` use them.
+/// `Vec<Bounds>` for the basic and intermediate methods; the advanced method stores a list per
+/// feature (see `advanced.rs`).
+pub(super) trait LeafBounds {
+    /// upstream: `entries_[to].reset(entries_[from]->clone())`
+    fn copy_leaf(&mut self, from: usize, to: usize);
+    /// upstream: `UpdateMinAndReturnBoolIfChanged`
+    fn raise_min(&mut self, leaf: usize, new_min: f64) -> bool;
+    /// upstream: `UpdateMaxAndReturnBoolIfChanged`
+    fn lower_max(&mut self, leaf: usize, new_max: f64) -> bool;
+    /// upstream: `UpdateMin`
+    fn set_min(&mut self, leaf: usize, new_min: f64);
+    /// upstream: `UpdateMax`
+    fn set_max(&mut self, leaf: usize, new_max: f64);
+}
+
+impl LeafBounds for Vec<Bounds> {
+    fn copy_leaf(&mut self, from: usize, to: usize) {
+        self[to] = self[from];
+    }
+
+    fn raise_min(&mut self, leaf: usize, new_min: f64) -> bool {
+        raise_min(&mut self[leaf], new_min)
+    }
+
+    fn lower_max(&mut self, leaf: usize, new_max: f64) -> bool {
+        lower_max(&mut self[leaf], new_max)
+    }
+
+    fn set_min(&mut self, leaf: usize, new_min: f64) {
+        update_min(&mut self[leaf], new_min);
+    }
+
+    fn set_max(&mut self, leaf: usize, new_max: f64) {
+        update_max(&mut self[leaf], new_max);
+    }
+}
+
 /// The split being applied, as the constraint update reads it.
 pub(super) struct AppliedSplit {
     /// upstream: `is_numerical_split`
@@ -57,28 +98,29 @@ pub(super) struct AppliedSplit {
 }
 
 /// Read-only view of the tree and split searches during one update.
-struct Ctx<'a> {
-    tree: &'a Tree,
-    metas: &'a [FeatureMeta],
-    best: &'a [SplitInfo],
-    split: &'a AppliedSplit,
+pub(super) struct Ctx<'a> {
+    pub tree: &'a Tree,
+    pub metas: &'a [FeatureMeta],
+    pub best: &'a [SplitInfo],
+    pub split: &'a AppliedSplit,
 }
 
 /// The splits on the path from the original leaf up to the current node (upstream: the three
 /// `*_of_splits_going_up_from_original_leaf` vectors).
 #[derive(Default)]
-struct Path {
-    features: Vec<i32>,
-    thresholds: Vec<u32>,
-    was_right_child: Vec<bool>,
+pub(super) struct Path {
+    pub features: Vec<i32>,
+    pub thresholds: Vec<u32>,
+    pub was_right_child: Vec<bool>,
 }
 
-/// Per-tree state of the intermediate method (upstream: `IntermediateLeafConstraints`).
+/// Per-tree state of the intermediate and advanced methods (upstream:
+/// `IntermediateLeafConstraints`).
 pub(super) struct IntermediateConstraints {
     /// upstream: `leaf_is_in_monotone_subtree_`
     in_monotone_subtree: Vec<bool>,
     /// upstream: `node_parent_`, indexed by internal node (`new_leaf - 1`).
-    node_parent: Vec<i32>,
+    pub node_parent: Vec<i32>,
 }
 
 impl IntermediateConstraints {
@@ -107,12 +149,12 @@ impl IntermediateConstraints {
     }
 
     /// upstream: `IntermediateLeafConstraints::Update`. Called after the split is applied to
-    /// the tree. Tightens the bounds in `bounds` and returns the leaves whose bounds moved.
+    /// the tree. Tightens the bounds in `store` and returns the leaves whose bounds moved.
     #[allow(clippy::too_many_arguments)]
-    pub fn update(
+    pub fn update<S: LeafBounds>(
         &mut self,
         tree: &Tree,
-        bounds: &mut [Bounds],
+        store: &mut S,
         metas: &[FeatureMeta],
         best: &[SplitInfo],
         leaf: usize,
@@ -124,14 +166,14 @@ impl IntermediateConstraints {
             return leaves_to_update;
         }
         // upstream: UpdateConstraintsWithOutputs
-        bounds[new_leaf] = bounds[leaf];
+        store.copy_leaf(leaf, new_leaf);
         if split.numerical {
             if split.monotone_type < 0 {
-                update_min(&mut bounds[leaf], split.right_output);
-                update_max(&mut bounds[new_leaf], split.left_output);
+                store.set_min(leaf, split.right_output);
+                store.set_max(new_leaf, split.left_output);
             } else if split.monotone_type > 0 {
-                update_max(&mut bounds[leaf], split.right_output);
-                update_min(&mut bounds[new_leaf], split.left_output);
+                store.set_max(leaf, split.right_output);
+                store.set_min(new_leaf, split.left_output);
             }
         }
         let ctx = Ctx {
@@ -143,7 +185,7 @@ impl IntermediateConstraints {
         let mut path = Path::default();
         self.go_up_to_find_leaves_to_update(
             &ctx,
-            bounds,
+            store,
             &mut leaves_to_update,
             tree.leaf_parent[new_leaf],
             &mut path,
@@ -152,7 +194,7 @@ impl IntermediateConstraints {
     }
 
     /// upstream: `OppositeChildShouldBeUpdated`
-    fn opposite_child_should_be_updated(
+    pub fn opposite_child_should_be_updated(
         path: &Path,
         is_split_numerical: bool,
         inner_feature: i32,
@@ -174,10 +216,10 @@ impl IntermediateConstraints {
     }
 
     /// upstream: `GoUpToFindLeavesToUpdate`
-    fn go_up_to_find_leaves_to_update(
+    fn go_up_to_find_leaves_to_update<S: LeafBounds>(
         &mut self,
         cx: &Ctx<'_>,
-        bounds: &mut [Bounds],
+        store: &mut S,
         out: &mut Vec<usize>,
         node_idx: i32,
         path: &mut Path,
@@ -217,7 +259,7 @@ impl IntermediateConstraints {
                 };
                 self.go_down_to_find_leaves_to_update(
                     cx,
-                    bounds,
+                    store,
                     out,
                     opposite_child_idx,
                     path,
@@ -232,15 +274,15 @@ impl IntermediateConstraints {
             path.features.push(tree.split_feature_inner[p]);
         }
 
-        self.go_up_to_find_leaves_to_update(cx, bounds, out, parent_idx, path);
+        self.go_up_to_find_leaves_to_update(cx, store, out, parent_idx, path);
     }
 
     /// upstream: `GoDownToFindLeavesToUpdate`
     #[allow(clippy::too_many_arguments)]
-    fn go_down_to_find_leaves_to_update(
+    fn go_down_to_find_leaves_to_update<S: LeafBounds>(
         &mut self,
         cx: &Ctx<'_>,
-        bounds: &mut [Bounds],
+        store: &mut S,
         out: &mut Vec<usize>,
         node_idx: i32,
         path: &Path,
@@ -269,9 +311,9 @@ impl IntermediateConstraints {
                 (split.left_output, split.left_output)
             };
             let changed = if update_max_constraints {
-                lower_max(&mut bounds[leaf_idx], min_value)
+                store.lower_max(leaf_idx, min_value)
             } else {
-                raise_min(&mut bounds[leaf_idx], max_value)
+                store.raise_min(leaf_idx, max_value)
             };
             if changed {
                 out.push(leaf_idx);
@@ -300,7 +342,7 @@ impl IntermediateConstraints {
         if keep_going_left {
             self.go_down_to_find_leaves_to_update(
                 cx,
-                bounds,
+                store,
                 out,
                 tree.left_child[node],
                 path,
@@ -312,7 +354,7 @@ impl IntermediateConstraints {
         if keep_going_right {
             self.go_down_to_find_leaves_to_update(
                 cx,
-                bounds,
+                store,
                 out,
                 tree.right_child[node],
                 path,
@@ -325,12 +367,12 @@ impl IntermediateConstraints {
 }
 
 /// upstream: `Tree::IsNumericalSplit`
-fn is_numerical_split(tree: &Tree, node: usize) -> bool {
+pub(super) fn is_numerical_split(tree: &Tree, node: usize) -> bool {
     (tree.decision_type[node] & K_CATEGORICAL_MASK) == 0
 }
 
 /// upstream: `ShouldKeepGoingLeftRight`. Returns `(keep_going_left, keep_going_right)`.
-fn should_keep_going_left_right(tree: &Tree, node: usize, path: &Path) -> (bool, bool) {
+pub(super) fn should_keep_going_left_right(tree: &Tree, node: usize, path: &Path) -> (bool, bool) {
     let inner_feature = tree.split_feature_inner[node];
     let threshold = tree.threshold_in_bin[node];
     let mut keep_going_right = true;

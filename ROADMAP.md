@@ -21,7 +21,7 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
       Done: all ported files in `tests/python_package_test` (`test_plotting`, `test_sklearn`, `test_basic`,
       `test_engine`, `test_callback`, `test_utilities`, `test_consistency`, `test_pandas`, `test_arrow`, `test_polars`,
       `test_dual`), run unmodified except imports. Upstream cases that still fail are strict `xfail`s listed in
-      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (8 node ids; a fix turns them into
+      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (5 node ids; a fix turns them into
       failing XPASS, so the line is removed with the fix). `test_dask.py` belongs to P7 (distributed).
       Arrow/polars ports pass in full (`Dataset._dump_text` is byte-identical to upstream). `get_data` on pyarrow/polars subsets now keeps the table type. Done: all-ones weights become `None`, as upstream; arrow/polars column names feed categorical features; pyarrow/polars predict densely.
       Open work from the list: the "not triaged" entries (pandas dtypes, early-stopping
@@ -101,7 +101,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] Regularization: `lambda_l1`, `lambda_l2`, `min_gain_to_split`, `max_delta_step`, `path_smooth`
 - [x] Categorical splits (`max_cat_threshold`, `cat_l2`, `cat_smooth`, `max_cat_to_onehot`, `min_data_per_group`; byte-identical, one-hot and sorted search, NaN categories, bagging; monotone + categorical still unsupported)
 - [ ] `feature_fraction`, `feature_fraction_bynode`, `bagging_fraction`/`bagging_freq`, pos/neg bagging (done, byte-identical; `extra_trees` byte-identical across seeds; `bagging_by_query` for lambdarank and other non-`rank_xendcg` objectives, parity-tested; `rank_xendcg` with `bagging_by_query` still missing)
-- [ ] Monotone constraints: basic (done, byte-identical, with `monotone_penalty`); intermediate (done, tree-by-tree parity with NaN and categorical features, `tests/parity/test_monotone_intermediate_parity.py`); advanced still missing
+- [ ] Monotone constraints: basic (done, byte-identical, with `monotone_penalty`); intermediate (done, tree-by-tree parity with NaN and categorical features, `tests/parity/test_monotone_intermediate_parity.py`); advanced (done for numerical features, tree by tree with and without `monotone_penalty` and NaN values, same test file; with categorical features it raises `Unsupported`, because upstream reads an uninitialised cumulative view in the categorical search, so `test_monotone_constraints[True]` stays a gap)
 - [x] `interaction_constraints` (byte-identical; by-tree and by-node sampling)
 - [ ] CEGB (`cegb_*`). `forcedsplits_filename` is done for numerical features (parity-tested with and without `feature_fraction` and with NaN values); categorical forced splits raise `NotImplementedError`
 - [ ] `linear_tree` (`linear_lambda`): training and model text/JSON match upstream (parity-tested over several rounds, `tests/parity/test_linear_tree_parity.py`). Open: `save_and_load_linear` (binary dataset with raw data), `test_linear_trees`, `test_linear_trees_num_threads`, `test_linear_single_leaf`; refit with linear trees stays `Unsupported`

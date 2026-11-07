@@ -1,6 +1,7 @@
-"""monotone_constraints_method=intermediate must match upstream tree by tree.
+"""monotone_constraints_method=intermediate and advanced must match upstream tree by tree.
 
-upstream: src/treelearner/monotone_constraints.hpp (IntermediateLeafConstraints)
+upstream: src/treelearner/monotone_constraints.hpp (IntermediateLeafConstraints,
+AdvancedLeafConstraints)
 """
 
 from __future__ import annotations
@@ -38,14 +39,22 @@ def _data(with_nan_and_categorical: bool) -> tuple[np.ndarray, np.ndarray]:
     return x, y
 
 
+@pytest.mark.parametrize("method", ["intermediate", "advanced"])
 @pytest.mark.parametrize("penalty", [0.0, 2.0])
 @pytest.mark.parametrize("with_nan_and_categorical", [False, True])
 def test_intermediate_monotone_matches_upstream_tree_by_tree(
-    penalty: float, with_nan_and_categorical: bool
+    method: str, penalty: float, with_nan_and_categorical: bool
 ) -> None:
     x, y = _data(with_nan_and_categorical)
-    params = {**PARAMS, "monotone_penalty": penalty}
+    params = {**PARAMS, "monotone_penalty": penalty, "monotone_constraints_method": method}
     cat = [2] if with_nan_and_categorical else "auto"
+    if method == "advanced" and with_nan_and_categorical:
+        # upstream reads an uninitialised cumulative view in its categorical search for
+        # advanced constraints, so this port refuses the pair with a clear error (AGENTS section 8)
+        booster = lgb.Booster(params=params, train_set=lgb.Dataset(x, y, categorical_feature=cat))
+        with pytest.raises(lgb.LightGBMError, match="advanced with categorical"):
+            booster.update()
+        return
     up = lightgbm.Booster(params=params, train_set=lightgbm.Dataset(x, y, categorical_feature=cat))
     ours = lgb.Booster(params=params, train_set=lgb.Dataset(x, y, categorical_feature=cat))
     for _ in range(20):
