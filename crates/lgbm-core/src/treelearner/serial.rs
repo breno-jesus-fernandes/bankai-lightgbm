@@ -3,6 +3,7 @@
 //! src/treelearner/feature_histogram.hpp (`HistogramPool`)
 
 mod forced;
+mod linear;
 
 use self::forced::ForcedSplits;
 use super::col_sampler::ColSampler;
@@ -143,6 +144,8 @@ pub struct SerialTreeLearner {
     best_split_per_leaf: Vec<SplitInfo>,
     /// Forced splits applied at the start of every tree (`forcedsplits_filename`).
     forced: Option<Arc<ForcedSplits>>,
+    /// Per-dataset facts for linear leaves (`linear_tree`); `None` otherwise.
+    linear: Option<linear::LinearState>,
     smaller: LeafSplits,
     larger: LeafSplits,
     smaller_slot: usize,
@@ -279,6 +282,9 @@ impl SerialTreeLearner {
         let monotone_active = !cfg.monotone_constraints.is_empty();
         let monotone_penalization = cfg.monotone_penalty;
         let forced = ForcedSplits::load(&cfg.forcedsplits_filename, &ds, &metas)?.map(Arc::new);
+        let linear = cfg
+            .linear_tree
+            .then(|| linear::LinearState::new(&ds, &metas));
         Ok(SerialTreeLearner {
             cfg,
             params,
@@ -297,6 +303,7 @@ impl SerialTreeLearner {
             partition: DataPartition::new(num_data, num_leaves),
             best_split_per_leaf: vec![SplitInfo::default(); num_leaves],
             forced,
+            linear,
             smaller: LeafSplits::empty(),
             larger: LeafSplits::empty(),
             smaller_slot: 0,
@@ -1101,6 +1108,12 @@ impl SerialTreeLearner {
             return;
         }
         for leaf in 0..tree.num_leaves {
+            if tree.is_linear {
+                for &idx in self.partition.indices_on_leaf(leaf) {
+                    score[idx as usize] += self.linear_leaf_output(tree, leaf, idx as usize);
+                }
+                continue;
+            }
             let out = tree.leaf_value[leaf];
             for &idx in self.partition.indices_on_leaf(leaf) {
                 score[idx as usize] += out;
@@ -1148,6 +1161,12 @@ impl SerialTreeLearner {
             part.split(s.leaf, &rule, s.right, None);
         }
         for leaf in 0..tree.num_leaves {
+            if tree.is_linear {
+                for &idx in part.indices_on_leaf(leaf) {
+                    score[idx as usize] += self.linear_leaf_output(tree, leaf, idx as usize);
+                }
+                continue;
+            }
             let out = tree.leaf_value[leaf];
             for &idx in part.indices_on_leaf(leaf) {
                 score[idx as usize] += out;

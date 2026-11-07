@@ -377,15 +377,6 @@ fn min_upstream(a: f64, b: f64) -> f64 {
 
 impl Trainer {
     fn new(cfg: Arc<Config>, ds: Arc<Dataset>, objective: Box<dyn Objective>) -> Result<Self> {
-        // Linear-leaf fitting (upstream: src/treelearner/linear_tree_learner.cpp) is not
-        // ported yet (ROADMAP P3); refuse instead of silently training constant leaves.
-        if cfg.linear_tree {
-            return Err(Error::Unsupported(
-                "linear_tree training (roadmap P3); linear-tree models can still be loaded \
-                 and used for prediction"
-                    .into(),
-            ));
-        }
         let n = ds.num_data();
         let ntpi = objective.num_model_per_iteration();
         let sampler = SampleStrategy::new(&cfg, &ds.metadata, ntpi)?;
@@ -517,11 +508,7 @@ impl Trainer {
             let off = k * n;
             let init = self.rf_init[k];
             let mut tree = if self.class_need_train[k] && self.ds.layout.num_features > 0 {
-                self.learner.train(
-                    &self.gradients[off..off + n],
-                    &self.hessians[off..off + n],
-                    rows.as_deref(),
-                )
+                self.train_one_tree(off, rows.as_deref())
             } else {
                 Tree::new_training(2)
             };
@@ -617,11 +604,7 @@ impl Trainer {
         for k in 0..ntpi {
             let off = k * n;
             let mut tree = if self.class_need_train[k] && self.ds.layout.num_features > 0 {
-                self.learner.train(
-                    &self.gradients[off..off + n],
-                    &self.hessians[off..off + n],
-                    rows.as_deref(),
-                )
+                self.train_one_tree(off, rows.as_deref())
             } else {
                 Tree::new_training(2)
             };
@@ -777,6 +760,28 @@ impl Trainer {
 
     /// Adds model `idx` (class `k`) to the training score for all rows, through its
     /// recorded splits (upstream: `ScoreUpdater::AddScore(tree, cur_tree_id)`).
+    /// Grows one tree on class `k`'s gradients (upstream: `tree_learner_->Train`), then fits
+    /// linear leaves when `linear_tree` is set (upstream: `is_first_tree` is the first
+    /// `num_tree_per_iteration` trees).
+    fn train_one_tree(&mut self, off: usize, rows: Option<&[i32]>) -> Tree {
+        let n = self.ds.num_data();
+        let is_first_tree = self.models.len() < self.num_tree_per_iteration;
+        let mut tree = self.learner.train(
+            &self.gradients[off..off + n],
+            &self.hessians[off..off + n],
+            rows,
+        );
+        if self.cfg.linear_tree {
+            self.learner.fit_linear(
+                &mut tree,
+                &self.gradients[off..off + n],
+                &self.hessians[off..off + n],
+                is_first_tree,
+            );
+        }
+        tree
+    }
+
     fn add_model_to_train_score(&mut self, idx: usize, k: usize) {
         let n = self.ds.num_data();
         let rows: Vec<i32> = (0..n as i32).collect();
