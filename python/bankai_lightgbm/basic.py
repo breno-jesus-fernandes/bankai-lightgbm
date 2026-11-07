@@ -2445,25 +2445,23 @@ class Booster:
                 results.extend(_custom_results(name, predictions, dataset, custom_metrics))
         return results
 
-    def reset_parameter(self, params: dict[str, Any]) -> None:
-        """Reset supported parameters while continuing training."""
-        aliases = {
-            "learning_rate": "learning_rate",
-            "eta": "learning_rate",
-            "shrinkage_rate": "learning_rate",
-        }
-        normalized: dict[str, float] = {}
-        for name, value in params.items():
-            canonical = aliases.get(name)
-            if canonical is None:
-                raise NotImplementedError(f"reset_parameter for {name!r} is not implemented yet")
-            rate = float(value)
-            if not np.isfinite(rate) or rate <= 0.0:
-                raise ValueError("learning_rate must be finite and greater than zero")
-            normalized[canonical] = rate
-        if self._handle is not None and "learning_rate" in normalized:
-            self._handle.reset_learning_rate(normalized["learning_rate"])
+    def reset_parameter(self, params: dict[str, Any]) -> Booster:
+        """Reset parameters while continuing training (upstream ``Booster.reset_parameter``).
+
+        The new values take effect from the next iteration. Returns the Booster itself.
+        """
+        normalized: dict[str, Any] = dict(params)
+        for name in ("learning_rate", "eta", "shrinkage_rate"):
+            if name in normalized:
+                rate = float(normalized[name])
+                if not np.isfinite(rate) or rate <= 0.0:
+                    raise ValueError("learning_rate must be finite and greater than zero")
+                normalized[name] = rate
+        if self._handle is not None:
+            # upstream: the full parameter string is sent, so unchanged values are re-applied too.
+            self._handle.reset_parameter(_params_to_strings({**self.params, **normalized}))
         self.params.update(normalized)
+        return self
 
     def __copy__(self) -> Booster:
         return self.__deepcopy__(None)

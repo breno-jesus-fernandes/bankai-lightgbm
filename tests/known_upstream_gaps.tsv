@@ -2,7 +2,6 @@
 # 'not triaged'). tests/conftest.py marks each as a strict xfail; a pass shows as XPASS and
 # fails the run, so delete the line when the gap is closed. Generated from a full run of
 # tests/python_package_test; keep it in sync with the ROADMAP.
-tests/python_package_test/test_basic.py::test_cegb_scaling_equalities	CEGB cegb_* (ROADMAP P3 CEGB)
 tests/python_package_test/test_consistency.py::test_binary_linear	linear_tree training and model I/O (ROADMAP P3 linear_tree)
 tests/python_package_test/test_engine.py::test_bagging_by_query_in_lambdarank	bagging_by_query (ROADMAP P3 bagging_by_query)
 tests/python_package_test/test_engine.py::test_dump_model_linear	linear_tree training and model I/O (ROADMAP P3 linear_tree)
@@ -17,5 +16,4 @@ tests/python_package_test/test_engine.py::test_monotone_penalty	monotone constra
 tests/python_package_test/test_engine.py::test_monotone_penalty_max	monotone constraints beyond basic (ROADMAP P3 monotone)
 tests/python_package_test/test_engine.py::test_ranking_with_position_information_with_dataset_constructor	position bias in ranking (ROADMAP P4 position bias)
 tests/python_package_test/test_engine.py::test_ranking_with_position_information_with_file	position bias in ranking (ROADMAP P4 position bias)
-tests/python_package_test/test_engine.py::test_reset_params_works_with_metric_num_class_and_boosting	callbacks, pending resets (ROADMAP P6 callbacks)
 tests/python_package_test/test_engine.py::test_save_and_load_linear	linear_tree training and model I/O (ROADMAP P3 linear_tree)

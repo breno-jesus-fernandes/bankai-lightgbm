@@ -21,7 +21,7 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
       Done: all ported files in `tests/python_package_test` (`test_plotting`, `test_sklearn`, `test_basic`,
       `test_engine`, `test_callback`, `test_utilities`, `test_consistency`, `test_pandas`, `test_arrow`, `test_polars`,
       `test_dual`), run unmodified except imports. Upstream cases that still fail are strict `xfail`s listed in
-      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (17 node ids; a fix turns them into
+      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (15 node ids; a fix turns them into
       failing XPASS, so the line is removed with the fix). `test_dask.py` belongs to P7 (distributed).
       Arrow/polars ports pass in full (`Dataset._dump_text` is byte-identical to upstream). `get_data` on pyarrow/polars subsets now keeps the table type. Done: all-ones weights become `None`, as upstream; arrow/polars column names feed categorical features; pyarrow/polars predict densely.
       Open work from the list: the "not triaged" entries (pandas dtypes, early-stopping
@@ -131,7 +131,7 @@ checkbox open until every behavior it names and its applicable performance gates
 ## P6: Python package (drop-in)
 - [ ] `Dataset` (done: dense numpy and pandas incl. categoricals, weight, group, categorical_feature, subsets with source bin mapper reuse; scipy.sparse CSR/CSC (other formats converted like upstream) ✅, `save_binary` ✅ (never overwrites, like upstream); pending: pyarrow, files, complete subset compatibility (unsorted/duplicate indices, weighted query metadata, and empty/out-of-range index errors covered), `get_weight`/`get_group`/`get_init_score`/`set_init_score` ✅; `set_label`/`set_weight`/`set_group` ✅ (also on constructed datasets); remaining `set_field`/`get_field`, `set_position` and other setters; dense shared reference binning implemented)
 - [ ] `Booster` (training works: `lgb.train` gives byte-identical model text; Rust `GbdtTrainer` and Python `Booster.update()` support incremental training; `cv` supports seeded/custom folds, metric aggregation, custom evaluation, callbacks, and `CVBooster`; pending: `cv` preprocessing/continued training and the remaining Booster methods)
-- [ ] Callbacks: `early_stopping`, `log_evaluation`, `record_evaluation` ✅; `reset_parameter` supports learning-rate schedules; pending resets for other parameters
+- [ ] Callbacks: `early_stopping`, `log_evaluation`, `record_evaluation` ✅; `reset_parameter` supports learning-rate schedules and any parameter that does not change the boosting type, objective or number of classes (rebuilds the learner and sampler; the change applies from the next iteration)
 - [ ] sklearn API: `LGBMModel`, `LGBMClassifier`, `LGBMRegressor`, `LGBMRanker`
 - [ ] Plotting: `plot_importance`, `plot_split_value_histogram`, `plot_metric`, `plot_tree`, `create_tree_digraph`
 - [ ] Port upstream `tests/python_package_test` and run it green

@@ -5,7 +5,7 @@ use super::Gbdt;
 use std::sync::Arc;
 
 use super::sample::SampleStrategy;
-use crate::config::Config;
+use crate::config::{Config, check_dataset_reset_config};
 use crate::error::{Error, Result};
 use crate::io::bin::BinType;
 use crate::io::dataset::Dataset;
@@ -17,6 +17,7 @@ use crate::treelearner::feature_histogram::calculate_splitted_leaf_output;
 use crate::treelearner::serial::{SerialTreeLearner, SplitRecord};
 use crate::utils::format::format_g;
 use crate::utils::random::Random;
+use std::collections::HashMap;
 
 /// upstream: `BinMapper::bin_info_string` (stream precision 17)
 fn bin_info_string(m: &crate::io::bin::BinMapper) -> String {
@@ -258,17 +259,74 @@ impl GbdtTrainer {
         self.trainer.into_model()
     }
 
-    /// Update the shrinkage applied to trees trained in subsequent iterations.
-    pub fn reset_learning_rate(&mut self, learning_rate: f64) -> Result<()> {
-        if !learning_rate.is_finite() || learning_rate <= 0.0 {
-            return Err(Error::InvalidParameter(
-                "learning_rate must be finite and greater than zero".into(),
-            ));
-        }
-        self.trainer.shrinkage = learning_rate;
-        self.trainer.model_learning_rate = learning_rate;
-        Ok(())
+    /// Apply new parameters to a trainer that may already have trees (upstream:
+    /// `Booster::ResetConfig` through `GBDT::ResetConfig`). Dataset-binning parameters are
+    /// checked against the constructed Dataset first. The boosting type, objective and number of
+    /// classes cannot change once training has started.
+    pub fn reset_parameter(&mut self, params: &HashMap<String, String>) -> Result<()> {
+        check_dataset_reset_config(&self.trainer.cfg, params)?;
+        let cfg = Config::from_params(params)?;
+        self.trainer.reset_config(cfg)
     }
+}
+
+/// Parameters the objective is built from (upstream: `ObjectiveFunction::Init` reads them).
+const OBJECTIVE_PARAMETERS: &[&str] = &[
+    "objective_seed",
+    "sigmoid",
+    "alpha",
+    "fair_c",
+    "poisson_max_delta_step",
+    "tweedie_variance_power",
+    "lambdarank_truncation_level",
+    "lambdarank_norm",
+    "label_gain",
+    "boost_from_average",
+    "reg_sqrt",
+    "scale_pos_weight",
+    "is_unbalance",
+    "max_position",
+    "lambdarank_position_bias_regularization",
+    "multiclass_softmax",
+];
+
+/// Parameters that only affect the training loop's bookkeeping, not the sample strategy or the
+/// tree learner.
+const NON_TRAINING_PARAMETERS: &[&str] = &[
+    "learning_rate",
+    "metric",
+    "metric_freq",
+    "is_provide_training_metric",
+    "eval_at",
+    "verbose",
+    "num_iterations",
+    "early_stopping_round",
+    "first_metric_only",
+    "output_model",
+    "input_model",
+    "snapshot_freq",
+];
+
+/// Names of the parameters whose `[name: value]` line differs between two configs.
+fn changed_parameters(old: &Config, new: &Config) -> Vec<String> {
+    let parse = |cfg: &Config| -> std::collections::BTreeMap<String, String> {
+        cfg.to_string()
+            .lines()
+            .filter_map(|line| {
+                let inner = line.strip_prefix('[')?.strip_suffix(']')?;
+                let (name, value) = inner.split_once(": ")?;
+                Some((name.to_string(), value.to_string()))
+            })
+            .collect()
+    };
+    let (old, new) = (parse(old), parse(new));
+    let mut names: Vec<String> = Vec::new();
+    for (name, value) in &new {
+        if old.get(name) != Some(value) {
+            names.push(name.clone());
+        }
+    }
+    names
 }
 
 struct Trainer {
@@ -735,6 +793,53 @@ impl Trainer {
             &rows,
             &mut self.score[k * n..(k + 1) * n],
         );
+    }
+
+    /// upstream: `GBDT::ResetConfig`. The new settings apply from the next iteration; models and
+    /// scores are kept. Only the parts a changed parameter touches are rebuilt: the objective when
+    /// an objective parameter changes, and the sample strategy and tree learner when a training
+    /// parameter changes. Rebuilding reseeds their random streams, so a learning-rate schedule
+    /// (which changes neither) leaves them alone, as upstream does.
+    fn reset_config(&mut self, cfg: Config) -> Result<()> {
+        if cfg.boosting != self.cfg.boosting {
+            return Err(Error::Unsupported(
+                "reset_parameter for boosting after training started".into(),
+            ));
+        }
+        if cfg.objective != self.cfg.objective || cfg.num_class != self.cfg.num_class {
+            return Err(Error::Unsupported(
+                "reset_parameter for objective or num_class after training started".into(),
+            ));
+        }
+        let changed = changed_parameters(&self.cfg, &cfg);
+        let ntpi = self.num_tree_per_iteration;
+        let cfg = Arc::new(cfg);
+        if changed
+            .iter()
+            .any(|name| OBJECTIVE_PARAMETERS.contains(&name.as_str()))
+        {
+            self.objective = create_objective(&cfg, &self.ds.metadata)?;
+            self.class_need_train = (0..ntpi)
+                .map(|k| self.objective.class_need_train(k))
+                .collect();
+        }
+        if changed
+            .iter()
+            .any(|name| !NON_TRAINING_PARAMETERS.contains(&name.as_str()))
+        {
+            let sampler = SampleStrategy::new(&cfg, &self.ds.metadata, ntpi)?;
+            let constant_hessian =
+                self.objective.is_constant_hessian() && !sampler.changes_hessians();
+            self.learner =
+                SerialTreeLearner::new(Arc::clone(&cfg), Arc::clone(&self.ds), constant_hessian)?;
+            self.sampler = sampler;
+        }
+        if changed.iter().any(|name| name == "learning_rate") {
+            self.shrinkage = cfg.learning_rate;
+            self.model_learning_rate = cfg.learning_rate;
+        }
+        self.cfg = cfg;
+        Ok(())
     }
 
     /// Shuffle iterations in `[start, end)` (upstream `GBDT::ShuffleModels`). Split records
