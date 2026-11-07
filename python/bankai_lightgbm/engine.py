@@ -103,7 +103,6 @@ def train(
         if train_set.position is not None and str(
             params.get("objective", params.get("application", ""))
         ).lower() in {
-            "lambdarank",
             "rank_xendcg",
             "xendcg",
             "xe_ndcg",
@@ -111,7 +110,7 @@ def train(
             "xendcg_mart",
         }:
             raise NotImplementedError(
-                "position bias for ranking objectives is not implemented yet (ROADMAP P4)"
+                "position bias for rank_xendcg is not implemented yet (ROADMAP P4)"
             )
         booster = Booster(params=params, train_set=train_set)
         if init_model is not None:
