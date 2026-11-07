@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Unbiased lambdarank: with `position` set, lambdarank learns per-position bias factors (Newton step per iteration, `lambdarank_position_bias_regularization`) and ranks with the adjusted scores, as upstream does. Both upstream position tests pass. `rank_xendcg` with positions still raises `NotImplementedError`.
 - `<data>.position` files are read next to text datasets, and the dense position ids are stored in the native dataset. Training with positions still raises `NotImplementedError` until the unbiased lambdarank objective lands.
 - `forcedsplits_filename` applies the forced splits at the start of every tree, as upstream does, instead of raising "not supported yet". Forced features get histograms even when `feature_fraction` skips them. Categorical forced splits are rejected with `Unsupported`. `test_force_split_with_feature_fraction` now passes, and a parity test matches upstream tree by tree (with and without `feature_fraction`, with and without NaN values).
 - `bagging_by_query=true` with `data_sample_strategy=bagging` samples whole queries, as upstream does, instead of raising "not supported yet". Supported for lambdarank and the other objectives; `rank_xendcg` still raises `NotImplementedError` because its per-query random draws need upstream's sampled-query gradient path. `test_bagging_by_query_in_lambdarank` now passes, and a parity test matches upstream tree by tree.

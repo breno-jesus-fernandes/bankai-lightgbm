@@ -21,7 +21,7 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
       Done: all ported files in `tests/python_package_test` (`test_plotting`, `test_sklearn`, `test_basic`,
       `test_engine`, `test_callback`, `test_utilities`, `test_consistency`, `test_pandas`, `test_arrow`, `test_polars`,
       `test_dual`), run unmodified except imports. Upstream cases that still fail are strict `xfail`s listed in
-      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (13 node ids; a fix turns them into
+      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (11 node ids; a fix turns them into
       failing XPASS, so the line is removed with the fix). `test_dask.py` belongs to P7 (distributed).
       Arrow/polars ports pass in full (`Dataset._dump_text` is byte-identical to upstream). `get_data` on pyarrow/polars subsets now keeps the table type. Done: all-ones weights become `None`, as upstream; arrow/polars column names feed categorical features; pyarrow/polars predict densely.
       Open work from the list: the "not triaged" entries (pandas dtypes, early-stopping
@@ -86,7 +86,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] `MultiValBin` for col-wise training: the multi-value group's histograms come from row-wise sparse/dense multi-value bins with upstream's offsets, kernels, data blocks and merge order (byte-identical model text vs upstream across objectives, sampling, constraints, categorical, multiclass, ranking, CSR/CSC/dense input, and with 2 threads; `tests/parity/test_multi_val_training_parity.py`). Sparse multi-value columns are partitioned with a forward `SparseBin` cursor, without densifying
 - [ ] Row-wise training layout (`force_row_wise`; upstream `GetMultiBinFromAllFeatures`)
 - [x] Exclusive Feature Bundling (`enable_bundle`), sampling identical to upstream
-- [ ] Metadata: label, weight, and group/query implemented; weight/query length errors and nested subsets covered; position metadata done (set/get, remapped int32 ids, subsets; ranking position bias pending P4); init_score done (class-major storage, training, validation metrics, subsets)
+- [ ] Metadata: label, weight, and group/query implemented; weight/query length errors and nested subsets covered; position metadata done (set/get, `.position` files, remapped int32 ids, subsets; ranking position bias done for lambdarank, pending for rank_xendcg); init_score done (class-major storage, training, validation metrics, subsets)
 - [x] Sparse CSR/CSC input (`LGBM_DatasetCreateFromCSR`/`FromCSC`): sampling, push order (stored pairs then `FinishOneRow` zero pushes), reference datasets and linear-tree raw values, O(nnz) without densifying; `save_binary` byte-identical to upstream incl. bundles, unsorted indices and multi-value groups. Known gap: a duplicated column within a row that lands in a *sparse* multi-value column (upstream keeps whichever entry its unstable `std::sort` leaves first, which is stdlib-dependent; bankai keeps the first). Construction speed (`benches/bench_dataset.py`, linux/x86_64 2 vCPU): CSR 0.8–1.05x, CSC 0.75–4x upstream; dense construction measured 0.32–0.82x (pre-existing, profile `value_to_bin`/`find_groups`)
 - [x] Parsers: CSV/TSV/LibSVM, header, `label_column`, `weight_column`, `group_column`, `ignore_column`, `two_round`
 - [x] Binary dataset file (`save_binary`) byte-identical to upstream (20 fixtures); reader for upstream files
@@ -116,7 +116,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] Regression: `l2`, `l1`, `huber`, `fair`, `poisson`, `quantile`, `mape`, `gamma`, `tweedie` (byte-identical training, weighted and unweighted)
 - [x] `binary`, `multiclass`, `multiclassova`, `cross_entropy`, `cross_entropy_lambda` (weighted and unweighted)
 - [x] Ranking: `lambdarank`, `rank_xendcg` (byte-identical training, weighted and unweighted)
-- [ ] Ranking: unbiased lambdarank position bias (`position` field, `lambdarank_position_bias_regularization`)
+- [ ] Ranking: unbiased lambdarank position bias (`position` field, `lambdarank_position_bias_regularization`). Done for lambdarank (parity-tested); `rank_xendcg` with positions still raises `NotImplementedError`
 - [x] Custom evaluation (`feval` in `train`/`cv`) and custom objectives (`fobj`/callable aliases): native derivatives, regression/multiclass and CV parity, invalid dimensions/lengths, raw-score evaluation, GBDT/DART/GOSS switching, upstream-compatible RF rejection.
 - [x] All metrics: l1/l2/rmse/quantile/huber/fair/poisson/mape/gamma/gamma_deviance/tweedie/r2, ndcg@k, map@k, auc, average_precision, binary_logloss/error, auc_mu, multi_logloss/error (`multi_error_top_k`), cross_entropy, cross_entropy_lambda, kullback_leibler (bit-exact vs upstream on 24 fixtures; wiring into training/early stopping is P5)
 

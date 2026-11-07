@@ -70,9 +70,79 @@ impl Queries {
     }
 }
 
+/// Position bias factors of unbiased LambdaMART, one per position id.
+/// upstream: `LambdarankNDCG::pos_biases_` and `UpdatePositionBiasFactors`. The factors are
+/// stored as `label_t` (`f32`), like upstream.
+struct PositionBias {
+    positions: Vec<i32>,
+    num_ids: usize,
+    learning_rate: f64,
+    regularization: f64,
+    biases: Mutex<Vec<f32>>,
+}
+
+impl PositionBias {
+    fn new(positions: Vec<i32>, num_ids: usize, learning_rate: f64, regularization: f64) -> Self {
+        PositionBias {
+            positions,
+            num_ids,
+            learning_rate,
+            regularization,
+            biases: Mutex::new(vec![0.0; num_ids]),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<f32>> {
+        self.biases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(test)]
+    fn biases_snapshot(&self) -> Vec<f32> {
+        self.lock().clone()
+    }
+
+    /// Each row's score plus the bias of its position.
+    /// upstream: `GetGradientsWithSampledQueries`, `score_adjusted`.
+    fn adjusted_scores(&self, score: &[f64]) -> Vec<f64> {
+        let biases = self.lock();
+        score
+            .iter()
+            .zip(&self.positions)
+            .map(|(&s, &p)| s + f64::from(biases[p as usize]))
+            .collect()
+    }
+
+    /// One Newton-Raphson step per position, from the gradients of all rows.
+    /// upstream: `UpdatePositionBiasFactors` (single-threaded accumulation order).
+    fn update(&self, lambdas: &[f32], hessians: &[f32]) {
+        let mut first = vec![0.0f64; self.num_ids];
+        let mut second = vec![0.0f64; self.num_ids];
+        let mut counts = vec![0i32; self.num_ids];
+        for (i, &p) in self.positions.iter().enumerate() {
+            let p = p as usize;
+            first[p] -= f64::from(lambdas[i]);
+            second[p] -= f64::from(hessians[i]);
+            counts[p] += 1;
+        }
+        let mut biases = self.lock();
+        for p in 0..self.num_ids {
+            let count = f64::from(counts[p]);
+            // L2 regularization on the factors.
+            let first_derivative = first[p] - f64::from(biases[p]) * self.regularization * count;
+            let second_derivative = second[p] - self.regularization * count;
+            biases[p] = (f64::from(biases[p])
+                + self.learning_rate * first_derivative / (second_derivative.abs() + 0.001))
+                as f32;
+        }
+    }
+}
+
 /// upstream: `LambdarankNDCG`
 pub struct LambdarankNdcg {
     queries: Queries,
+    position_bias: Option<PositionBias>,
     sigmoid: f64,
     norm: bool,
     truncation_level: i32,
@@ -124,8 +194,18 @@ impl LambdarankNdcg {
                 1.0 / (1.0 + (score * cfg.sigmoid).exp())
             })
             .collect();
+        let num_position_ids = md.positions.iter().max().map_or(0, |&m| m as usize + 1);
+        let position_bias = (!md.positions.is_empty()).then(|| {
+            PositionBias::new(
+                md.positions.clone(),
+                num_position_ids,
+                cfg.learning_rate,
+                cfg.lambdarank_position_bias_regularization,
+            )
+        });
         Ok(LambdarankNdcg {
             queries,
+            position_bias,
             sigmoid: cfg.sigmoid,
             norm: cfg.lambdarank_norm,
             truncation_level: cfg.lambdarank_truncation_level,
@@ -238,9 +318,19 @@ impl Objective for LambdarankNdcg {
     }
 
     fn get_gradients(&self, score: &[f64], g: &mut [f32], h: &mut [f32]) {
-        self.queries.gradients(score, g, h, |q, label, sc, gg, hh| {
-            self.one_query(q, label, sc, gg, hh);
-        });
+        match &self.position_bias {
+            None => self.queries.gradients(score, g, h, |q, label, sc, gg, hh| {
+                self.one_query(q, label, sc, gg, hh);
+            }),
+            Some(pb) => {
+                let adjusted = pb.adjusted_scores(score);
+                self.queries
+                    .gradients(&adjusted, g, h, |q, label, sc, gg, hh| {
+                        self.one_query(q, label, sc, gg, hh);
+                    });
+                pb.update(g, h);
+            }
+        }
     }
 
     fn boost_from_score(&self, _class_id: usize) -> f64 {
@@ -275,6 +365,10 @@ pub struct RankXendcg {
 
 impl RankXendcg {
     pub fn new(cfg: &Config, md: &Metadata) -> Result<Self> {
+        if !md.positions.is_empty() {
+            // Position bias is only ported for lambdarank; upstream applies it to both.
+            return Err(Error::Unsupported("position bias for rank_xendcg".into()));
+        }
         let queries = Queries::new(md)?;
         let rands = (0..queries.num_queries())
             .map(|i| Random::new(cfg.objective_seed.wrapping_add(i as i32)))
@@ -344,5 +438,30 @@ impl Objective for RankXendcg {
 
     fn is_constant_hessian(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod position_bias_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn newton_step_moves_each_position_bias_against_its_gradient_sum() {
+        // Rows 0 and 1 share position 0; row 2 is alone at position 1.
+        let pb = PositionBias::new(vec![0, 0, 1], 2, 1.0, 0.0);
+        pb.update(&[1.0, 1.0, -2.0], &[1.0, 1.0, 2.0]);
+        let b = pb.biases_snapshot();
+        assert!((f64::from(b[0]) - (-2.0 / 2.001)).abs() < 1e-6, "{b:?}");
+        assert!((f64::from(b[1]) - (2.0 / 2.001)).abs() < 1e-6, "{b:?}");
+    }
+
+    #[test]
+    fn regularization_pulls_the_bias_toward_zero() {
+        let pb = PositionBias::new(vec![0], 1, 1.0, 1.0);
+        pb.update(&[0.0], &[1.0]);
+        // Start at zero; with no gradient the regularized step is zero too.
+        assert!(pb.biases_snapshot()[0].abs() < 1e-9);
     }
 }

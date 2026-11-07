@@ -12,6 +12,4 @@ tests/python_package_test/test_engine.py::test_monotone_constraints[False]	monot
 tests/python_package_test/test_engine.py::test_monotone_constraints[True]	monotone constraints beyond basic (ROADMAP P3 monotone)
 tests/python_package_test/test_engine.py::test_monotone_penalty	monotone constraints beyond basic (ROADMAP P3 monotone)
 tests/python_package_test/test_engine.py::test_monotone_penalty_max	monotone constraints beyond basic (ROADMAP P3 monotone)
-tests/python_package_test/test_engine.py::test_ranking_with_position_information_with_dataset_constructor	position bias in ranking (ROADMAP P4 position bias)
-tests/python_package_test/test_engine.py::test_ranking_with_position_information_with_file	position bias in ranking (ROADMAP P4 position bias)
 tests/python_package_test/test_engine.py::test_save_and_load_linear	linear_tree training and model I/O (ROADMAP P3 linear_tree)
