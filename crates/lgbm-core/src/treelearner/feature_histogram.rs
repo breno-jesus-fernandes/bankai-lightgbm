@@ -121,7 +121,7 @@ pub fn leaf_output_root(p: &SplitParams, sum_g: f64, sum_h: f64, num_data: i32) 
 
 /// upstream: `GetLeafGainGivenOutput<USE_L1>`
 #[inline(always)]
-fn leaf_gain_given_output<const L1: bool>(
+pub(crate) fn leaf_gain_given_output<const L1: bool>(
     sum_gradients: f64,
     sum_hessians: f64,
     l1: f64,
@@ -142,7 +142,7 @@ fn leaf_gain_given_output<const L1: bool>(
 /// upstream: `GetLeafGain<USE_L1, USE_MAX_OUTPUT, USE_SMOOTHING>`
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn leaf_gain<const L1: bool, const MAX_OUT: bool, const SMOOTH: bool>(
+pub(crate) fn leaf_gain<const L1: bool, const MAX_OUT: bool, const SMOOTH: bool>(
     sum_gradients: f64,
     sum_hessians: f64,
     l1: f64,

@@ -21,7 +21,7 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
       Done: all ported files in `tests/python_package_test` (`test_plotting`, `test_sklearn`, `test_basic`,
       `test_engine`, `test_callback`, `test_utilities`, `test_consistency`, `test_pandas`, `test_arrow`, `test_polars`,
       `test_dual`), run unmodified except imports. Upstream cases that still fail are strict `xfail`s listed in
-      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (14 node ids; a fix turns them into
+      `tests/known_upstream_gaps.tsv` with the owning ROADMAP item (13 node ids; a fix turns them into
       failing XPASS, so the line is removed with the fix). `test_dask.py` belongs to P7 (distributed).
       Arrow/polars ports pass in full (`Dataset._dump_text` is byte-identical to upstream). `get_data` on pyarrow/polars subsets now keeps the table type. Done: all-ones weights become `None`, as upstream; arrow/polars column names feed categorical features; pyarrow/polars predict densely.
       Open work from the list: the "not triaged" entries (pandas dtypes, early-stopping
@@ -103,7 +103,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [ ] `feature_fraction`, `feature_fraction_bynode`, `bagging_fraction`/`bagging_freq`, pos/neg bagging (done, byte-identical; `extra_trees` byte-identical across seeds; `bagging_by_query` for lambdarank and other non-`rank_xendcg` objectives, parity-tested; `rank_xendcg` with `bagging_by_query` still missing)
 - [ ] Monotone constraints: basic (done, byte-identical, with `monotone_penalty`); intermediate and advanced still missing
 - [x] `interaction_constraints` (byte-identical; by-tree and by-node sampling)
-- [ ] `forcedsplits_filename`, CEGB (`cegb_*`)
+- [ ] CEGB (`cegb_*`). `forcedsplits_filename` is done for numerical features (parity-tested with and without `feature_fraction` and with NaN values); categorical forced splits raise `NotImplementedError`
 - [ ] `linear_tree` (`linear_lambda`); training currently refuses `linear_tree=true` with an explicit error
 - [ ] Quantized training (`use_quantized_grad`, `num_grad_quant_bins`, ...)
 - [x] `refit` (byte-identical leaves vs upstream on upstream models, decay 0/0.9/1; `validate_features`; categorical reconciliation; `linear_tree` and `boosting=rf|dart` raise `Unsupported`)

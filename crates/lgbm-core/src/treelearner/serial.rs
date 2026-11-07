@@ -2,6 +2,9 @@
 //! src/io/dataset.cpp (`ConstructHistogramsInner`, `FixHistogram`),
 //! src/treelearner/feature_histogram.hpp (`HistogramPool`)
 
+mod forced;
+
+use self::forced::ForcedSplits;
 use super::col_sampler::ColSampler;
 use super::data_partition::{DataPartition, SplitRule};
 use super::feature_histogram::{
@@ -138,6 +141,8 @@ pub struct SerialTreeLearner {
     splits: Vec<SplitRecord>,
     pub partition: DataPartition,
     best_split_per_leaf: Vec<SplitInfo>,
+    /// Forced splits applied at the start of every tree (`forcedsplits_filename`).
+    forced: Option<Arc<ForcedSplits>>,
     smaller: LeafSplits,
     larger: LeafSplits,
     smaller_slot: usize,
@@ -273,6 +278,7 @@ impl SerialTreeLearner {
         let num_data = ds.num_data();
         let monotone_active = !cfg.monotone_constraints.is_empty();
         let monotone_penalization = cfg.monotone_penalty;
+        let forced = ForcedSplits::load(&cfg.forcedsplits_filename, &ds, &metas)?.map(Arc::new);
         Ok(SerialTreeLearner {
             cfg,
             params,
@@ -290,6 +296,7 @@ impl SerialTreeLearner {
             splits: Vec::new(),
             partition: DataPartition::new(num_data, num_leaves),
             best_split_per_leaf: vec![SplitInfo::default(); num_leaves],
+            forced,
             smaller: LeafSplits::empty(),
             larger: LeafSplits::empty(),
             smaller_slot: 0,
@@ -330,9 +337,22 @@ impl SerialTreeLearner {
 
         let mut left_leaf: i32 = 0;
         let mut right_leaf: i32 = -1;
-        for _ in 0..num_leaves.saturating_sub(1) {
+        // upstream: `SerialTreeLearner::Train` applies the forced splits first; the normal
+        // loop then makes the remaining `num_leaves - 1 - init_splits` splits.
+        let init_splits = match self.forced.clone() {
+            Some(forced) => self.force_splits(
+                &forced,
+                &mut tree,
+                &mut left_leaf,
+                &mut right_leaf,
+                gradients,
+                hessians,
+            ),
+            None => 0,
+        };
+        for _ in init_splits..num_leaves.saturating_sub(1) {
             if self.before_find_best_split(&tree, left_leaf, right_leaf) {
-                self.find_best_splits(&tree, gradients, hessians);
+                self.find_best_splits(&tree, gradients, hessians, None);
             }
             let best_leaf = argmax_split(&self.best_split_per_leaf);
             if self.best_split_per_leaf[best_leaf].gain <= 0.0 {
@@ -445,13 +465,22 @@ impl SerialTreeLearner {
     }
 
     /// upstream: `SerialTreeLearner::FindBestSplits`
-    fn find_best_splits(&mut self, tree: &Tree, gradients: &[f32], hessians: &[f32]) {
+    /// `forced` lists the inner features that must get histograms even when the by-tree
+    /// sampler skips them (upstream: `FindBestSplits(tree, force_features)`).
+    fn find_best_splits(
+        &mut self,
+        tree: &Tree,
+        gradients: &[f32],
+        hessians: &[f32],
+        forced: Option<&[bool]>,
+    ) {
         let nf = self.num_features;
         // upstream: the by-tree mask gates histogram construction and split search.
         let bytree = self.col_sampler.is_feature_used_bytree().to_vec();
         let mut is_feature_used = vec![false; nf];
         for f in 0..nf {
-            if !bytree[f] {
+            let is_forced = forced.is_some_and(|m| m[f]);
+            if !bytree[f] && !is_forced {
                 continue;
             }
             if let Some(p) = self.parent_slot
