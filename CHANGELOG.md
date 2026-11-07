@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `bagging_by_query=true` with `data_sample_strategy=bagging` samples whole queries, as upstream does, instead of raising "not supported yet". Supported for lambdarank and the other objectives; `rank_xendcg` still raises `NotImplementedError` because its per-query random draws need upstream's sampled-query gradient path. `test_bagging_by_query_in_lambdarank` now passes, and a parity test matches upstream tree by tree.
 - `Booster.reset_parameter` accepts any parameter that does not change the boosting type, objective or number of classes, as upstream does, and returns the Booster. The learner and sampler are rebuilt, so the new values apply from the next iteration; models and scores are kept. Dataset-binning parameters are checked against the constructed Dataset. `test_cegb_scaling_equalities` and `test_reset_params_works_with_metric_num_class_and_boosting` now pass, and a parity test covers a mid-training reset of bagging and feature fraction.
 
 - DART continued training (`init_model` with `boosting=dart`): the init model's trees are never dropped, and drop weights cover only the trees trained in the run, as upstream does. Matches `lightgbm==4.7.0` exactly (`tests/parity/test_dart_continue_parity.py`); `test_continue_train_dart` now passes.

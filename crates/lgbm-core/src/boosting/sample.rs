@@ -28,6 +28,9 @@ pub(crate) struct Bagging {
     /// upstream `need_re_bagging_`: true until the first draw.
     need_rebag: bool,
     bag: Vec<i32>,
+    /// Row boundaries of each query (`num_queries + 1` entries) when `bagging_by_query` is
+    /// on; empty otherwise. Whole queries are kept or dropped together.
+    query_boundaries: Vec<i32>,
 }
 
 /// GOSS: keep the `top_rate` rows with the largest gradients, sample `other_rate` of the
@@ -84,7 +87,7 @@ impl SampleStrategy {
             )));
         }
         if cfg.bagging_by_query {
-            return Err(Error::Unsupported("bagging_by_query".into()));
+            return Self::new_query_bagging(cfg, md, num_tree_per_iteration);
         }
         // upstream: positives are counted by the binary objective only.
         let positive: Vec<bool> = md.label.iter().map(|&l| l > 0.0).collect();
@@ -109,6 +112,39 @@ impl SampleStrategy {
             rands: block_rands(cfg.bagging_seed, n),
             need_rebag: true,
             bag: Vec::new(),
+            query_boundaries: Vec::new(),
+        }))
+    }
+
+    /// upstream: `BaggingSampleStrategy` with `bagging_by_query`. Only the ranking objective
+    /// is supported: `rank_xendcg` draws a random number per query, and upstream computes
+    /// gradients for the sampled queries only, which this port does not yet mirror.
+    fn new_query_bagging(cfg: &Config, md: &Metadata, _ntpi: usize) -> Result<Self> {
+        if matches!(
+            cfg.objective.as_str(),
+            "rank_xendcg" | "xendcg" | "xe_ndcg" | "xe_ndcg_mart" | "xendcg_mart"
+        ) {
+            return Err(Error::Unsupported(
+                "bagging_by_query with rank_xendcg".into(),
+            ));
+        }
+        if md.query_boundaries.is_empty() {
+            return Err(Error::InvalidParameter(
+                "bagging_by_query requires query or group information".into(),
+            ));
+        }
+        let n = md.label.len();
+        Ok(SampleStrategy::Bagging(Bagging {
+            freq: cfg.bagging_freq,
+            fraction: cfg.bagging_fraction,
+            pos_fraction: 1.0,
+            neg_fraction: 1.0,
+            balanced: false,
+            positive: Vec::new(),
+            rands: block_rands(cfg.bagging_seed, n),
+            need_rebag: true,
+            bag: Vec::new(),
+            query_boundaries: md.query_boundaries.clone(),
         }))
     }
 
@@ -129,7 +165,7 @@ impl SampleStrategy {
         match self {
             SampleStrategy::Full => None,
             SampleStrategy::Bagging(b) => {
-                let n = b.positive.len();
+                let n = b.num_rows();
                 let bag_cnt = b.bag.len();
                 if (bag_cnt < n && iter % b.freq == 0) || b.need_rebag {
                     b.need_rebag = false;
@@ -150,9 +186,27 @@ impl SampleStrategy {
 }
 
 impl Bagging {
+    fn num_rows(&self) -> usize {
+        match self.query_boundaries.last() {
+            Some(&end) => end as usize,
+            None => self.positive.len(),
+        }
+    }
+
     /// upstream: `BaggingHelper` / `BalancedBaggingHelper`, one draw per row in row order.
+    /// With query boundaries, upstream: one draw per query (`BaggingHelper` over
+    /// `num_queries_`), keeping every row of the queries that are drawn.
     fn draw(&mut self, n: usize) -> Vec<i32> {
         let mut bag = Vec::new();
+        if !self.query_boundaries.is_empty() {
+            for (q, span) in self.query_boundaries.windows(2).enumerate() {
+                let r = f64::from(self.rands[q / RAND_BLOCK].next_float());
+                if r < self.fraction {
+                    bag.extend(span[0]..span[1]);
+                }
+            }
+            return bag;
+        }
         for i in 0..n {
             let r = f64::from(self.rands[i / RAND_BLOCK].next_float());
             let threshold = if self.balanced {
@@ -242,6 +296,7 @@ mod tests {
             rands: block_rands(3, 2500),
             need_rebag: true,
             bag: Vec::new(),
+            query_boundaries: Vec::new(),
         };
         let bag = b.draw(2500);
         assert!(bag.windows(2).all(|w| w[0] < w[1]));
@@ -252,5 +307,37 @@ mod tests {
             ..b
         };
         assert_eq!(b2.draw(2500), bag);
+    }
+
+    #[test]
+    fn query_bagging_keeps_whole_queries_in_ascending_order() {
+        // Four queries of sizes 3, 2, 4, 3.
+        let bounds = vec![0, 3, 5, 9, 12];
+        let mut b = Bagging {
+            freq: 1,
+            fraction: 0.5,
+            pos_fraction: 1.0,
+            neg_fraction: 1.0,
+            balanced: false,
+            positive: Vec::new(),
+            rands: block_rands(3, 12),
+            need_rebag: true,
+            bag: Vec::new(),
+            query_boundaries: bounds.clone(),
+        };
+        assert_eq!(b.num_rows(), 12);
+        let bag = b.draw(12);
+        assert!(bag.windows(2).all(|w| w[0] < w[1]));
+        // Each query is either fully in the bag or fully out of it.
+        for span in bounds.windows(2) {
+            let inside = bag.iter().filter(|&&r| r >= span[0] && r < span[1]).count();
+            assert!(inside == 0 || inside == (span[1] - span[0]) as usize);
+        }
+        // The same seed reproduces the same draw.
+        let mut b2 = Bagging {
+            rands: block_rands(3, 12),
+            ..b
+        };
+        assert_eq!(b2.draw(12), bag);
     }
 }

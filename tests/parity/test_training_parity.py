@@ -1215,14 +1215,16 @@ def test_extra_trees_matches_upstream(seed: int) -> None:
     np.testing.assert_allclose(results[1][1], results[0][1], rtol=1e-12, atol=1e-15)
 
 
-def test_bagging_by_query_is_rejected_until_ported() -> None:
-    # Upstream samples whole queries for bagging_by_query=true. bankai does not port that
-    # yet, so it must refuse rather than silently bag rows.
+def test_bagging_by_query_rejects_rank_xendcg_until_ported() -> None:
+    # Upstream samples whole queries for bagging_by_query=true, and rank_xendcg draws a
+    # random number per query, so only the sampled queries get gradients upstream. bankai
+    # does not mirror that yet, so it must refuse rather than silently diverge. Lambdarank
+    # is supported: see test_bagging_by_query_parity.py.
     rng = np.random.default_rng(62)
     x = rng.normal(size=(12, 3))
     params = {
         "verbosity": -1,
-        "objective": "lambdarank",
+        "objective": "rank_xendcg",
         "bagging_by_query": True,
         "bagging_freq": 1,
         "bagging_fraction": 0.5,
