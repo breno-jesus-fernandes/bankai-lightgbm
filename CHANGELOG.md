@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `Booster.reset_parameter` accepts any parameter that does not change the boosting type, objective or number of classes, as upstream does, and returns the Booster. The learner and sampler are rebuilt, so the new values apply from the next iteration; models and scores are kept. Dataset-binning parameters are checked against the constructed Dataset. `test_cegb_scaling_equalities` and `test_reset_params_works_with_metric_num_class_and_boosting` now pass, and a parity test covers a mid-training reset of bagging and feature fraction.
+
 - DART continued training (`init_model` with `boosting=dart`): the init model's trees are never dropped, and drop weights cover only the trees trained in the run, as upstream does. Matches `lightgbm==4.7.0` exactly (`tests/parity/test_dart_continue_parity.py`); `test_continue_train_dart` now passes.
 
 - `cv(init_model=...)` continues each fold from the init model (a Booster or a model file), as upstream does: the fold's validation scores start from the init model's predictions. `test_cv_works_with_init_model` now passes.
@@ -14,7 +16,7 @@
 
 - A subset of a Dataset built from a file keeps the file path as its data (upstream logs a warning and returns the original raw data). Predicting from a binary dataset file raises upstream's `Unknown format of training data` error.
 
-- `Booster.params` includes the training Dataset's params, as upstream's `Booster.__init__` does (Booster params keep precedence). `reset_parameter` for other params than `learning_rate` is still not implemented.
+- `Booster.params` includes the training Dataset's params, as upstream's `Booster.__init__` does (Booster params keep precedence). 
 
 - `_np2d_to_np1d` and pandas frames with one float dtype keep their dtype without a copy, as upstream does. The native layer still converts to float64 at the boundary.
 
