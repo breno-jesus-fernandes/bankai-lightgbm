@@ -434,18 +434,22 @@ impl NativeBooster {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (params, dataset, init_model=None))]
+    #[pyo3(signature = (params, dataset, init_model=None, warn_config=true))]
     fn create_training(
         py: Python<'_>,
         params: HashMap<String, String>,
         dataset: PyRef<'_, NativeDataset>,
         init_model: Option<PyRef<'_, NativeBooster>>,
+        warn_config: bool,
     ) -> PyResult<Self> {
         let ds = Arc::clone(&dataset.ds);
         let init = init_model.map(|m| m.model.clone());
         let trainer = py
             .allow_threads(|| -> lgbm_core::Result<GbdtTrainer> {
-                let cfg = Arc::new(Config::from_params(&params)?);
+                let cfg = {
+                    let _mute = MuteGuard::new(!warn_config);
+                    Arc::new(Config::from_params(&params)?)
+                };
                 match &init {
                     Some(init) => GbdtTrainer::with_init_model(cfg, ds, init),
                     None => GbdtTrainer::new(cfg, ds),
