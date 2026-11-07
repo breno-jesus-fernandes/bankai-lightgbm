@@ -72,7 +72,10 @@ class NativeBooster:
     ) -> NativeBooster: ...
     @staticmethod
     def create_training(
-        params: dict[str, str], dataset: NativeDataset, init_model: NativeBooster | None = None
+        params: dict[str, str],
+        dataset: NativeDataset,
+        init_model: NativeBooster | None = None,
+        warn_config: bool = True,
     ) -> NativeBooster: ...
     @staticmethod
     def refit(

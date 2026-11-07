@@ -181,29 +181,6 @@ def _params_to_strings(params: dict[str, Any]) -> dict[str, str]:
     return {str(k): _param_value_str(v) for k, v in params.items() if v is not None}
 
 
-@cache
-def _known_parameter_names() -> frozenset[str]:
-    """Every parameter name and alias the native library accepts."""
-    from bankai_lightgbm._lib import param_aliases
-
-    aliases = param_aliases()
-    return frozenset(aliases) | frozenset(a for values in aliases.values() for a in values)
-
-
-def _log_unknown_params(params: dict[str, Any]) -> None:
-    """Warn about parameter names the library does not know.
-
-    upstream: src/io/config.cpp (v4.7.0) ``Config::Set`` logs ``Unknown parameter: <key>``; the
-    native log goes through ``_LOGGER.info`` and is printed only when ``verbosity >= 0``.
-    """
-    if int(params.get("verbosity", params.get("verbose", 1))) < 0:
-        return
-    known = _known_parameter_names()
-    for key in params:
-        if str(key) not in known:
-            _log_info(f"[LightGBM] [Warning] Unknown parameter: {key}")
-
-
 def _validate_feature_names(booster_names: list[str], data_names: list[str]) -> None:
     """Check prediction data's column names against the model's (upstream ``validate_features``).
 
@@ -1944,7 +1921,6 @@ class Booster:
             # (``params.update(train_set.get_params())``). Booster params keep precedence here.
             self.params = {**getattr(train_set, "params", {}), **self.params}
             merged_params = {**getattr(train_set, "params", {}), **self.params}
-            _log_unknown_params(merged_params)
             # upstream: Booster.__init__ creates the C++ booster (LGBM_BoosterCreate), which
             # parses the config and emits its warnings and errors at this point.
             validate_params(_params_to_strings(merged_params))
@@ -2288,8 +2264,12 @@ class Booster:
             for alias in _CATEGORICAL_FEATURE_ALIASES:
                 merged.pop(alias, None)
             merged["categorical_feature"] = ",".join(str(c) for c in dataset._categorical)
+        # The constructor already reported this config's warnings, so do not repeat them.
         self._handle = NativeBooster.create_training(
-            _params_to_strings(merged), dataset._handle_or_raise(), self._init_model
+            _params_to_strings(merged),
+            dataset._handle_or_raise(),
+            self._init_model,
+            warn_config=False,
         )
         self.pandas_categorical = dataset.pandas_categorical
 
