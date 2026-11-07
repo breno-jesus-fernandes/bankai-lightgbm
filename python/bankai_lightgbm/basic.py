@@ -1274,7 +1274,8 @@ class Dataset:
             "position": self.set_position,
         }
         if field_name not in setters:
-            raise NotImplementedError(f"field '{field_name}' is not supported yet (roadmap P2)")
+            # upstream: ``_FIELD_TYPE_MAPPER[field_name]`` raises KeyError for an unknown field.
+            raise KeyError(field_name)
         setters[field_name](data)
         return self
 
@@ -1303,7 +1304,8 @@ class Dataset:
             if group is None:
                 return None
             return np.concatenate(([0], np.cumsum(group))).astype(np.int32)
-        raise NotImplementedError(f"field '{field_name}' is not supported yet (roadmap P2)")
+        # upstream: the C API raises for a field it does not know (LGBM_DatasetGetField).
+        raise LightGBMError("Field not found")
 
     def get_label(self) -> Any:
         """Return the dataset labels as a one-dimensional float32 array.
@@ -1467,24 +1469,37 @@ class Dataset:
 
     def set_label(self, label: Any) -> Dataset:
         """Set the label; a constructed Dataset is updated in place."""
+        if self._handle is None and self._evaluation_handle is None:
+            self.label = label
+            return self
+        # upstream: set_label -> set_field("label") validates before the C++ side is touched.
+        if label is None:
+            raise LightGBMError("label cannot be nullptr")
+        values = _list_to_1d_numpy(data=label, dtype=np.float64, name="label").tolist()
+        if len(values) != self.num_data():
+            raise LightGBMError("Length of labels differs from the length of #data")
         self.label = label
-        if self._handle is not None or self._evaluation_handle is not None:
-            values = np.asarray(label, dtype=np.float64).reshape(-1).tolist()
-            self._update_native_fields(label=values)
-            # upstream: set_label re-reads the field ("original values can be modified at cpp side")
-            self.label = self.get_label()
+        self._update_native_fields(label=values)
+        # upstream: set_label re-reads the field ("original values can be modified at cpp side")
+        self.label = self.get_label()
         return self
 
     def set_weight(self, weight: Any) -> Dataset:
         """Set the sample weights; a constructed Dataset is updated in place."""
         weight = _drop_all_ones_weight(weight)
-        self.weight = weight
         if self._handle is not None or self._evaluation_handle is not None:
             values = (
                 []
                 if weight is None
-                else [float(w) for w in np.asarray(weight, np.float32).reshape(-1)]
+                else [
+                    float(w)
+                    for w in _list_to_1d_numpy(data=weight, dtype=np.float32, name="weight")
+                ]
             )
+            if values and len(values) != self.num_data():
+                raise LightGBMError("Length of weights differs from the length of #data")
+        self.weight = weight
+        if self._handle is not None or self._evaluation_handle is not None:
             self._update_native_fields(weight=values)
             # upstream: set_weight re-reads the field ("original values can be modified at cpp side")
             self.weight = self.get_weight()
