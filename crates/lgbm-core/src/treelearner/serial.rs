@@ -2,6 +2,7 @@
 //! src/io/dataset.cpp (`ConstructHistogramsInner`, `FixHistogram`),
 //! src/treelearner/feature_histogram.hpp (`HistogramPool`)
 
+mod advanced;
 mod forced;
 mod intermediate;
 mod linear;
@@ -10,7 +11,7 @@ use self::forced::ForcedSplits;
 use super::col_sampler::ColSampler;
 use super::data_partition::{DataPartition, SplitRule};
 use super::feature_histogram::{
-    CatParams, FeatureMeta, SplitParams, calculate_splitted_leaf_output,
+    CatParams, FeatureMeta, Mc, SplitParams, calculate_splitted_leaf_output,
     find_best_threshold_categorical, find_best_threshold_numerical, leaf_output_root,
 };
 use super::histogram;
@@ -149,6 +150,8 @@ pub struct SerialTreeLearner {
     linear: Option<linear::LinearState>,
     /// State of `monotone_constraints_method=intermediate` (upstream: `IntermediateLeafConstraints`).
     intermediate: Option<intermediate::IntermediateConstraints>,
+    /// Per-feature constraint lists of `monotone_constraints_method=advanced`.
+    monotone_advanced: Option<advanced::AdvancedStore>,
     smaller: LeafSplits,
     larger: LeafSplits,
     smaller_slot: usize,
@@ -274,7 +277,7 @@ impl SerialTreeLearner {
         if !cfg.monotone_constraints.is_empty()
             && !matches!(
                 cfg.monotone_constraints_method.as_str(),
-                "basic" | "intermediate"
+                "basic" | "intermediate" | "advanced"
             )
         {
             return Err(Error::Unsupported(format!(
@@ -293,8 +296,21 @@ impl SerialTreeLearner {
         let linear = cfg
             .linear_tree
             .then(|| linear::LinearState::new(&ds, &metas));
-        let intermediate = (monotone_active && cfg.monotone_constraints_method == "intermediate")
-            .then(|| intermediate::IntermediateConstraints::new(num_leaves));
+        let advanced_on = monotone_active && cfg.monotone_constraints_method == "advanced";
+        // The advanced cumulative view is only initialised by the numerical scan upstream, so a
+        // categorical search would read uninitialised state there. Refuse rather than guess.
+        if advanced_on && metas.iter().any(|m| m.bin_type == BinType::Categorical) {
+            return Err(Error::Unsupported(
+                "monotone_constraints_method=advanced with categorical features".into(),
+            ));
+        }
+        let intermediate = (monotone_active
+            && matches!(
+                cfg.monotone_constraints_method.as_str(),
+                "intermediate" | "advanced"
+            ))
+        .then(|| intermediate::IntermediateConstraints::new(num_leaves));
+        let monotone_advanced = advanced_on.then(|| advanced::new_store(num_leaves, num_features));
         Ok(SerialTreeLearner {
             cfg,
             params,
@@ -315,6 +331,7 @@ impl SerialTreeLearner {
             forced,
             linear,
             intermediate,
+            monotone_advanced,
             smaller: LeafSplits::empty(),
             larger: LeafSplits::empty(),
             smaller_slot: 0,
@@ -396,6 +413,13 @@ impl SerialTreeLearner {
         self.monotone_bounds.fill((-f64::MAX, f64::MAX));
         if let Some(im) = self.intermediate.as_mut() {
             im.reset();
+        }
+        if let Some(store) = self.monotone_advanced.as_mut() {
+            for leaf in store.iter_mut() {
+                for f in leaf.iter_mut() {
+                    f.reset();
+                }
+            }
         }
         self.leaf_depth.fill(0);
         self.col_sampler.reset_by_tree();
@@ -677,14 +701,15 @@ impl SerialTreeLearner {
         }
     }
 
-    /// Output bounds of a leaf when monotone constraints are active (upstream: the
-    /// `USE_MC` template instantiations).
-    fn mc_bounds(&self, leaf: i32) -> Option<(f64, f64)> {
-        if self.monotone_active {
-            Some(self.monotone_bounds[leaf as usize])
-        } else {
-            None
-        }
+    /// Bin counts of every inner feature (the advanced lists are sized by them).
+    fn num_bins_per_feature(&self) -> Vec<u32> {
+        let l = &self.ds.layout;
+        (0..self.num_features)
+            .map(|f| {
+                l.groups[l.feature2group[f] as usize].bin_mappers[l.feature2subfeature[f] as usize]
+                    .num_bin as u32
+            })
+            .collect()
     }
 
     /// upstream: `SerialTreeLearner::FindBestSplitsFromHistograms`
@@ -724,10 +749,31 @@ impl SerialTreeLearner {
             None
         };
         let (smaller_slot, smaller, larger_leaf) = (self.smaller_slot, self.smaller, self.larger);
-        let mc_smaller = self.mc_bounds(smaller.leaf_index);
-        let mc_larger = match larger {
-            Some(_) => self.mc_bounds(larger_leaf.leaf_index),
-            None => None,
+        // upstream: `ComputeBestSplitForFeature` brings the advanced lists of the searched leaves
+        // up to date. The searches then only read them, so the store is moved out of `self`.
+        let mut advanced = self.monotone_advanced.take();
+        if let (Some(store), Some(im)) = (advanced.as_mut(), self.intermediate.as_ref()) {
+            let mut leaves = vec![(smaller_slot, smaller.leaf_index)];
+            if let Some(ls) = larger {
+                leaves.push((ls, larger_leaf.leaf_index));
+            }
+            let num_bins = self.num_bins_per_feature();
+            refresh_advanced_lists(
+                im,
+                store,
+                &num_bins,
+                &self.metas,
+                &self.pool.splittable,
+                is_feature_used,
+                tree,
+                &leaves,
+            );
+        }
+        let bounds = std::mem::take(&mut self.monotone_bounds);
+        let mc = McSource {
+            active: self.monotone_active,
+            bounds: &bounds,
+            advanced: advanced.as_ref(),
         };
 
         // Phase 2: threshold searches. Parallel only when the work outweighs a fork/join.
@@ -743,10 +789,9 @@ impl SerialTreeLearner {
             smaller_slot,
             smaller,
             smaller_parent_output,
-            mc_smaller,
+            mc,
             larger: larger.map(|slot| (slot, larger_leaf)),
             larger_parent_output,
-            mc_larger,
         };
         // Parallel: fused per-feature phases (see `fused_search`). Otherwise, or when the
         // histogram extents overlap, the two sequential phases below.
@@ -815,7 +860,7 @@ impl SerialTreeLearner {
                         real,
                         &smaller,
                         smaller_parent_output,
-                        mc_smaller,
+                        mc.for_leaf(smaller.leaf_index as usize, f),
                     );
                     let large = larger.map(|ls| {
                         search_feature(
@@ -825,7 +870,7 @@ impl SerialTreeLearner {
                             real,
                             &larger_leaf,
                             larger_parent_output,
-                            mc_larger,
+                            mc.for_leaf(larger_leaf.leaf_index as usize, f),
                         )
                     });
                     Some(FeatureOutcome { small, large })
@@ -866,6 +911,8 @@ impl SerialTreeLearner {
                 }
             }
         }
+        self.monotone_bounds = bounds;
+        self.monotone_advanced = advanced;
         self.best_split_per_leaf[smaller.leaf_index as usize] = smaller_best;
         if larger_leaf.leaf_index >= 0 {
             self.best_split_per_leaf[larger_leaf.leaf_index as usize] = larger_best;
@@ -948,6 +995,7 @@ impl SerialTreeLearner {
         for ((s, small), large) in spans.iter().zip(small_pieces).zip(large_pieces) {
             let meta = metas[s.2].take()?;
             work[s.2].0 = Some(FeatureWork {
+                feature: s.2,
                 meta,
                 small,
                 large,
@@ -1089,15 +1137,26 @@ impl SerialTreeLearner {
                 right_output: info.right_output,
                 monotone_type: info.monotone_type,
             };
-            leaves_to_update = im.update(
-                tree,
-                &mut self.monotone_bounds,
-                &self.metas,
-                &self.best_split_per_leaf,
-                best_leaf,
-                next_leaf,
-                &applied,
-            );
+            leaves_to_update = match self.monotone_advanced.as_mut() {
+                Some(store) => im.update(
+                    tree,
+                    store,
+                    &self.metas,
+                    &self.best_split_per_leaf,
+                    best_leaf,
+                    next_leaf,
+                    &applied,
+                ),
+                None => im.update(
+                    tree,
+                    &mut self.monotone_bounds,
+                    &self.metas,
+                    &self.best_split_per_leaf,
+                    best_leaf,
+                    next_leaf,
+                    &applied,
+                ),
+            };
         } else {
             // upstream: BasicLeafConstraints::Update
             self.monotone_bounds[next_leaf] = self.monotone_bounds[best_leaf];
@@ -1142,14 +1201,14 @@ impl SerialTreeLearner {
         self.best_split_per_leaf[best_leaf] = info;
         // upstream: SplitInner, `RecomputeBestSplitForLeaf` for each leaf whose bounds moved
         for leaf in leaves_to_update {
-            self.recompute_best_split_for_leaf(leaf);
+            self.recompute_best_split_for_leaf(leaf, &*tree);
         }
         (best_leaf, right)
     }
 
     /// upstream: `SerialTreeLearner::RecomputeBestSplitForLeaf`. Searches the leaf again with
     /// its current bounds, from the histogram it already has.
-    fn recompute_best_split_for_leaf(&mut self, leaf: usize) {
+    fn recompute_best_split_for_leaf(&mut self, leaf: usize, tree: &Tree) {
         let (slot, had) = self.pool.get(leaf);
         if !had {
             log::warn!(
@@ -1183,9 +1242,29 @@ impl SerialTreeLearner {
         } else {
             0.0
         };
-        let mc = self.mc_bounds(leaf as i32);
         let node_mask = self.col_sampler.get_by_node(&self.branch_features[leaf]);
         let bytree = self.col_sampler.is_feature_used_bytree().to_vec();
+        // upstream: `ComputeBestSplitForFeature` brings the leaf's advanced lists up to date.
+        let mut advanced = self.monotone_advanced.take();
+        if let (Some(store), Some(im)) = (advanced.as_mut(), self.intermediate.as_ref()) {
+            let num_bins = self.num_bins_per_feature();
+            refresh_advanced_lists(
+                im,
+                store,
+                &num_bins,
+                &self.metas,
+                &self.pool.splittable,
+                &bytree,
+                tree,
+                &[(slot, leaf as i32)],
+            );
+        }
+        let bounds = std::mem::take(&mut self.monotone_bounds);
+        let mc = McSource {
+            active: self.monotone_active,
+            bounds: &bounds,
+            advanced: advanced.as_ref(),
+        };
         let ctx = SearchCtx {
             params: &self.params,
             cat_params: &self.cat_params,
@@ -1202,13 +1281,22 @@ impl SerialTreeLearner {
             let len = self.feature_hist_len[f] * 2;
             let hist = &self.pool.slots[slot][start..start + len];
             let real = self.ds.layout.real_feature_idx[f];
-            let (splittable, candidate) =
-                search_feature(&ctx, hist, &mut self.metas[f], real, &ls, parent_output, mc);
+            let (splittable, candidate) = search_feature(
+                &ctx,
+                hist,
+                &mut self.metas[f],
+                real,
+                &ls,
+                parent_output,
+                mc.for_leaf(leaf, f),
+            );
             self.pool.splittable[slot][f] = splittable;
             if node_mask[f] && candidate.better_than(&best) {
                 best = candidate;
             }
         }
+        self.monotone_bounds = bounds;
+        self.monotone_advanced = advanced;
         self.best_split_per_leaf[leaf] = best;
     }
 
@@ -1285,6 +1373,55 @@ impl SerialTreeLearner {
     }
 }
 
+/// Where a search reads a leaf's monotone bounds: one fixed pair per leaf (basic, intermediate),
+/// or the per-threshold lists of `advanced`.
+#[derive(Clone, Copy)]
+struct McSource<'a> {
+    active: bool,
+    bounds: &'a [(f64, f64)],
+    advanced: Option<&'a advanced::AdvancedStore>,
+}
+
+impl<'a> McSource<'a> {
+    /// The bounds of `leaf` for `feature` (upstream: the `USE_MC` template instantiations).
+    fn for_leaf(self, leaf: usize, feature: usize) -> Mc<'a> {
+        if !self.active {
+            return Mc::Off;
+        }
+        if let Some(store) = self.advanced {
+            return Mc::Cumulative(&store[leaf][feature]);
+        }
+        let (lo, hi) = self.bounds[leaf];
+        Mc::Fixed(lo, hi)
+    }
+}
+
+/// upstream: `SerialTreeLearner::ComputeBestSplitForFeature` calls `RecomputeConstraintsIfNeeded`
+/// for each searched feature of each leaf in `leaves` (slot, leaf). Runs before the searches.
+#[allow(clippy::too_many_arguments)]
+fn refresh_advanced_lists(
+    im: &intermediate::IntermediateConstraints,
+    store: &mut advanced::AdvancedStore,
+    num_bins: &[u32],
+    metas: &[FeatureMeta],
+    splittable: &[Vec<bool>],
+    is_feature_used: &[bool],
+    tree: &Tree,
+    leaves: &[(usize, i32)],
+) {
+    let ctx = advanced::WalkCtx { tree, metas };
+    for (f, meta) in metas.iter().enumerate() {
+        if !is_feature_used[f] || meta.bin_type == BinType::Categorical {
+            continue;
+        }
+        for &(slot, leaf) in leaves {
+            if splittable[slot][f] {
+                im.refresh_advanced(&ctx, store, leaf as usize, f, num_bins[f]);
+            }
+        }
+    }
+}
+
 /// Inputs shared by every feature's search in one `find_best_splits_from_histograms` call.
 struct SearchInputs<'a> {
     is_feature_used: &'a [bool],
@@ -1292,15 +1429,16 @@ struct SearchInputs<'a> {
     smaller_slot: usize,
     smaller: LeafSplits,
     smaller_parent_output: f64,
-    mc_smaller: Option<(f64, f64)>,
+    mc: McSource<'a>,
     /// Slot and leaf of the larger leaf, when it is being searched.
     larger: Option<(usize, LeafSplits)>,
     larger_parent_output: f64,
-    mc_larger: Option<(f64, f64)>,
 }
 
 /// One feature's disjoint histogram slices and its metadata, for the fused search.
 struct FeatureWork<'a> {
+    /// The inner feature index.
+    feature: usize,
     meta: &'a mut FeatureMeta,
     small: &'a mut [f64],
     large: Option<&'a mut [f64]>,
@@ -1349,7 +1487,7 @@ fn run_feature(
         w.real,
         &inp.smaller,
         inp.smaller_parent_output,
-        inp.mc_smaller,
+        inp.mc.for_leaf(inp.smaller.leaf_index as usize, w.feature),
     );
     let large = match (w.large.as_deref(), inp.larger) {
         (Some(large), Some((_, leaf))) => Some(search_feature(
@@ -1359,7 +1497,7 @@ fn run_feature(
             w.real,
             &leaf,
             inp.larger_parent_output,
-            inp.mc_larger,
+            inp.mc.for_leaf(leaf.leaf_index as usize, w.feature),
         )),
         _ => None,
     };
@@ -1468,7 +1606,7 @@ fn search_feature(
     real_fidx: i32,
     ls: &LeafSplits,
     parent_output: f64,
-    mc: Option<(f64, f64)>,
+    mc: Mc<'_>,
 ) -> (bool, SplitInfo) {
     let mut new_split = SplitInfo::default();
     let splittable = if meta.bin_type == BinType::Categorical {

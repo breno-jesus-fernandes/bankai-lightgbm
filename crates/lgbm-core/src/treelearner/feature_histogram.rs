@@ -7,6 +7,7 @@ use super::split_info::{K_MIN_SCORE, SplitInfo};
 use crate::config::Config;
 use crate::io::bin::BinType;
 use crate::meta::{K_EPSILON, MissingType};
+use crate::treelearner::monotone_constraints::{AdvancedFeature, Cumulative};
 use crate::utils::common::madd;
 use crate::utils::random::Random;
 
@@ -174,6 +175,40 @@ pub(crate) fn leaf_gain<const L1: bool, const MAX_OUT: bool, const SMOOTH: bool>
     }
 }
 
+/// The bounds a split search reads for one feature of one leaf (upstream: `FeatureConstraint`).
+#[derive(Clone, Copy, Debug)]
+pub enum Mc<'a> {
+    /// No monotone constraint (upstream: `USE_MC = false`).
+    Off,
+    /// One `[min, max]` for every threshold and both children (basic and intermediate).
+    Fixed(f64, f64),
+    /// Per-threshold bounds of the advanced method, read through a [`Cumulative`] view.
+    Cumulative(&'a AdvancedFeature),
+}
+
+impl Mc<'_> {
+    /// The single `[min, max]` of a fixed constraint. Categorical searches use it: the
+    /// advanced method is refused for categorical features, so they never see `Cumulative`.
+    pub fn fixed(self) -> Option<(f64, f64)> {
+        match self {
+            Mc::Fixed(lo, hi) => Some((lo, hi)),
+            Mc::Off | Mc::Cumulative(_) => None,
+        }
+    }
+}
+
+/// `(left, right)` child bounds, each `(min, max)`.
+type ChildBounds = ((f64, f64), (f64, f64));
+
+/// The bounds of both children at the current threshold of a scan.
+fn child_bounds(mc: Mc<'_>, cum: Option<&Cumulative>) -> Option<ChildBounds> {
+    match mc {
+        Mc::Off => None,
+        Mc::Fixed(lo, hi) => Some(((lo, hi), (lo, hi))),
+        Mc::Cumulative(_) => cum.map(|c| (c.left(), c.right())),
+    }
+}
+
 /// Result of a threshold search on one feature histogram.
 pub struct SearchResult {
     pub is_splittable: bool,
@@ -190,7 +225,7 @@ pub fn find_best_threshold_numerical(
     sum_hessian: f64,
     num_data: i32,
     parent_output: f64,
-    mc: Option<(f64, f64)>,
+    mc: Mc<'_>,
     output: &mut SplitInfo,
 ) -> bool {
     output.default_left = true;
@@ -199,19 +234,36 @@ pub fn find_best_threshold_numerical(
     let use_l1 = p.lambda_l1 > 0.0;
     let use_max = p.max_delta_step > 0.0;
     let use_smooth = p.path_smooth > EPS;
+    // Two instantiations per variant: the unconstrained scan carries no bounds state (upstream:
+    // the `USE_MC` template), and the constrained one reads `mc`.
+    let mc_on = !matches!(mc, Mc::Off);
     macro_rules! go {
         ($r:literal, $l1:literal, $mx:literal, $sm:literal) => {
-            numerical::<$r, $l1, $mx, $sm>(
-                hist,
-                meta,
-                p,
-                sum_gradient,
-                sum_hessian,
-                num_data,
-                parent_output,
-                mc,
-                output,
-            )
+            if mc_on {
+                numerical::<$r, $l1, $mx, $sm, true>(
+                    hist,
+                    meta,
+                    p,
+                    sum_gradient,
+                    sum_hessian,
+                    num_data,
+                    parent_output,
+                    mc,
+                    output,
+                )
+            } else {
+                numerical::<$r, $l1, $mx, $sm, false>(
+                    hist,
+                    meta,
+                    p,
+                    sum_gradient,
+                    sum_hessian,
+                    num_data,
+                    parent_output,
+                    mc,
+                    output,
+                )
+            }
         };
     }
     let splittable = match (p.extra_trees, use_l1, use_max, use_smooth) {
@@ -238,7 +290,13 @@ pub fn find_best_threshold_numerical(
 
 /// upstream: the `find_best_threshold_fun_` lambdas built by `FuncForNumricalL3`.
 #[allow(clippy::too_many_arguments)]
-fn numerical<const RAND: bool, const L1: bool, const MAX_OUT: bool, const SMOOTH: bool>(
+fn numerical<
+    const RAND: bool,
+    const L1: bool,
+    const MAX_OUT: bool,
+    const SMOOTH: bool,
+    const MC: bool,
+>(
     hist: &[f64],
     meta: &mut FeatureMeta,
     p: &SplitParams,
@@ -246,7 +304,7 @@ fn numerical<const RAND: bool, const L1: bool, const MAX_OUT: bool, const SMOOTH
     sum_hessian: f64,
     num_data: i32,
     parent_output: f64,
-    mc: Option<(f64, f64)>,
+    mc: Mc<'_>,
     output: &mut SplitInfo,
 ) -> bool {
     // upstream: BeforeNumerical
@@ -277,7 +335,7 @@ fn numerical<const RAND: bool, const L1: bool, const MAX_OUT: bool, const SMOOTH
     );
     macro_rules! seq {
         ($rev:literal, $skip:literal, $na:literal) => {
-            splittable |= sequential::<RAND, L1, MAX_OUT, SMOOTH, $rev, $skip, $na>(
+            splittable |= sequential::<RAND, L1, MAX_OUT, SMOOTH, $rev, $skip, $na, MC>(
                 hist, meta, p, args, mc, output,
             )
         };
@@ -311,6 +369,7 @@ fn sequential<
     const REVERSE: bool,
     const SKIP_DEFAULT_BIN: bool,
     const NA_AS_MISSING: bool,
+    const MC: bool,
 >(
     hist: &[f64],
     meta: &FeatureMeta,
@@ -323,7 +382,7 @@ fn sequential<
         i32,
         f64,
     ),
-    mc: Option<(f64, f64)>,
+    mc: Mc<'_>,
     output: &mut SplitInfo,
 ) -> bool {
     let offset = meta.offset;
@@ -337,64 +396,73 @@ fn sequential<
     let grad = |t: i32| hist[(t as usize) << 1];
     let hess = |t: i32| hist[((t as usize) << 1) + 1];
     let mono = meta.monotone_type;
-    let mc_invalid = mc.is_some_and(|(lo, hi)| lo > hi);
-    let gains = |slg: f64, slh: f64, srg: f64, srh: f64, lc: i32, rc: i32| {
-        if let Some((mn, mx)) = mc {
-            // upstream: GetSplitGains<USE_MC>: clamped outputs, monotone direction check.
-            let lo = clamp_to(
-                calculate_splitted_leaf_output::<L1, MAX_OUT, SMOOTH>(
-                    slg,
-                    slh,
-                    p.lambda_l1,
-                    p.lambda_l2,
-                    p.max_delta_step,
-                    p.path_smooth,
-                    lc,
-                    parent_output,
-                ),
-                mn,
-                mx,
-            );
-            let ro = clamp_to(
-                calculate_splitted_leaf_output::<L1, MAX_OUT, SMOOTH>(
-                    srg,
-                    srh,
-                    p.lambda_l1,
-                    p.lambda_l2,
-                    p.max_delta_step,
-                    p.path_smooth,
-                    rc,
-                    parent_output,
-                ),
-                mn,
-                mx,
-            );
-            if (mono > 0 && lo > ro) || (mono < 0 && lo < ro) {
-                return 0.0;
-            }
-            return leaf_gain_given_output::<L1>(slg, slh, p.lambda_l1, p.lambda_l2, lo)
-                + leaf_gain_given_output::<L1>(srg, srh, p.lambda_l1, p.lambda_l2, ro);
-        }
-        leaf_gain::<L1, MAX_OUT, SMOOTH>(
-            slg,
-            slh,
-            p.lambda_l1,
-            p.lambda_l2,
-            p.max_delta_step,
-            p.path_smooth,
-            lc,
-            parent_output,
-        ) + leaf_gain::<L1, MAX_OUT, SMOOTH>(
-            srg,
-            srh,
-            p.lambda_l1,
-            p.lambda_l2,
-            p.max_delta_step,
-            p.path_smooth,
-            rc,
-            parent_output,
-        )
+    // Without monotone constraints (`MC = false`) none of this state exists.
+    let mut cum: Option<Cumulative> = match mc {
+        Mc::Cumulative(feature) if MC => Some(Cumulative::new(feature, REVERSE)),
+        _ => None,
     };
+    // upstream: `constraint_update_necessary`
+    let varies = MC && matches!(mc, Mc::Cumulative(feature) if feature.varies_by_threshold());
+    // the bounds of the best candidate so far (upstream: `best_left/right_constraints`)
+    let mut best_bounds: Option<ChildBounds> = None;
+    let gains =
+        |slg: f64, slh: f64, srg: f64, srh: f64, lc: i32, rc: i32, b: Option<ChildBounds>| {
+            if let Some(((lmin, lmax), (rmin, rmax))) = b {
+                // upstream: GetSplitGains<USE_MC>: clamped outputs, monotone direction check.
+                let lo = clamp_to(
+                    calculate_splitted_leaf_output::<L1, MAX_OUT, SMOOTH>(
+                        slg,
+                        slh,
+                        p.lambda_l1,
+                        p.lambda_l2,
+                        p.max_delta_step,
+                        p.path_smooth,
+                        lc,
+                        parent_output,
+                    ),
+                    lmin,
+                    lmax,
+                );
+                let ro = clamp_to(
+                    calculate_splitted_leaf_output::<L1, MAX_OUT, SMOOTH>(
+                        srg,
+                        srh,
+                        p.lambda_l1,
+                        p.lambda_l2,
+                        p.max_delta_step,
+                        p.path_smooth,
+                        rc,
+                        parent_output,
+                    ),
+                    rmin,
+                    rmax,
+                );
+                if (mono > 0 && lo > ro) || (mono < 0 && lo < ro) {
+                    return 0.0;
+                }
+                return leaf_gain_given_output::<L1>(slg, slh, p.lambda_l1, p.lambda_l2, lo)
+                    + leaf_gain_given_output::<L1>(srg, srh, p.lambda_l1, p.lambda_l2, ro);
+            }
+            leaf_gain::<L1, MAX_OUT, SMOOTH>(
+                slg,
+                slh,
+                p.lambda_l1,
+                p.lambda_l2,
+                p.max_delta_step,
+                p.path_smooth,
+                lc,
+                parent_output,
+            ) + leaf_gain::<L1, MAX_OUT, SMOOTH>(
+                srg,
+                srh,
+                p.lambda_l1,
+                p.lambda_l2,
+                p.max_delta_step,
+                p.path_smooth,
+                rc,
+                parent_output,
+            )
+        };
 
     if REVERSE {
         let mut sum_right_gradient = 0.0f64;
@@ -430,6 +498,14 @@ fn sequential<
                 t -= 1;
                 continue;
             }
+            if let Some(c) = cum.as_mut().filter(|_| varies) {
+                c.update(t + offset);
+            }
+            let bounds = if MC {
+                child_bounds(mc, cum.as_ref())
+            } else {
+                None
+            };
             let current_gain = gains(
                 sum_left_gradient,
                 sum_left_hessian,
@@ -437,18 +513,25 @@ fn sequential<
                 sum_right_hessian,
                 left_count,
                 right_count,
+                bounds,
             );
             if current_gain <= min_gain_shift {
                 t -= 1;
                 continue;
             }
             is_splittable = true;
-            if current_gain > best_gain && !mc_invalid {
-                best_left_count = left_count;
-                best_sum_left_gradient = sum_left_gradient;
-                best_sum_left_hessian = sum_left_hessian;
-                best_threshold = (t - 1 + offset) as u32;
-                best_gain = current_gain;
+            if current_gain > best_gain {
+                // upstream: the best constraints are taken before the validity check, so an
+                // invalid candidate still overwrites them
+                best_bounds = bounds;
+                let valid = bounds.is_none_or(|(l, r)| l.0 <= l.1 && r.0 <= r.1);
+                if valid {
+                    best_left_count = left_count;
+                    best_sum_left_gradient = sum_left_gradient;
+                    best_sum_left_hessian = sum_left_hessian;
+                    best_threshold = (t - 1 + offset) as u32;
+                    best_gain = current_gain;
+                }
             }
             t -= 1;
         }
@@ -499,6 +582,14 @@ fn sequential<
                 t += 1;
                 continue;
             }
+            if let Some(c) = cum.as_mut().filter(|_| varies) {
+                c.update(t + offset);
+            }
+            let bounds = if MC {
+                child_bounds(mc, cum.as_ref())
+            } else {
+                None
+            };
             let current_gain = gains(
                 sum_left_gradient,
                 sum_left_hessian,
@@ -506,18 +597,23 @@ fn sequential<
                 sum_right_hessian,
                 left_count,
                 right_count,
+                bounds,
             );
             if current_gain <= min_gain_shift {
                 t += 1;
                 continue;
             }
             is_splittable = true;
-            if current_gain > best_gain && !mc_invalid {
-                best_left_count = left_count;
-                best_sum_left_gradient = sum_left_gradient;
-                best_sum_left_hessian = sum_left_hessian;
-                best_threshold = (t + offset) as u32;
-                best_gain = current_gain;
+            if current_gain > best_gain {
+                best_bounds = bounds;
+                let valid = bounds.is_none_or(|(l, r)| l.0 <= l.1 && r.0 <= r.1);
+                if valid {
+                    best_left_count = left_count;
+                    best_sum_left_gradient = sum_left_gradient;
+                    best_sum_left_hessian = sum_left_hessian;
+                    best_threshold = (t + offset) as u32;
+                    best_gain = current_gain;
+                }
             }
             t += 1;
         }
@@ -526,7 +622,7 @@ fn sequential<
     // upstream reads the member `is_splittable_`, which may already be true from the
     // other direction's scan; the caller ORs the results, and we check both here.
     if is_splittable && best_gain > output.gain + min_gain_shift {
-        let out = |sg: f64, sh: f64, n: i32| {
+        let out = |sg: f64, sh: f64, n: i32, side: Option<(f64, f64)>| {
             let v = calculate_splitted_leaf_output::<L1, MAX_OUT, SMOOTH>(
                 sg,
                 sh,
@@ -537,13 +633,14 @@ fn sequential<
                 n,
                 parent_output,
             );
-            clamp_opt(v, mc)
+            clamp_opt(v, side)
         };
         output.threshold = best_threshold;
         output.left_output = out(
             best_sum_left_gradient,
             best_sum_left_hessian,
             best_left_count,
+            best_bounds.map(|b| b.0),
         );
         output.left_count = best_left_count;
         output.left_sum_gradient = best_sum_left_gradient;
@@ -552,6 +649,7 @@ fn sequential<
             sum_gradient - best_sum_left_gradient,
             sum_hessian - best_sum_left_hessian,
             num_data - best_left_count,
+            best_bounds.map(|b| b.1),
         );
         output.right_count = num_data - best_left_count;
         output.right_sum_gradient = sum_gradient - best_sum_left_gradient;
@@ -755,9 +853,10 @@ pub fn find_best_threshold_categorical(
     sum_hessian: f64,
     num_data: i32,
     parent_output: f64,
-    mc: Option<(f64, f64)>,
+    mc: Mc<'_>,
     output: &mut SplitInfo,
 ) -> bool {
+    let mc = mc.fixed();
     // upstream: FindBestThreshold adds 2 * kEpsilon before dispatching
     let sum_hessian = sum_hessian + 2.0 * EPS;
     output.default_left = false;

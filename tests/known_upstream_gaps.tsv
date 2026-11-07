@@ -5,8 +5,5 @@
 tests/python_package_test/test_engine.py::test_linear_single_leaf	linear_tree training and model I/O (ROADMAP P3 linear_tree)
 tests/python_package_test/test_engine.py::test_linear_trees	linear_tree training and model I/O (ROADMAP P3 linear_tree)
 tests/python_package_test/test_engine.py::test_linear_trees_num_threads	linear_tree training and model I/O (ROADMAP P3 linear_tree)
-tests/python_package_test/test_engine.py::test_monotone_constraints[False]	monotone constraints beyond basic (ROADMAP P3 monotone)
 tests/python_package_test/test_engine.py::test_monotone_constraints[True]	monotone constraints beyond basic (ROADMAP P3 monotone)
-tests/python_package_test/test_engine.py::test_monotone_penalty	monotone constraints beyond basic (ROADMAP P3 monotone)
-tests/python_package_test/test_engine.py::test_monotone_penalty_max	monotone constraints beyond basic (ROADMAP P3 monotone)
 tests/python_package_test/test_engine.py::test_save_and_load_linear	linear_tree training and model I/O (ROADMAP P3 linear_tree)

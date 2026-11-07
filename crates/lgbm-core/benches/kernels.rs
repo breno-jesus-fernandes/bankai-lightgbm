@@ -11,7 +11,7 @@ use lgbm_core::meta::MissingType;
 use lgbm_core::predictor::{PredictConfig, Predictor};
 use lgbm_core::treelearner::data_partition::{DataPartition, SplitRule};
 use lgbm_core::treelearner::feature_histogram::{
-    FeatureMeta, SplitParams, find_best_threshold_numerical,
+    FeatureMeta, Mc, SplitParams, find_best_threshold_numerical,
 };
 use lgbm_core::treelearner::histogram::{CheckedBins, CheckedRows, construct};
 use lgbm_core::treelearner::split_info::SplitInfo;
@@ -108,7 +108,7 @@ fn split_finding(c: &mut Criterion) {
                 204_000.0,
                 200_000,
                 0.0,
-                None,
+                Mc::Off,
                 &mut output,
             );
             black_box(output.gain);
