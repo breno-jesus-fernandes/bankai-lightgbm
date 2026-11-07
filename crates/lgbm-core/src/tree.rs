@@ -482,6 +482,9 @@ impl Tree {
         self.num_leaves = 1;
         self.shrinkage = 1.0;
         self.leaf_value[0] = val;
+        if self.is_linear {
+            self.leaf_const[0] = val;
+        }
         self.leaf_count[0] = count;
     }
 
