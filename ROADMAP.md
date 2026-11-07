@@ -11,11 +11,11 @@ the steps) start after step 3.
 
 ### Step 1: Python surface (P6)
 Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow.
-- [ ] sklearn estimators: `LGBMModel`, `LGBMClassifier`, `LGBMRegressor`, `LGBMRanker`
+- [x] sklearn estimators: `LGBMModel`, `LGBMClassifier`, `LGBMRegressor`, `LGBMRanker`
       (names, signatures, defaults, `fit`/`predict`/`predict_proba`, `LightGBMError` behavior as upstream)
       Ported and parity-tested (`tests/parity/test_sklearn_parity.py`): regression, binary and multiclass classification,
       ranking, `eval_set` with early stopping, `feature_importances_`, pandas feature names (also in the model text).
-      Still missing: `LightGBMError` cases beyond the input-length check, and `set_params`/`get_params` edge cases.
+      Error type and message match upstream for the ranker group checks, custom objective and eval arity, `eval_X`/`eval_set` mixing, unfitted estimators and feature-count mismatch; `get_params`, `set_params` and `clone` match too (`test_error_type_and_message_match_upstream`). Upstream `sklearn.py` raises `LightGBMError` only at the input-length check, which bankai also has.
 - [x] Plotting helpers: `plot_importance`, `plot_split_value_histogram`, `plot_metric`, `plot_tree`, `create_tree_digraph`
 - [ ] Port upstream `tests/python_package_test` and run it green against `bankai_lightgbm`
       Done: all ported files in `tests/python_package_test` (`test_plotting`, `test_sklearn`, `test_basic`,
