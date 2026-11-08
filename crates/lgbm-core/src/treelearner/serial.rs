@@ -22,7 +22,7 @@ use std::sync::Arc;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::io::bin::BinType;
-use crate::io::bin_data::BinData;
+use crate::io::bin_data::{BinData, DenseBin};
 use crate::io::dataset::{Dataset, GroupData};
 use crate::tree::Tree;
 use crate::treelearner::multi_val::MultiValBin;
@@ -140,6 +140,8 @@ pub struct SerialTreeLearner {
     multi_val: Option<(usize, MultiValBin)>,
     /// Per-block histograms of the multi-value group, reused across leaves.
     multi_val_scratch: Vec<f64>,
+    /// `force_row_wise`: the dense single-value groups are built in one row-major pass.
+    row_wise: bool,
     col_sampler: ColSampler,
     splits: Vec<SplitRecord>,
     pub partition: DataPartition,
@@ -183,6 +185,7 @@ impl SerialTreeLearner {
     /// upstream: `SerialTreeLearner::Init` (col-wise histogram layout).
     pub fn new(cfg: Arc<Config>, ds: Arc<Dataset>, is_constant_hessian: bool) -> Result<Self> {
         let l = &ds.layout;
+        let row_wise = cfg.force_row_wise;
         if cfg.histogram_pool_size > 0.0 {
             return Err(Error::Unsupported(
                 "histogram_pool_size > 0 (LRU histogram cache)".into(),
@@ -324,6 +327,7 @@ impl SerialTreeLearner {
             checked_bins,
             multi_val,
             multi_val_scratch: Vec::new(),
+            row_wise,
             col_sampler,
             splits: Vec::new(),
             partition: DataPartition::new(num_data, num_leaves),
@@ -641,21 +645,46 @@ impl SerialTreeLearner {
             }
         };
         let hist = &mut self.pool.slots[slot];
-        let parallel_done = match self.spin.as_ref() {
-            Some(pool) if jobs.len() > 1 && leaf_cnt * jobs.len() >= PARALLEL_HIST_MIN_WORK => {
-                // Groups own disjoint, ascending bin ranges.
-                let ranges: Vec<(usize, usize)> = jobs
-                    .iter()
-                    .map(|&(_, gs, nb)| (gs * 2, (gs + nb) * 2))
-                    .collect();
-                pool.for_each_range_mut(&mut hist[..], &ranges, |j, out| build(jobs[j].0, out))
-                    .is_ok()
+        if self.row_wise {
+            // upstream: the row-wise layout (`force_row_wise`) reads each row once for every
+            // dense group. Each bin still adds its rows in leaf order, as the column-wise
+            // kernel does, so the sums are the same.
+            let groups: Vec<(&DenseBin, usize, usize)> = jobs
+                .iter()
+                .filter_map(|&(gi, gs, nb)| match &ds.data[gi] {
+                    GroupData::Single(BinData::Dense(bin)) => Some((bin, gs, nb)),
+                    _ => None,
+                })
+                .collect();
+            for &(_, gs, nb) in &jobs {
+                hist[gs * 2..(gs + nb) * 2].fill(0.0);
             }
-            _ => false,
-        };
-        if !parallel_done {
-            for &(gi, gs, nb) in &jobs {
-                build(gi, &mut hist[gs * 2..(gs + nb) * 2]);
+            construct_row_wise(&groups, indices, og, oh, const_hess, hist);
+            if const_hess {
+                let h0 = f64::from(hessians[0]);
+                for &(_, gs, nb) in &jobs {
+                    for i in (gs * 2..(gs + nb) * 2).step_by(2) {
+                        hist[i + 1] *= h0;
+                    }
+                }
+            }
+        } else {
+            let parallel_done = match self.spin.as_ref() {
+                Some(pool) if jobs.len() > 1 && leaf_cnt * jobs.len() >= PARALLEL_HIST_MIN_WORK => {
+                    // Groups own disjoint, ascending bin ranges.
+                    let ranges: Vec<(usize, usize)> = jobs
+                        .iter()
+                        .map(|&(_, gs, nb)| (gs * 2, (gs + nb) * 2))
+                        .collect();
+                    pool.for_each_range_mut(&mut hist[..], &ranges, |j, out| build(jobs[j].0, out))
+                        .is_ok()
+                }
+                _ => false,
+            };
+            if !parallel_done {
+                for &(gi, gs, nb) in &jobs {
+                    build(gi, &mut hist[gs * 2..(gs + nb) * 2]);
+                }
             }
         }
         // upstream: ConstructHistogramsMultiVal after the dense groups. Values are the same
@@ -1502,6 +1531,30 @@ fn run_feature(
         _ => None,
     };
     FeatureOutcome { small, large }
+}
+
+/// upstream: `ConstructHistogramsMultiVal` over every dense group (row-wise layout).
+/// `groups` holds `(column, first bin, bins)` per group. Position `i` of `og`/`oh` is the
+/// row `indices[i]` (or row `i` without indices). With constant hessians, `oh` is not read
+/// and each row counts 1, as in `histogram::construct`.
+fn construct_row_wise(
+    groups: &[(&DenseBin, usize, usize)],
+    indices: Option<&[i32]>,
+    og: &[f32],
+    oh: &[f32],
+    const_hess: bool,
+    hist: &mut [f64],
+) {
+    for (i, &g) in og.iter().enumerate() {
+        let row = indices.map_or(i, |ix| ix[i] as usize);
+        let grad = f64::from(g);
+        let hess = if const_hess { 1.0 } else { f64::from(oh[i]) };
+        for &(bin, gs, _) in groups {
+            let ti = (gs + bin.get(row) as usize) * 2;
+            hist[ti] += grad;
+            hist[ti + 1] += hess;
+        }
+    }
 }
 
 /// upstream: `Dataset::FixHistogram` on one feature's `num_bin` bins (the body of
