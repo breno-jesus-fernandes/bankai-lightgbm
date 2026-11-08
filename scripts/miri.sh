@@ -4,4 +4,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo +nightly miri test -q -p lgbm-core --lib histogram
+# utils::spin_pool holds the only other unsafe code (lifetime-erased job pointer), SPEC-CONC-5.
+cargo +nightly miri test -q -p lgbm-core --lib spin_pool
 echo "miri.sh: clean"
