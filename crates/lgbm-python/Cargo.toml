@@ -15,6 +15,10 @@ log.workspace = true
 pyo3 = { version = "0.25", features = ["abi3-py311"] }
 numpy = "0.25"
 
+[dev-dependencies]
+# The guard tests create real Python exceptions, so they need an embedded interpreter.
+pyo3 = { version = "0.25", features = ["auto-initialize"] }
+
 [features]
 # maturin enables this; plain `cargo test` must not, or linking fails on macOS.
 extension-module = ["pyo3/extension-module"]
