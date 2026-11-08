@@ -157,3 +157,29 @@ python scripts/gen_fixtures.py
 - Throwaway timing tests live outside the repository (the session scratchpad). Do not commit them, and do not leave untracked files in the repo.
 - A test used only for investigation is marked `#[ignore]` and run with `cargo test --release -- --ignored --nocapture`. If it is worth keeping, convert it into a criterion benchmark or a proper test first.
 - Results from an experiment go into the PR or CHANGELOG notes with the commands used to reproduce them.
+
+## 13. Autonomous operation
+
+This section applies to agents working without a human in the loop. `SPEC.md` is the contract, `PROGRESS.md` is the order of work, and `DECISIONS.md` is the log of choices.
+
+### Zero-question directive
+- When a question is ambiguous, do this in order: (1) read `SPEC.md`; (2) read the upstream source at the pinned tag; (3) choose the most idiomatic zero-overhead Rust or Python option consistent with both; (4) append a `DECISIONS.md` entry (format in that file); (5) continue.
+- Pause only for the stop list in section 9 (CI gates, deleting data or branches, force-pushes, work outside the repository).
+
+### Test immutability
+- Two roles. **Harness**: may add tests, fixtures and generator scripts. Never edits `src/`. **Translation**: may edit `src/` and `python/`, and may only add tests.
+- A Translation agent does not edit or delete an existing assertion, relax a tolerance, add `#[ignore]`, `xfail`, `skip`, or `known_upstream_gaps.tsv` lines, mock core logic, or regenerate a fixture to make a test pass.
+- A wrong test is fixed by the Harness role in its own commit, with the reason written in the commit message and in `DECISIONS.md`.
+- Enforcement is planned (guard script and CODEOWNERS, see the governance plan). Until it exists, this rule is binding by review.
+
+### Per-node loop (PROGRESS.md)
+- **A.** Pick the first node in `PROGRESS.md` whose dependencies are all `[x]`.
+- **B.** Write the failing test (Harness commit). Run it and record the failure.
+- **C.** Implement the minimum to pass (Translation commit).
+- **D.** Run the gates in order: `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `maturin develop -r`, `pytest tests/parity tests/python_package_test`, then the stage diff when it exists, then the benchmark if the node is on the hot path.
+- **E.** Mark the node `[x]` in `PROGRESS.md`, tick the matching item in `ROADMAP.md`, update `CHANGELOG.md`, and commit and push only when every gate passed.
+- Three consecutive red attempts on one node: mark it `[!] Blocked`, log why in `DECISIONS.md`, and move to the next independent node. Never loosen a test to get past a block.
+
+### Commit hygiene for this loop
+- Each green step is one commit with a Conventional Commits message.
+- A node that is not green stays uncommitted, or stays out of the branch.
