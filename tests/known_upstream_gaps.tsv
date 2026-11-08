@@ -3,3 +3,17 @@
 # fails the run, so delete the line when the gap is closed. Generated from a full run of
 # tests/python_package_test; keep it in sync with the ROADMAP.
 tests/python_package_test/test_engine.py::test_monotone_constraints[True]	documented exception: monotone_constraints_method=advanced with categorical features is refused with Unsupported, because upstream reads an uninitialised cumulative view in its categorical search (ROADMAP P3 monotone, decision 2026-11-07)
+tests/python_package_test/test_basic.py::test_booster_eval_adds_new_valid_dataset	ROADMAP P3 'Row-wise training layout' (force_row_wise is refused with LightGBMError until the row-wise histogram layout lands)
+tests/python_package_test/test_consistency.py::test_binary	ROADMAP P3 'Row-wise training layout' (force_row_wise is refused with LightGBMError until the row-wise histogram layout lands)
+tests/python_package_test/test_consistency.py::test_binary_linear	ROADMAP P3 'Row-wise training layout' (force_row_wise is refused with LightGBMError until the row-wise histogram layout lands)
+tests/python_package_test/test_consistency.py::test_multiclass	ROADMAP P3 'Row-wise training layout' (force_row_wise is refused with LightGBMError until the row-wise histogram layout lands)
+tests/python_package_test/test_consistency.py::test_regression	ROADMAP P3 'Row-wise training layout' (force_row_wise is refused with LightGBMError until the row-wise histogram layout lands)
+tests/python_package_test/test_consistency.py::test_lambdarank	ROADMAP P3 'Row-wise training layout' (force_row_wise is refused with LightGBMError until the row-wise histogram layout lands)
+tests/python_package_test/test_consistency.py::test_xendcg	ROADMAP P3 'Row-wise training layout' (force_row_wise is refused with LightGBMError until the row-wise histogram layout lands)
+tests/python_package_test/test_engine.py::test_goss_boosting_and_strategy_equivalent	ROADMAP P3 'Row-wise training layout' (force_row_wise is refused with LightGBMError until the row-wise histogram layout lands)
+tests/python_package_test/test_engine.py::test_sample_strategy_with_boosting	ROADMAP P3 'Row-wise training layout' (force_row_wise is refused with LightGBMError until the row-wise histogram layout lands)
+tests/python_package_test/test_sklearn.py::test_subclassing_works[ranking]	ROADMAP P3 'Row-wise training layout' (force_row_wise is refused with LightGBMError until the row-wise histogram layout lands)
+tests/python_package_test/test_sklearn.py::test_subclassing_works[binary-classification]	ROADMAP P3 'Row-wise training layout' (force_row_wise is refused with LightGBMError until the row-wise histogram layout lands)
+tests/python_package_test/test_sklearn.py::test_subclassing_works[multiclass-classification]	ROADMAP P3 'Row-wise training layout' (force_row_wise is refused with LightGBMError until the row-wise histogram layout lands)
+tests/python_package_test/test_sklearn.py::test_subclassing_works[regression]	ROADMAP P3 'Row-wise training layout' (force_row_wise is refused with LightGBMError until the row-wise histogram layout lands)
+tests/python_package_test/test_sklearn.py::test_eval_X_eval_y_eval_set_equivalence	ROADMAP P3 'Row-wise training layout' (force_row_wise is refused with LightGBMError until the row-wise histogram layout lands)
