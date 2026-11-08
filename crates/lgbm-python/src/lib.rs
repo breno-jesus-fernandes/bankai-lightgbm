@@ -13,7 +13,7 @@ use lgbm_core::metric::create_metric;
 use lgbm_core::predictor::{PredictConfig, PredictKind, Predictor};
 use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::create_exception;
-use pyo3::exceptions::PyException;
+use pyo3::exceptions::{PyException, PyTypeError};
 use pyo3::prelude::*;
 
 create_exception!(
@@ -92,6 +92,34 @@ impl RawRows {
     }
 }
 
+/// A 2-D float32 or float64 array as a row-major `f64` buffer, whatever its memory layout.
+///
+/// The widening happens in the copy that binning needs anyway, so Python never allocates a
+/// float64 copy of the matrix (AGENTS.md section 7). upstream: `LGBM_DatasetCreateFromMat`
+/// reads float32 and float64 rows directly.
+fn dense_row_major(data: &Bound<'_, PyAny>) -> PyResult<(Vec<f64>, usize, usize)> {
+    if let Ok(array) = data.downcast::<PyArray2<f64>>() {
+        let view = array.readonly();
+        let view = view.as_array();
+        let (nrow, ncol) = view.dim();
+        // A C-contiguous matrix is one memcpy; any other layout is gathered in row-major order.
+        let values = match view.as_slice() {
+            Some(slice) => slice.to_vec(),
+            None => view.iter().copied().collect(),
+        };
+        return Ok((values, nrow, ncol));
+    }
+    if let Ok(array) = data.downcast::<PyArray2<f32>>() {
+        let view = array.readonly();
+        let view = view.as_array();
+        let (nrow, ncol) = view.dim();
+        return Ok((view.iter().map(|&v| f64::from(v)).collect(), nrow, ncol));
+    }
+    Err(PyTypeError::new_err(
+        "data must be a 2-D float32 or float64 array",
+    ))
+}
+
 #[pymethods]
 impl NativeDataset {
     /// Load a binary dataset file written by `save_binary` (upstream `DatasetLoader::LoadFromBinFile`).
@@ -119,7 +147,7 @@ impl NativeDataset {
     #[allow(clippy::too_many_arguments)] // Python Dataset constructor arguments.
     fn from_dense(
         py: Python<'_>,
-        data: PyReadonlyArray2<'_, f64>,
+        data: Bound<'_, PyAny>,
         label: Vec<f64>,
         params: HashMap<String, String>,
         categorical: Vec<i32>,
@@ -130,12 +158,7 @@ impl NativeDataset {
         feature_names: Option<Vec<String>>,
         two_round: bool,
     ) -> PyResult<Self> {
-        let shape = data.shape().to_vec();
-        let values = data
-            .as_slice()
-            .map_err(|_| LightGBMError::new_err("data must be C-contiguous"))?
-            .to_vec();
-        let (nrow, ncol) = (shape[0], shape[1]);
+        let (values, nrow, ncol) = dense_row_major(&data)?;
         let reference = reference.map(|r| Arc::clone(&r.ds));
         let ds = py
             .allow_threads(|| -> lgbm_core::Result<Dataset> {

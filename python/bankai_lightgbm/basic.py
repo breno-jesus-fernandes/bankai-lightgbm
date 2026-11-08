@@ -105,6 +105,16 @@ def _check_for_bad_pandas_dtypes(pandas_dtypes_series: pd_Series) -> None:
         )
 
 
+def _dense_native_input(data: Any) -> npt.NDArray[Any]:
+    """float32 and float64 ndarrays pass through in any memory layout; other input becomes float64.
+
+    upstream: ``__init_from_np2d`` keeps float32 and float64 matrices and only fixes the layout.
+    """
+    if isinstance(data, np.ndarray) and data.dtype in (np.float32, np.float64):
+        return data
+    return np.asarray(data, dtype=np.float64)
+
+
 def _list_to_1d_numpy(*, data: Any, dtype: npt.DTypeLike, name: str) -> npt.NDArray[Any]:
     """Convert data to numpy 1-D array.
 
@@ -1740,17 +1750,16 @@ class Dataset:
             and all(isinstance(x, np.ndarray) and x.ndim == 2 for x in self.data)
         ):
             # upstream: Dataset.__init_from_list_np2d concatenates the matrices by rows
-            matrix = np.vstack(self.data)
+            matrix = _dense_native_input(np.vstack(self.data))
         else:
             # upstream: _data_from_pyarrow_table and _data_from_polars_frame take the column names.
             table_columns = _table_column_names(self.data)
             if table_columns is not None:
                 feature_names = table_columns
-            matrix = np.asarray(self.data, dtype=np.float64)
+            matrix = _dense_native_input(self.data)
         if matrix is not None:
             if matrix.ndim != 2:
                 raise ValueError("Input data must be 2-dimensional")
-            matrix = np.ascontiguousarray(matrix, dtype=np.float64)
             n = matrix.shape[0]
         if self.position is None:
             self._position = None
