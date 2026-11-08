@@ -106,14 +106,6 @@ impl GbdtTrainer {
         if !matches!(cfg.boosting.as_str(), "gbdt" | "rf" | "dart") {
             return Err(Error::Unsupported(format!("boosting={}", cfg.boosting)));
         }
-        // The config sets force_row_wise for device_type=cuda on its own (upstream config.cpp);
-        // bankai has no CUDA learner yet (ROADMAP P8), so only the user's explicit request is refused.
-        if cfg.force_row_wise && cfg.device_type != "cuda" {
-            return Err(Error::Unsupported(
-                "force_row_wise=true: the row-wise histogram layout is not implemented yet (ROADMAP P3)"
-                    .into(),
-            ));
-        }
         if cfg.boosting == "rf" && cfg.objective == "custom" {
             return Err(Error::InvalidParameter(
                 "RF mode do not support custom objective function, please use built-in objectives."
@@ -1126,29 +1118,51 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::GbdtTrainer;
-    use crate::Error;
     use crate::config::Config;
     use crate::io::dataset::Dataset;
     use std::collections::HashMap;
     use std::sync::Arc;
 
     #[test]
-    fn force_row_wise_is_refused_until_the_row_wise_layout_lands() {
-        // upstream: force_row_wise selects the row-wise histogram layout; bankai has only the
-        // column-wise one, so it must refuse rather than train col-wise silently (AGENTS section 8).
-        let params = HashMap::from([
-            ("objective".to_owned(), "regression".to_owned()),
-            ("force_row_wise".to_owned(), "true".to_owned()),
-        ]);
-        let config = Arc::new(Config::from_params(&params).unwrap());
+    fn row_wise_layout_trains_the_same_model_as_column_wise() {
+        // upstream: force_row_wise builds histograms row by row; each bin accumulates its rows
+        // in the same order as column-wise, so the models must be identical.
+        let base = [
+            ("objective", "regression"),
+            ("num_leaves", "3"),
+            ("min_data_in_leaf", "1"),
+            ("min_data_in_bin", "1"),
+            ("max_bin", "8"),
+            ("boost_from_average", "false"),
+            ("num_iterations", "3"),
+        ];
         let features = (0..8).map(f64::from).collect::<Vec<_>>();
         let labels = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
-        let dataset =
-            Arc::new(Dataset::from_dense(&features, 8, 1, &labels, &config, &[]).unwrap());
-        let result = GbdtTrainer::new(config, dataset);
-        assert!(
-            matches!(&result, Err(Error::Unsupported(msg)) if msg.contains("force_row_wise")),
-            "force_row_wise must be refused, not trained silently"
+        let train = |layout: &str| {
+            let mut params = base
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect::<HashMap<_, _>>();
+            params.insert(layout.to_owned(), "true".to_owned());
+            let config = Arc::new(Config::from_params(&params).unwrap());
+            let dataset =
+                Arc::new(Dataset::from_dense(&features, 8, 1, &labels, &config, &[]).unwrap());
+            super::Gbdt::train_shared(config, dataset)
+                .unwrap()
+                .save_model_to_string(0, -1, 0)
+                .unwrap()
+        };
+        // Compare the trees only: the trailing parameters block echoes the layout flag itself.
+        let trees = |model: String| {
+            model
+                .split("\nparameters:")
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert_eq!(
+            trees(train("force_row_wise")),
+            trees(train("force_col_wise"))
         );
     }
 
