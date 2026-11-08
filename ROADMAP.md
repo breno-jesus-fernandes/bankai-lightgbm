@@ -28,7 +28,7 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
       Open work from the list: the "not triaged" entries (pandas dtypes, early-stopping
       naming, categorical handle).
 - Gap order: (1) the smaller Python-surface gaps ("not triaged" P6 entries, pandas dtypes, Dataset and Booster surface, early stopping, callbacks, zero-copy input, log callback); (2) the large features last: linear_tree, refit, cv/CVBooster, forced splits, monotone beyond basic, CEGB, continued training, RF, bagging_by_query, position bias.
-- Zero-copy input (AGENTS.md section 7): the Python helpers are ported (`_np2d_to_np1d` keeps float32/float64 and column-major layouts; pandas frames with one float dtype keep it, and the six `test_no_copy_*` cases pass). Open: the native layer still receives float64 row-major data, so float32 input is converted at the boundary; a native float32 or column-major path is not done.
+- Zero-copy input (AGENTS.md section 7): the Python helpers are ported (`_np2d_to_np1d` keeps float32/float64 and column-major layouts; pandas frames with one float dtype keep it, and the six `test_no_copy_*` cases pass). The native layer now takes float32 and column-major input directly (#79, `test_zero_copy_input.py`), so Python makes no float64 copy. Open: the native layer still makes one float64 row-major copy for binning and keeps it as raw rows; removing that needs a generic binning path.
 - [x] `Dataset.feature_num_bin` (index or name), matching upstream's `LGBM_DatasetGetFeatureNumBin`
 - Gate: the ported upstream suite passes for everything the step names; unsupported parts raise `NotImplementedError`.
 
