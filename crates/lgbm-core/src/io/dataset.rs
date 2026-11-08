@@ -5,7 +5,7 @@
 use rayon::prelude::*;
 
 use super::bin::{BinMapper, BinType, K_SPARSE_THRESHOLD};
-use super::bin_data::{BinData, DenseBin, SparseBin};
+use super::bin_data::{BinData, DenseBin, SparseBin, SparseVals};
 use super::binary::{BINARY_FILE_TOKEN, aligned};
 use super::sample::SampleSet;
 use super::sparse::CsrMatrix;
@@ -1474,9 +1474,8 @@ impl Dataset {
 
 impl Dataset {
     /// Rebuild a Dataset from a parsed binary file, as upstream's binary constructor
-    /// (`DatasetLoader::LoadFromBinFile`, src/io/dataset_loader.cpp v4.7.0). Only dense
-    /// single-value feature groups without raw data are supported; anything else is an
-    /// explicit `Unsupported` error.
+    /// (`DatasetLoader::LoadFromBinFile`, src/io/dataset_loader.cpp v4.7.0). Dense and sparse
+    /// single-value groups and multi-value groups (one bin blob per sub-feature) are decoded.
     pub fn from_binary(bin: &crate::io::binary::BinaryDataset) -> Result<Dataset> {
         let h = &bin.header;
         let num_data = usize::try_from(h.num_data)
@@ -1484,20 +1483,23 @@ impl Dataset {
         let mut groups = Vec::with_capacity(bin.groups.len());
         let mut data = Vec::with_capacity(bin.groups.len());
         for (g, def) in bin.groups.iter().enumerate() {
-            if def.is_multi_val || def.is_dense_multi_val || def.is_sparse {
-                return Err(Error::Unsupported(
-                    "binary dataset with sparse or multi-value feature groups is not supported yet"
-                        .into(),
-                ));
-            }
             let start = usize::try_from(h.group_feature_start[g])
                 .map_err(|_| Error::Parse("feature group start".into()))?;
             let cnt = usize::try_from(h.group_feature_cnt[g])
                 .map_err(|_| Error::Parse("feature group count".into()))?;
             let features: Vec<i32> = h.real_feature_idx[start..start + cnt].to_vec();
-            let group = FeatureGroupLayout::new(features, def.bin_mappers.clone(), false, g);
-            let bins = read_dense_bins(&def.data, num_data, group.num_total_bin)?;
-            data.push(GroupData::Single(BinData::Dense(bins)));
+            let is_multi = def.is_multi_val || def.is_dense_multi_val;
+            let group = FeatureGroupLayout::new(features, def.bin_mappers.clone(), is_multi, g);
+            if is_multi {
+                let columns = read_multi_columns(&def.data, num_data, &group.bin_mappers)?;
+                data.push(GroupData::Multi(columns));
+            } else if def.is_sparse {
+                let bin = read_sparse_bins(&def.data, num_data, group.num_total_bin)?;
+                data.push(GroupData::Single(BinData::Sparse(bin)));
+            } else {
+                let bins = read_dense_bins(&def.data, num_data, group.num_total_bin)?;
+                data.push(GroupData::Single(BinData::Dense(bins)));
+            }
             groups.push(group);
         }
         let layout = DatasetLayout {
@@ -1565,6 +1567,101 @@ impl Dataset {
 
 /// Read one dense group's bins from its serialized bytes (upstream `DenseBin::LoadFromBinaryFile`).
 /// The width follows `DenseBin::new(num_data, num_total_bin)`, the same rule the writer used.
+/// Decode a sparse group's stored blob in upstream's layout (`SparseBin::LoadFromMemory`): the
+/// number of stored values, the row deltas (one trailing byte more than values), then the
+/// values. Each section is padded to 8 bytes. The value width follows the group's bin count, as
+/// in `Bin::CreateSparseBin`.
+fn read_sparse_bins(bytes: &[u8], num_data: usize, num_total_bin: u32) -> Result<SparseBin> {
+    read_sparse_bins_at(bytes, num_data, num_total_bin).map(|(bin, _)| bin)
+}
+
+/// As `read_sparse_bins`, starting at the beginning of `bytes`; also returns the padded length.
+fn read_sparse_bins_at(
+    bytes: &[u8],
+    num_data: usize,
+    num_total_bin: u32,
+) -> Result<(SparseBin, usize)> {
+    let short = || Error::Parse("binary dataset feature group data is truncated".into());
+    let head: [u8; 4] = bytes
+        .get(..4)
+        .ok_or_else(short)?
+        .try_into()
+        .map_err(|_| short())?;
+    let num_vals = usize::try_from(i32::from_le_bytes(head))
+        .map_err(|_| Error::Parse("negative sparse value count in binary dataset".into()))?;
+    let mut pos = aligned(4);
+    let deltas = bytes
+        .get(pos..pos + num_vals + 1)
+        .ok_or_else(short)?
+        .to_vec();
+    pos += aligned(num_vals + 1);
+    let width = if num_total_bin <= 256 {
+        1
+    } else if num_total_bin <= 65536 {
+        2
+    } else {
+        4
+    };
+    let raw = bytes.get(pos..pos + width * num_vals).ok_or_else(short)?;
+    let consumed = pos + aligned(width * num_vals);
+    let vals = match width {
+        1 => SparseVals::U8(raw.to_vec()),
+        2 => SparseVals::U16(
+            raw.chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect(),
+        ),
+        _ => SparseVals::U32(
+            raw.chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        ),
+    };
+    Ok((SparseBin::from_parts(num_data, deltas, vals), consumed))
+}
+
+/// Padded bytes of one dense bin blob (upstream `DenseBin::SizesInByte`).
+fn dense_blob_bytes(num_data: usize, num_total_bin: u32) -> usize {
+    aligned(match DenseBin::new(0, num_total_bin) {
+        DenseBin::U4(_) => num_data.div_ceil(2),
+        DenseBin::U8(_) => num_data,
+        DenseBin::U16(_) => 2 * num_data,
+        DenseBin::U32(_) => 4 * num_data,
+    })
+}
+
+/// The columns of a multi-value feature group (upstream `FeatureGroup::SaveBinaryToFile`): one
+/// bin blob per sub-feature, in order, sparse when its `sparse_rate` reaches the sparse
+/// threshold (upstream `FeatureGroup::CreateBinData`). Each column holds `num_bin + addi` bins.
+fn read_multi_columns(
+    bytes: &[u8],
+    num_data: usize,
+    mappers: &[BinMapper],
+) -> Result<Vec<BinData>> {
+    let mut pos = 0usize;
+    let mut columns = Vec::with_capacity(mappers.len());
+    for m in mappers {
+        let addi = u32::from(m.most_freq_bin != 0);
+        let num_bin = m.num_bin as u32 + addi;
+        let rest = bytes
+            .get(pos..)
+            .ok_or_else(|| Error::Parse("binary dataset feature group data is truncated".into()))?;
+        if m.sparse_rate >= K_SPARSE_THRESHOLD {
+            let (bin, used) = read_sparse_bins_at(rest, num_data, num_bin)?;
+            columns.push(BinData::Sparse(bin));
+            pos += used;
+        } else {
+            let used = dense_blob_bytes(num_data, num_bin);
+            let blob = rest.get(..used).ok_or_else(|| {
+                Error::Parse("binary dataset feature group data is truncated".into())
+            })?;
+            columns.push(BinData::Dense(read_dense_bins(blob, num_data, num_bin)?));
+            pos += used;
+        }
+    }
+    Ok(columns)
+}
+
 fn read_dense_bins(bytes: &[u8], num_data: usize, num_total_bin: u32) -> Result<DenseBin> {
     let short = || Error::Parse("binary dataset feature group data is truncated".into());
     Ok(match DenseBin::new(0, num_total_bin) {
@@ -1808,10 +1905,26 @@ mod subset_tests {
 
 #[cfg(test)]
 mod binary_load_tests {
-    #![allow(clippy::panic)]
+    #![allow(clippy::panic, clippy::unwrap_used)]
     use super::*;
     use crate::io::binary::BinaryDataset;
     use std::collections::HashMap;
+
+    #[test]
+    fn sparse_blob_round_trips_through_the_writer() {
+        // Rows 0, 3, 300 and 700 are non-default; 300 and 700 need a gap-filling delta entry.
+        let num_data = 1000;
+        let pairs = [(0usize, 2u32), (3, 5), (300, 9), (700, 1)];
+        let bin = SparseBin::from_sorted_pairs(num_data, 16, &pairs);
+        let mut blob = Vec::new();
+        bin.write(&mut blob);
+        let (decoded, used) = read_sparse_bins_at(&blob, num_data, 16).unwrap();
+        assert_eq!(used, blob.len());
+        assert_eq!(
+            bin_values(&BinData::Sparse(decoded)),
+            bin_values(&BinData::Sparse(bin))
+        );
+    }
 
     fn bin_values(bin: &BinData) -> Vec<u32> {
         match bin {

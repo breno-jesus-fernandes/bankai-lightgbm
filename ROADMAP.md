@@ -34,7 +34,7 @@ Goal: `import bankai_lightgbm as lgb` works for the usual sklearn-style workflow
 
 ### Step 2: Text input and file prediction (P2/P1)
 Goal: load CSV/TSV/LibSVM files and predict from a file path, as upstream does.
-- [x] Parsers: CSV/TSV/LibSVM, header, `label_column`, `weight_column`, `group_column`, `ignore_column`, `two_round` (format detection, line parsers, column handling, the `.init`/`.weight`/`.query` side files and `two_round` (reservoir sample of the file's lines, as upstream `SampleFromFile`) are ported; `Dataset(path)` trains byte-identically to upstream. Binary files with sparse or multi-value groups still raise `not supported yet`)
+- [x] Parsers: CSV/TSV/LibSVM, header, `label_column`, `weight_column`, `group_column`, `ignore_column`, `two_round` (format detection, line parsers, column handling, the `.init`/`.weight`/`.query` side files and `two_round` (reservoir sample of the file's lines, as upstream `SampleFromFile`) are ported; `Dataset(path)` trains byte-identically to upstream. Binary files with sparse and multi-value groups load and train like upstream, `tests/parity/test_sparse_binary_parity.py`; multi-value groups are decoded one blob per sub-feature)
 - [x] Predict from file (`data` as path)
 - Gate: parity tests against `lightgbm==4.7.0` on the same files (model text and predictions match as the parity tolerances in `AGENTS.md`).
 
@@ -91,7 +91,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] Sparse CSR/CSC input (`LGBM_DatasetCreateFromCSR`/`FromCSC`): sampling, push order (stored pairs then `FinishOneRow` zero pushes), reference datasets and linear-tree raw values, O(nnz) without densifying; `save_binary` byte-identical to upstream incl. bundles, unsorted indices and multi-value groups. Known gap: a duplicated column within a row that lands in a *sparse* multi-value column (upstream keeps whichever entry its unstable `std::sort` leaves first, which is stdlib-dependent; bankai keeps the first). Construction speed (`benches/bench_dataset.py`, linux/x86_64 2 vCPU): CSR 0.8–1.05x, CSC 0.75–4x upstream; dense construction measured 0.32–0.82x (pre-existing, profile `value_to_bin`/`find_groups`)
 - [x] Parsers: CSV/TSV/LibSVM, header, `label_column`, `weight_column`, `group_column`, `ignore_column`, `two_round`
 - [x] Binary dataset file (`save_binary`) byte-identical to upstream (20 fixtures); reader for upstream files
-- [ ] Load a `Dataset` from an upstream `.bin` file (decode bin data)
+- [x] Load a `Dataset` from an upstream `.bin` file (decode bin data): dense, sparse and multi-value groups (`test_sparse_binary_parity.py`, `test_binary_dataset_parity.py`)
 - [ ] `linear_tree` raw-data retention, Arrow ingest (`forcedbins_filename`: forced upper bounds are ported and the model matches upstream; `Dataset.forced_bin_bounds` for the text dump is still empty)
 - **Gate:** identical bin upper bounds and feature groups ✅
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Binary datasets with sparse and multi-value feature groups load: an upstream `.bin` file with those groups decodes (one sparse or dense blob per sub-feature for multi-value groups) and trains and predicts like upstream. Previously these raised `not supported yet`. Parity tests in `tests/parity/test_sparse_binary_parity.py`.
 - `Unknown parameter: <name>` is reported as often as upstream reports it: once when the Dataset is constructed and once when the booster is created. A sklearn fit printed it three times (and a Booster four times) because the Python layer repeated the warning and the training handle parsed the config again. Parity tests in `tests/parity/test_unknown_param_warning_parity.py`.
 - `Dataset.set_field`/`get_field` and the label and weight setters raise what upstream raises on a constructed Dataset: `KeyError` for an unknown field on set, `LightGBMError("Field not found")` on get, `label cannot be nullptr` for `set_label(None)`, `TypeError` for a 2-D label, and the upstream length messages for label and weight (no `invalid parameter:` prefix). Previously unknown fields raised `NotImplementedError`. Parity tests in `tests/parity/test_dataset_field_parity.py`.
 - sklearn estimators: parity tests pin the error types and messages of `LGBMRanker` group checks, custom objective and eval arity, `eval_X`/`eval_set` mixing, unfitted estimators and feature-count mismatch, plus `get_params`, `set_params` and `clone`. All of them already matched `lightgbm==4.7.0`, so no library code changed (`tests/parity/test_sklearn_parity.py`).

@@ -153,6 +153,20 @@ impl SparseBin {
         }
     }
 
+    /// Rebuild a sparse group from its stored parts (upstream `SparseBin::LoadFromMemory`,
+    /// followed by `FinishLoad`, which builds the fast index).
+    pub fn from_parts(num_data: usize, deltas: Vec<u8>, vals: SparseVals) -> SparseBin {
+        let mut s = SparseBin {
+            num_data,
+            deltas,
+            vals,
+            fast_index: Vec::new(),
+            fast_index_shift: 0,
+        };
+        s.build_fast_index();
+        s
+    }
+
     /// upstream: `SparseBin::GetFastIndex`
     fn build_fast_index(&mut self) {
         self.fast_index.clear();
