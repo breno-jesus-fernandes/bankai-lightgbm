@@ -1,0 +1,29 @@
+[package]
+name = "lgbm-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lgbm-core = { path = "../crates/lgbm-core" }
+
+[[bin]]
+name = "model_text"
+path = "fuzz_targets/model_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_line"
+path = "fuzz_targets/parse_line.rs"
+test = false
+doc = false
+bench = false
+
+# The fuzz crate is its own workspace, so it is not part of `cargo test --workspace`.
+[workspace]
