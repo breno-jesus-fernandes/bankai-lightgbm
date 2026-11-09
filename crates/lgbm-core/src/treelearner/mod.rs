@@ -7,5 +7,6 @@ pub mod feature_histogram;
 pub mod histogram;
 pub mod monotone_constraints;
 pub mod multi_val;
+pub mod row_major;
 pub mod serial;
 pub mod split_info;
