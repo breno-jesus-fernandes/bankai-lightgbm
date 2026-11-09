@@ -27,6 +27,49 @@ fn to_py(err: lgbm_core::Error) -> PyErr {
     LightGBMError::new_err(err.to_string())
 }
 
+/// Runs an entry point and turns a panic into `LightGBMError`, so a Rust bug never reaches
+/// Python as `PanicException` (AGENTS.md section 6, SPEC-ERR-4).
+fn guard<T>(f: impl FnOnce() -> PyResult<T>) -> PyResult<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_owned());
+        Err(LightGBMError::new_err(format!("internal error: {message}")))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use super::{LightGBMError, guard};
+    use pyo3::prelude::*;
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn a_panic_inside_an_entry_point_becomes_light_gbm_error() {
+        Python::with_gil(|py| {
+            let result: PyResult<()> = guard(|| panic!("boom"));
+            let err = result.expect_err("guard must turn the panic into an error");
+            assert!(err.is_instance_of::<LightGBMError>(py));
+            assert!(err.value(py).to_string().contains("boom"));
+        });
+    }
+
+    #[test]
+    fn ok_and_error_results_pass_through_unchanged() {
+        Python::with_gil(|py| {
+            assert_eq!(guard(|| Ok(7_i32)).ok(), Some(7));
+            let err = guard(|| -> PyResult<i32> { Err(LightGBMError::new_err("plain")) })
+                .expect_err("the error must pass through");
+            assert!(err.is_instance_of::<LightGBMError>(py));
+            assert!(err.value(py).to_string().contains("plain"));
+        });
+    }
+}
+
 /// Binned training data. Mirrors upstream's C API `DatasetHandle`.
 #[pyclass(module = "bankai_lightgbm._lib")]
 struct NativeDataset {
@@ -98,26 +141,28 @@ impl RawRows {
 /// float64 copy of the matrix (AGENTS.md section 7). upstream: `LGBM_DatasetCreateFromMat`
 /// reads float32 and float64 rows directly.
 fn dense_row_major(data: &Bound<'_, PyAny>) -> PyResult<(Vec<f64>, usize, usize)> {
-    if let Ok(array) = data.downcast::<PyArray2<f64>>() {
-        let view = array.readonly();
-        let view = view.as_array();
-        let (nrow, ncol) = view.dim();
-        // A C-contiguous matrix is one memcpy; any other layout is gathered in row-major order.
-        let values = match view.as_slice() {
-            Some(slice) => slice.to_vec(),
-            None => view.iter().copied().collect(),
-        };
-        return Ok((values, nrow, ncol));
-    }
-    if let Ok(array) = data.downcast::<PyArray2<f32>>() {
-        let view = array.readonly();
-        let view = view.as_array();
-        let (nrow, ncol) = view.dim();
-        return Ok((view.iter().map(|&v| f64::from(v)).collect(), nrow, ncol));
-    }
-    Err(PyTypeError::new_err(
-        "data must be a 2-D float32 or float64 array",
-    ))
+    guard(move || {
+        if let Ok(array) = data.downcast::<PyArray2<f64>>() {
+            let view = array.readonly();
+            let view = view.as_array();
+            let (nrow, ncol) = view.dim();
+            // A C-contiguous matrix is one memcpy; any other layout is gathered in row-major order.
+            let values = match view.as_slice() {
+                Some(slice) => slice.to_vec(),
+                None => view.iter().copied().collect(),
+            };
+            return Ok((values, nrow, ncol));
+        }
+        if let Ok(array) = data.downcast::<PyArray2<f32>>() {
+            let view = array.readonly();
+            let view = view.as_array();
+            let (nrow, ncol) = view.dim();
+            return Ok((view.iter().map(|&v| f64::from(v)).collect(), nrow, ncol));
+        }
+        Err(PyTypeError::new_err(
+            "data must be a 2-D float32 or float64 array",
+        ))
+    })
 }
 
 #[pymethods]
@@ -125,18 +170,20 @@ impl NativeDataset {
     /// Load a binary dataset file written by `save_binary` (upstream `DatasetLoader::LoadFromBinFile`).
     #[staticmethod]
     fn from_binary_file(py: Python<'_>, path: String) -> PyResult<Self> {
-        let ds = py
-            .allow_threads(|| -> lgbm_core::Result<Dataset> {
-                let bin = lgbm_core::io::binary::BinaryDataset::read_file(&path)?;
-                Dataset::from_binary(&bin)
+        guard(move || {
+            let ds = py
+                .allow_threads(|| -> lgbm_core::Result<Dataset> {
+                    let bin = lgbm_core::io::binary::BinaryDataset::read_file(&path)?;
+                    Dataset::from_binary(&bin)
+                })
+                .map_err(to_py)?;
+            let (nrow, ncol) = (ds.num_data(), ds.layout.num_total_features);
+            Ok(NativeDataset {
+                ds: Arc::new(ds),
+                data: Arc::new(RawRows::Unavailable),
+                nrow,
+                ncol,
             })
-            .map_err(to_py)?;
-        let (nrow, ncol) = (ds.num_data(), ds.layout.num_total_features);
-        Ok(NativeDataset {
-            ds: Arc::new(ds),
-            data: Arc::new(RawRows::Unavailable),
-            nrow,
-            ncol,
         })
     }
 
@@ -158,28 +205,37 @@ impl NativeDataset {
         feature_names: Option<Vec<String>>,
         two_round: bool,
     ) -> PyResult<Self> {
-        let (values, nrow, ncol) = dense_row_major(&data)?;
-        let reference = reference.map(|r| Arc::clone(&r.ds));
-        let ds = py
-            .allow_threads(|| -> lgbm_core::Result<Dataset> {
-                let cfg = Config::from_params(&params)?;
-                let ds = if let Some(reference) = reference {
-                    Dataset::from_dense_reference(&values, nrow, ncol, &label, &reference)?
-                } else if two_round {
-                    Dataset::from_dense_two_round(&values, nrow, ncol, &label, &cfg, &categorical)?
-                } else {
-                    Dataset::from_dense(&values, nrow, ncol, &label, &cfg, &categorical)?
-                };
-                let mut ds = with_metadata(ds, weight, group, init_score)?;
-                apply_feature_names(&mut ds, feature_names)?;
-                Ok(ds)
+        guard(move || {
+            let (values, nrow, ncol) = dense_row_major(&data)?;
+            let reference = reference.map(|r| Arc::clone(&r.ds));
+            let ds = py
+                .allow_threads(|| -> lgbm_core::Result<Dataset> {
+                    let cfg = Config::from_params(&params)?;
+                    let ds = if let Some(reference) = reference {
+                        Dataset::from_dense_reference(&values, nrow, ncol, &label, &reference)?
+                    } else if two_round {
+                        Dataset::from_dense_two_round(
+                            &values,
+                            nrow,
+                            ncol,
+                            &label,
+                            &cfg,
+                            &categorical,
+                        )?
+                    } else {
+                        Dataset::from_dense(&values, nrow, ncol, &label, &cfg, &categorical)?
+                    };
+                    let mut ds = with_metadata(ds, weight, group, init_score)?;
+                    apply_feature_names(&mut ds, feature_names)?;
+                    Ok(ds)
+                })
+                .map_err(to_py)?;
+            Ok(NativeDataset {
+                ds: Arc::new(ds),
+                data: Arc::new(RawRows::Dense(values)),
+                nrow,
+                ncol,
             })
-            .map_err(to_py)?;
-        Ok(NativeDataset {
-            ds: Arc::new(ds),
-            data: Arc::new(RawRows::Dense(values)),
-            nrow,
-            ncol,
         })
     }
 
@@ -207,37 +263,39 @@ impl NativeDataset {
         init_score: Option<Vec<f64>>,
         feature_names: Option<Vec<String>>,
     ) -> PyResult<Self> {
-        let contiguous = |e: numpy::NotContiguousError| LightGBMError::new_err(e.to_string());
-        let (indptr, indices, values) = (
-            indptr.as_slice().map_err(contiguous)?.to_vec(),
-            indices.as_slice().map_err(contiguous)?.to_vec(),
-            data.as_slice().map_err(contiguous)?.to_vec(),
-        );
-        let reference = reference.map(|r| Arc::clone(&r.ds));
-        let (ds, raw) = py
-            .allow_threads(|| -> lgbm_core::Result<(Dataset, RawRows)> {
-                let (indptr, indices, values) = if is_csc {
-                    csc_to_csr(&indptr, &indices, &values, nrow)?
-                } else {
-                    (indptr, indices, values)
-                };
-                let cfg = Config::from_params(&params)?;
-                let m = CsrMatrix::new(&indptr, &indices, &values, ncol)?;
-                let ds = if let Some(reference) = reference {
-                    Dataset::from_csr_reference(&m, &label, &reference)?
-                } else {
-                    Dataset::from_csr(&m, &label, &cfg, &categorical)?
-                };
-                let mut ds = with_metadata(ds, weight, group, init_score)?;
-                apply_feature_names(&mut ds, feature_names)?;
-                Ok((ds, RawRows::Csr(indptr, indices, values)))
+        guard(move || {
+            let contiguous = |e: numpy::NotContiguousError| LightGBMError::new_err(e.to_string());
+            let (indptr, indices, values) = (
+                indptr.as_slice().map_err(contiguous)?.to_vec(),
+                indices.as_slice().map_err(contiguous)?.to_vec(),
+                data.as_slice().map_err(contiguous)?.to_vec(),
+            );
+            let reference = reference.map(|r| Arc::clone(&r.ds));
+            let (ds, raw) = py
+                .allow_threads(|| -> lgbm_core::Result<(Dataset, RawRows)> {
+                    let (indptr, indices, values) = if is_csc {
+                        csc_to_csr(&indptr, &indices, &values, nrow)?
+                    } else {
+                        (indptr, indices, values)
+                    };
+                    let cfg = Config::from_params(&params)?;
+                    let m = CsrMatrix::new(&indptr, &indices, &values, ncol)?;
+                    let ds = if let Some(reference) = reference {
+                        Dataset::from_csr_reference(&m, &label, &reference)?
+                    } else {
+                        Dataset::from_csr(&m, &label, &cfg, &categorical)?
+                    };
+                    let mut ds = with_metadata(ds, weight, group, init_score)?;
+                    apply_feature_names(&mut ds, feature_names)?;
+                    Ok((ds, RawRows::Csr(indptr, indices, values)))
+                })
+                .map_err(to_py)?;
+            Ok(NativeDataset {
+                ds: Arc::new(ds),
+                data: Arc::new(raw),
+                nrow,
+                ncol,
             })
-            .map_err(to_py)?;
-        Ok(NativeDataset {
-            ds: Arc::new(ds),
-            data: Arc::new(raw),
-            nrow,
-            ncol,
         })
     }
 
@@ -247,8 +305,10 @@ impl NativeDataset {
 
     /// Write the bin dump to `path` (upstream `Dataset::DumpTextFile`).
     fn dump_text(&self, path: &str) -> PyResult<()> {
-        std::fs::write(path, lgbm_core::io::dump::dump_text(&self.ds))
-            .map_err(|err| pyo3::exceptions::PyOSError::new_err(err.to_string()))
+        guard(move || {
+            std::fs::write(path, lgbm_core::io::dump::dump_text(&self.ds))
+                .map_err(|err| pyo3::exceptions::PyOSError::new_err(err.to_string()))
+        })
     }
 
     /// A copy with any given metadata field replaced (`None` keeps it; an empty list clears).
@@ -258,46 +318,52 @@ impl NativeDataset {
         weight: Option<Vec<f32>>,
         group: Option<Vec<i32>>,
     ) -> PyResult<Self> {
-        let mut ds = (*self.ds).clone();
-        if let Some(label) = label {
-            ds.set_label(&label).map_err(to_py)?;
-        }
-        if let Some(weight) = weight {
-            ds.set_weights(&weight).map_err(to_py)?;
-        }
-        if let Some(group) = group {
-            ds.set_group(&group).map_err(to_py)?;
-        }
-        Ok(NativeDataset {
-            ds: Arc::new(ds),
-            data: Arc::clone(&self.data),
-            nrow: self.nrow,
-            ncol: self.ncol,
+        guard(move || {
+            let mut ds = (*self.ds).clone();
+            if let Some(label) = label {
+                ds.set_label(&label).map_err(to_py)?;
+            }
+            if let Some(weight) = weight {
+                ds.set_weights(&weight).map_err(to_py)?;
+            }
+            if let Some(group) = group {
+                ds.set_group(&group).map_err(to_py)?;
+            }
+            Ok(NativeDataset {
+                ds: Arc::new(ds),
+                data: Arc::clone(&self.data),
+                nrow: self.nrow,
+                ncol: self.ncol,
+            })
         })
     }
 
     /// A copy of this dataset with the dense position ids replaced (empty clears them).
     fn with_positions(&self, positions: Vec<i32>) -> PyResult<Self> {
-        let mut ds = (*self.ds).clone();
-        ds.set_positions(&positions).map_err(to_py)?;
-        Ok(NativeDataset {
-            ds: Arc::new(ds),
-            data: Arc::clone(&self.data),
-            nrow: self.nrow,
-            ncol: self.ncol,
+        guard(move || {
+            let mut ds = (*self.ds).clone();
+            ds.set_positions(&positions).map_err(to_py)?;
+            Ok(NativeDataset {
+                ds: Arc::new(ds),
+                data: Arc::clone(&self.data),
+                nrow: self.nrow,
+                ncol: self.ncol,
+            })
         })
     }
 
     /// A copy of this dataset with the init score replaced (class-major; empty clears it).
     /// The binned data is copied; the raw matrix is shared.
     fn with_init_score(&self, init_score: Vec<f64>) -> PyResult<Self> {
-        let mut ds = (*self.ds).clone();
-        ds.set_init_score(&init_score).map_err(to_py)?;
-        Ok(NativeDataset {
-            ds: Arc::new(ds),
-            data: Arc::clone(&self.data),
-            nrow: self.nrow,
-            ncol: self.ncol,
+        guard(move || {
+            let mut ds = (*self.ds).clone();
+            ds.set_init_score(&init_score).map_err(to_py)?;
+            Ok(NativeDataset {
+                ds: Arc::new(ds),
+                data: Arc::clone(&self.data),
+                nrow: self.nrow,
+                ncol: self.ncol,
+            })
         })
     }
 
@@ -307,15 +373,17 @@ impl NativeDataset {
 
     /// Bins of one feature (upstream `LGBM_DatasetGetFeatureNumBin`); out-of-range indices raise.
     fn feature_num_bin(&self, feature: i64) -> PyResult<i32> {
-        let total = self.ds.layout.num_total_features;
-        if feature < 0 || feature as usize >= total {
-            return Err(LightGBMError::new_err(format!(
-                "Tried to retrieve number of bins for feature index {feature}, \
+        guard(move || {
+            let total = self.ds.layout.num_total_features;
+            if feature < 0 || feature as usize >= total {
+                return Err(LightGBMError::new_err(format!(
+                    "Tried to retrieve number of bins for feature index {feature}, \
                  but the valid feature indices are [0, {}].",
-                total as i64 - 1
-            )));
-        }
-        Ok(self.ds.feature_num_bin(feature as usize))
+                    total as i64 - 1
+                )));
+            }
+            Ok(self.ds.feature_num_bin(feature as usize))
+        })
     }
 
     /// Labels as stored natively (float32, NaN mapped to 0 and clamped like upstream's
@@ -332,46 +400,52 @@ impl NativeDataset {
 
     /// Write the binned dataset in upstream's binary format (`LGBM_DatasetSaveBinary`).
     fn save_binary(&self, py: Python<'_>, path: String) -> PyResult<()> {
-        let ds = Arc::clone(&self.ds);
-        py.allow_threads(|| ds.save_binary(&path)).map_err(to_py)
+        guard(move || {
+            let ds = Arc::clone(&self.ds);
+            py.allow_threads(|| ds.save_binary(&path)).map_err(to_py)
+        })
     }
 
     fn subset(&self, indices: Vec<usize>) -> PyResult<Self> {
-        let ds = self.ds.subset(&indices).map_err(to_py)?;
-        Ok(NativeDataset {
-            ds: Arc::new(ds),
-            data: Arc::new(self.data.select(&indices, self.ncol)),
-            nrow: indices.len(),
-            ncol: self.ncol,
+        guard(move || {
+            let ds = self.ds.subset(&indices).map_err(to_py)?;
+            Ok(NativeDataset {
+                ds: Arc::new(ds),
+                data: Arc::new(self.data.select(&indices, self.ncol)),
+                nrow: indices.len(),
+                ncol: self.ncol,
+            })
         })
     }
 
     /// Append the features of `other` to this dataset in place (upstream:
     /// `LGBM_DatasetAddFeaturesFrom`). Raw rows are kept only when both sides have dense raw rows.
     fn add_features_from(&mut self, other: &NativeDataset) -> PyResult<()> {
-        Arc::make_mut(&mut self.ds)
-            .add_features_from(&other.ds)
-            .map_err(|err| match err {
-                lgbm_core::Error::Unsupported(msg) => {
-                    pyo3::exceptions::PyNotImplementedError::new_err(msg)
+        guard(move || {
+            Arc::make_mut(&mut self.ds)
+                .add_features_from(&other.ds)
+                .map_err(|err| match err {
+                    lgbm_core::Error::Unsupported(msg) => {
+                        pyo3::exceptions::PyNotImplementedError::new_err(msg)
+                    }
+                    other => to_py(other),
+                })?;
+            let data = match (self.data.as_ref(), other.data.as_ref()) {
+                (RawRows::Dense(a), RawRows::Dense(b)) => {
+                    let width = self.ncol + other.ncol;
+                    let mut out = Vec::with_capacity(self.nrow * width);
+                    for row in 0..self.nrow {
+                        out.extend_from_slice(&a[row * self.ncol..(row + 1) * self.ncol]);
+                        out.extend_from_slice(&b[row * other.ncol..(row + 1) * other.ncol]);
+                    }
+                    RawRows::Dense(out)
                 }
-                other => to_py(other),
-            })?;
-        let data = match (self.data.as_ref(), other.data.as_ref()) {
-            (RawRows::Dense(a), RawRows::Dense(b)) => {
-                let width = self.ncol + other.ncol;
-                let mut out = Vec::with_capacity(self.nrow * width);
-                for row in 0..self.nrow {
-                    out.extend_from_slice(&a[row * self.ncol..(row + 1) * self.ncol]);
-                    out.extend_from_slice(&b[row * other.ncol..(row + 1) * other.ncol]);
-                }
-                RawRows::Dense(out)
-            }
-            _ => RawRows::Unavailable,
-        };
-        self.data = Arc::new(data);
-        self.ncol += other.ncol;
-        Ok(())
+                _ => RawRows::Unavailable,
+            };
+            self.data = Arc::new(data);
+            self.ncol += other.ncol;
+            Ok(())
+        })
     }
 
     /// The feature names of the binned dataset (upstream: `LGBM_DatasetGetFeatureNames`).
@@ -398,23 +472,27 @@ struct NativeBooster {
 impl NativeBooster {
     #[staticmethod]
     fn from_file(py: Python<'_>, path: String) -> PyResult<Self> {
-        let model = py
-            .allow_threads(|| Gbdt::from_model_file(&path))
-            .map_err(to_py)?;
-        Ok(NativeBooster {
-            model,
-            trainer: None,
+        guard(move || {
+            let model = py
+                .allow_threads(|| Gbdt::from_model_file(&path))
+                .map_err(to_py)?;
+            Ok(NativeBooster {
+                model,
+                trainer: None,
+            })
         })
     }
 
     #[staticmethod]
     fn from_string(py: Python<'_>, model_str: String) -> PyResult<Self> {
-        let model = py
-            .allow_threads(|| Gbdt::from_model_string(&model_str))
-            .map_err(to_py)?;
-        Ok(NativeBooster {
-            model,
-            trainer: None,
+        guard(move || {
+            let model = py
+                .allow_threads(|| Gbdt::from_model_string(&model_str))
+                .map_err(to_py)?;
+            Ok(NativeBooster {
+                model,
+                trainer: None,
+            })
         })
     }
 
@@ -428,31 +506,33 @@ impl NativeBooster {
         init_model: Option<PyRef<'_, NativeBooster>>,
         warn_config: bool,
     ) -> PyResult<Self> {
-        let ds = Arc::clone(&dataset.ds);
-        let init = init_model.map(|m| m.model.clone());
-        let (trainer, model) = py
-            .allow_threads(|| -> lgbm_core::Result<(GbdtTrainer, Gbdt)> {
-                let cfg = {
-                    let _mute = MuteGuard::new(!warn_config);
-                    Config::from_params(&params)?
-                };
-                let cfg = Arc::new(cfg);
-                let mut trainer = match &init {
-                    Some(init) => GbdtTrainer::with_init_model(Arc::clone(&cfg), ds, init)?,
-                    None => GbdtTrainer::new(Arc::clone(&cfg), ds)?,
-                };
-                for _ in 0..cfg.num_iterations {
-                    if trainer.update_one_iter() {
-                        break;
+        guard(move || {
+            let ds = Arc::clone(&dataset.ds);
+            let init = init_model.map(|m| m.model.clone());
+            let (trainer, model) = py
+                .allow_threads(|| -> lgbm_core::Result<(GbdtTrainer, Gbdt)> {
+                    let cfg = {
+                        let _mute = MuteGuard::new(!warn_config);
+                        Config::from_params(&params)?
+                    };
+                    let cfg = Arc::new(cfg);
+                    let mut trainer = match &init {
+                        Some(init) => GbdtTrainer::with_init_model(Arc::clone(&cfg), ds, init)?,
+                        None => GbdtTrainer::new(Arc::clone(&cfg), ds)?,
+                    };
+                    for _ in 0..cfg.num_iterations {
+                        if trainer.update_one_iter() {
+                            break;
+                        }
                     }
-                }
-                let model = trainer.snapshot();
-                Ok((trainer, model))
+                    let model = trainer.snapshot();
+                    Ok((trainer, model))
+                })
+                .map_err(to_py)?;
+            Ok(NativeBooster {
+                model,
+                trainer: Some(trainer),
             })
-            .map_err(to_py)?;
-        Ok(NativeBooster {
-            model,
-            trainer: Some(trainer),
         })
     }
 
@@ -465,24 +545,26 @@ impl NativeBooster {
         init_model: Option<PyRef<'_, NativeBooster>>,
         warn_config: bool,
     ) -> PyResult<Self> {
-        let ds = Arc::clone(&dataset.ds);
-        let init = init_model.map(|m| m.model.clone());
-        let trainer = py
-            .allow_threads(|| -> lgbm_core::Result<GbdtTrainer> {
-                let cfg = {
-                    let _mute = MuteGuard::new(!warn_config);
-                    Arc::new(Config::from_params(&params)?)
-                };
-                match &init {
-                    Some(init) => GbdtTrainer::with_init_model(cfg, ds, init),
-                    None => GbdtTrainer::new(cfg, ds),
-                }
+        guard(move || {
+            let ds = Arc::clone(&dataset.ds);
+            let init = init_model.map(|m| m.model.clone());
+            let trainer = py
+                .allow_threads(|| -> lgbm_core::Result<GbdtTrainer> {
+                    let cfg = {
+                        let _mute = MuteGuard::new(!warn_config);
+                        Arc::new(Config::from_params(&params)?)
+                    };
+                    match &init {
+                        Some(init) => GbdtTrainer::with_init_model(cfg, ds, init),
+                        None => GbdtTrainer::new(cfg, ds),
+                    }
+                })
+                .map_err(to_py)?;
+            let model = trainer.snapshot();
+            Ok(NativeBooster {
+                model,
+                trainer: Some(trainer),
             })
-            .map_err(to_py)?;
-        let model = trainer.snapshot();
-        Ok(NativeBooster {
-            model,
-            trainer: Some(trainer),
         })
     }
 
@@ -499,18 +581,20 @@ impl NativeBooster {
         leaf_pred: Vec<i32>,
         ncol: usize,
     ) -> PyResult<Self> {
-        let ds = Arc::clone(&dataset.ds);
-        let init = source.model.clone();
-        let trainer = py
-            .allow_threads(|| -> lgbm_core::Result<GbdtTrainer> {
-                let cfg = Arc::new(Config::from_params(&params)?);
-                GbdtTrainer::refit(cfg, ds, &init, &leaf_pred, ncol)
+        guard(move || {
+            let ds = Arc::clone(&dataset.ds);
+            let init = source.model.clone();
+            let trainer = py
+                .allow_threads(|| -> lgbm_core::Result<GbdtTrainer> {
+                    let cfg = Arc::new(Config::from_params(&params)?);
+                    GbdtTrainer::refit(cfg, ds, &init, &leaf_pred, ncol)
+                })
+                .map_err(to_py)?;
+            let model = trainer.snapshot();
+            Ok(NativeBooster {
+                model,
+                trainer: Some(trainer),
             })
-            .map_err(to_py)?;
-        let model = trainer.snapshot();
-        Ok(NativeBooster {
-            model,
-            trainer: Some(trainer),
         })
     }
 
@@ -526,59 +610,67 @@ impl NativeBooster {
     /// Edit one leaf output in the model and in the trainer's copy (upstream
     /// `LGBM_BoosterSetLeafValue`), so continued training sees the edit.
     fn set_leaf_output(&mut self, tree_idx: usize, leaf_idx: usize, value: f64) -> PyResult<()> {
-        self.model
-            .set_leaf_value(tree_idx, leaf_idx, value)
-            .map_err(to_py)?;
-        if let Some(trainer) = self.trainer.as_mut() {
-            trainer
+        guard(move || {
+            self.model
                 .set_leaf_value(tree_idx, leaf_idx, value)
                 .map_err(to_py)?;
-        }
-        Ok(())
+            if let Some(trainer) = self.trainer.as_mut() {
+                trainer
+                    .set_leaf_value(tree_idx, leaf_idx, value)
+                    .map_err(to_py)?;
+            }
+            Ok(())
+        })
     }
 
     /// Drop the last iteration (upstream `LGBM_BoosterRollbackOneIter`).
     fn rollback_one_iter(&mut self, py: Python<'_>) -> PyResult<()> {
-        let Some(trainer) = self.trainer.as_mut() else {
-            return Err(LightGBMError::new_err(
-                "Cannot roll back a Booster loaded from a model; construct it with a training Dataset.",
-            ));
-        };
-        let model = py.allow_threads(|| -> lgbm_core::Result<Gbdt> {
-            trainer.rollback_one_iter()?;
-            Ok(trainer.snapshot())
-        });
-        self.model = model.map_err(to_py)?;
-        Ok(())
+        guard(move || {
+            let Some(trainer) = self.trainer.as_mut() else {
+                return Err(LightGBMError::new_err(
+                    "Cannot roll back a Booster loaded from a model; construct it with a training Dataset.",
+                ));
+            };
+            let model = py.allow_threads(|| -> lgbm_core::Result<Gbdt> {
+                trainer.rollback_one_iter()?;
+                Ok(trainer.snapshot())
+            });
+            self.model = model.map_err(to_py)?;
+            Ok(())
+        })
     }
 
     fn update(&mut self, py: Python<'_>) -> PyResult<bool> {
-        let Some(trainer) = self.trainer.as_mut() else {
-            return Err(LightGBMError::new_err(
-                "Cannot continue training a Booster loaded from a model; construct it with a training Dataset.",
-            ));
-        };
-        if self.model.objective().is_none() {
-            return Err(LightGBMError::new_err(
-                "Cannot update due to null objective function.",
-            ));
-        }
-        let (finished, model) = py.allow_threads(|| {
-            let finished = trainer.update_one_iter();
-            (finished, trainer.snapshot())
-        });
-        self.model = model;
-        Ok(finished)
+        guard(move || {
+            let Some(trainer) = self.trainer.as_mut() else {
+                return Err(LightGBMError::new_err(
+                    "Cannot continue training a Booster loaded from a model; construct it with a training Dataset.",
+                ));
+            };
+            if self.model.objective().is_none() {
+                return Err(LightGBMError::new_err(
+                    "Cannot update due to null objective function.",
+                ));
+            }
+            let (finished, model) = py.allow_threads(|| {
+                let finished = trainer.update_one_iter();
+                (finished, trainer.snapshot())
+            });
+            self.model = model;
+            Ok(finished)
+        })
     }
 
     fn reset_custom_objective(&mut self) -> PyResult<()> {
-        let trainer = self
-            .trainer
-            .as_mut()
-            .ok_or_else(|| LightGBMError::new_err("Booster has no training Dataset"))?;
-        trainer.reset_custom_objective().map_err(to_py)?;
-        self.model = trainer.snapshot();
-        Ok(())
+        guard(move || {
+            let trainer = self
+                .trainer
+                .as_mut()
+                .ok_or_else(|| LightGBMError::new_err("Booster has no training Dataset"))?;
+            trainer.reset_custom_objective().map_err(to_py)?;
+            self.model = trainer.snapshot();
+            Ok(())
+        })
     }
 
     /// The raw training score handed to a custom objective (class-major, init score
@@ -587,12 +679,14 @@ impl NativeBooster {
         &mut self,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-        let trainer = self
-            .trainer
-            .as_mut()
-            .ok_or_else(|| LightGBMError::new_err("Booster has no training Dataset"))?;
-        let score = py.allow_threads(|| trainer.training_score().to_vec());
-        Ok(numpy::PyArray1::from_vec(py, score))
+        guard(move || {
+            let trainer = self
+                .trainer
+                .as_mut()
+                .ok_or_else(|| LightGBMError::new_err("Booster has no training Dataset"))?;
+            let score = py.allow_threads(|| trainer.training_score().to_vec());
+            Ok(numpy::PyArray1::from_vec(py, score))
+        })
     }
 
     fn update_custom(
@@ -601,26 +695,30 @@ impl NativeBooster {
         gradients: Vec<f32>,
         hessians: Vec<f32>,
     ) -> PyResult<bool> {
-        let trainer = self
-            .trainer
-            .as_mut()
-            .ok_or_else(|| LightGBMError::new_err("Booster has no training Dataset"))?;
-        let finished = py
-            .allow_threads(|| trainer.update_custom(&gradients, &hessians))
-            .map_err(to_py)?;
-        self.model = trainer.snapshot();
-        Ok(finished)
+        guard(move || {
+            let trainer = self
+                .trainer
+                .as_mut()
+                .ok_or_else(|| LightGBMError::new_err("Booster has no training Dataset"))?;
+            let finished = py
+                .allow_threads(|| trainer.update_custom(&gradients, &hessians))
+                .map_err(to_py)?;
+            self.model = trainer.snapshot();
+            Ok(finished)
+        })
     }
 
     fn reset_parameter(&mut self, params: HashMap<String, String>) -> PyResult<()> {
-        let Some(trainer) = self.trainer.as_mut() else {
-            return Err(LightGBMError::new_err(
-                "Cannot reset parameters on a Booster loaded from a model.",
-            ));
-        };
-        trainer.reset_parameter(&params).map_err(to_py)?;
-        self.model = trainer.snapshot();
-        Ok(())
+        guard(move || {
+            let Some(trainer) = self.trainer.as_mut() else {
+                return Err(LightGBMError::new_err(
+                    "Cannot reset parameters on a Booster loaded from a model.",
+                ));
+            };
+            trainer.reset_parameter(&params).map_err(to_py)?;
+            self.model = trainer.snapshot();
+            Ok(())
+        })
     }
 
     fn eval(
@@ -630,70 +728,72 @@ impl NativeBooster {
         params: HashMap<String, String>,
         data_name: String,
     ) -> PyResult<Vec<(String, String, f64, bool)>> {
-        let model = &self.model;
-        let ds = Arc::clone(&dataset.ds);
-        let data = Arc::clone(&dataset.data);
-        let (nrow, ncol) = (dataset.nrow, dataset.ncol);
-        py.allow_threads(|| -> lgbm_core::Result<Vec<(String, String, f64, bool)>> {
-            let cfg = Config::from_params(&params)?;
-            let pred_cfg = PredictConfig {
-                kind: PredictKind::RawScore,
-                num_threads: cfg.num_threads.max(0) as usize,
-                ..PredictConfig::default()
-            };
-            let predictor = Predictor::new(model, &pred_cfg)?;
-            let mut row_scores = data.predict(&predictor, nrow, ncol)?;
-            // upstream: the validation ScoreUpdater of a random forest holds the running mean of
-            // its trees (RF::TrainOneIter), so the metric is computed on the averaged score.
-            if model.average_output() {
-                let iterations = model.num_trees() / model.num_tree_per_iteration().max(1);
-                if iterations > 0 {
-                    for value in row_scores.iter_mut() {
-                        *value /= iterations as f64;
+        guard(move || {
+            let model = &self.model;
+            let ds = Arc::clone(&dataset.ds);
+            let data = Arc::clone(&dataset.data);
+            let (nrow, ncol) = (dataset.nrow, dataset.ncol);
+            py.allow_threads(|| -> lgbm_core::Result<Vec<(String, String, f64, bool)>> {
+                let cfg = Config::from_params(&params)?;
+                let pred_cfg = PredictConfig {
+                    kind: PredictKind::RawScore,
+                    num_threads: cfg.num_threads.max(0) as usize,
+                    ..PredictConfig::default()
+                };
+                let predictor = Predictor::new(model, &pred_cfg)?;
+                let mut row_scores = data.predict(&predictor, nrow, ncol)?;
+                // upstream: the validation ScoreUpdater of a random forest holds the running mean of
+                // its trees (RF::TrainOneIter), so the metric is computed on the averaged score.
+                if model.average_output() {
+                    let iterations = model.num_trees() / model.num_tree_per_iteration().max(1);
+                    if iterations > 0 {
+                        for value in row_scores.iter_mut() {
+                            *value /= iterations as f64;
+                        }
                     }
                 }
-            }
-            let nclass = model.num_class();
-            let scores = if nclass > 1 {
-                let mut class_major = vec![0.0; row_scores.len()];
-                for row in 0..nrow {
-                    for class in 0..nclass {
-                        class_major[class * nrow + row] = row_scores[row * nclass + class];
+                let nclass = model.num_class();
+                let scores = if nclass > 1 {
+                    let mut class_major = vec![0.0; row_scores.len()];
+                    for row in 0..nrow {
+                        for class in 0..nclass {
+                            class_major[class * nrow + row] = row_scores[row * nclass + class];
+                        }
                     }
-                }
-                class_major
-            } else {
-                row_scores
-            };
-            // upstream: the validation ScoreUpdater starts from the init score.
-            let mut scores = scores;
-            if !ds.metadata.init_score.is_empty() {
-                if ds.metadata.init_score.len() != scores.len() {
-                    return Err(lgbm_core::Error::InvalidParameter(
-                        "Number of class for initial score error".into(),
-                    ));
-                }
-                for (score, init) in scores.iter_mut().zip(&ds.metadata.init_score) {
-                    *score += init;
-                }
-            }
-            let mut results = Vec::new();
-            for metric_name in &cfg.metric {
-                if let Some(metric) = create_metric(metric_name, &cfg, &ds.metadata)? {
-                    let values = metric.eval(&scores, model.objective());
-                    for (name, value) in metric.names().iter().zip(values) {
-                        results.push((
-                            data_name.clone(),
-                            name.clone(),
-                            value,
-                            metric.factor_to_bigger_better() > 0.0,
+                    class_major
+                } else {
+                    row_scores
+                };
+                // upstream: the validation ScoreUpdater starts from the init score.
+                let mut scores = scores;
+                if !ds.metadata.init_score.is_empty() {
+                    if ds.metadata.init_score.len() != scores.len() {
+                        return Err(lgbm_core::Error::InvalidParameter(
+                            "Number of class for initial score error".into(),
                         ));
                     }
+                    for (score, init) in scores.iter_mut().zip(&ds.metadata.init_score) {
+                        *score += init;
+                    }
                 }
-            }
-            Ok(results)
+                let mut results = Vec::new();
+                for metric_name in &cfg.metric {
+                    if let Some(metric) = create_metric(metric_name, &cfg, &ds.metadata)? {
+                        let values = metric.eval(&scores, model.objective());
+                        for (name, value) in metric.names().iter().zip(values) {
+                            results.push((
+                                data_name.clone(),
+                                name.clone(),
+                                value,
+                                metric.factor_to_bigger_better() > 0.0,
+                            ));
+                        }
+                    }
+                }
+                Ok(results)
+            })
+            .map_err(to_py)
         })
-        .map_err(to_py)
     }
 
     fn num_class(&self) -> usize {
@@ -728,11 +828,13 @@ impl NativeBooster {
         num_iteration: i32,
         importance_type: i32,
     ) -> PyResult<String> {
-        py.allow_threads(|| {
-            self.model
-                .save_model_to_string(start_iteration, num_iteration, importance_type)
+        guard(move || {
+            py.allow_threads(|| {
+                self.model
+                    .save_model_to_string(start_iteration, num_iteration, importance_type)
+            })
+            .map_err(to_py)
         })
-        .map_err(to_py)
     }
 
     fn dump_model(
@@ -742,17 +844,21 @@ impl NativeBooster {
         num_iteration: i32,
         importance_type: i32,
     ) -> PyResult<String> {
-        py.allow_threads(|| {
-            self.model
-                .dump_model(start_iteration, num_iteration, importance_type)
+        guard(move || {
+            py.allow_threads(|| {
+                self.model
+                    .dump_model(start_iteration, num_iteration, importance_type)
+            })
+            .map_err(to_py)
         })
-        .map_err(to_py)
     }
 
     fn feature_importance(&self, num_iteration: i32, importance_type: i32) -> PyResult<Vec<f64>> {
-        self.model
-            .feature_importance(num_iteration, importance_type)
-            .map_err(to_py)
+        guard(move || {
+            self.model
+                .feature_importance(num_iteration, importance_type)
+                .map_err(to_py)
+        })
     }
 
     fn upper_bound(&self) -> f64 {
@@ -764,9 +870,11 @@ impl NativeBooster {
     }
 
     fn leaf_value(&self, tree_idx: usize, leaf_idx: usize) -> PyResult<f64> {
-        self.model
-            .leaf_value(tree_idx, leaf_idx)
-            .ok_or_else(|| LightGBMError::new_err("tree or leaf index out of range"))
+        guard(move || {
+            self.model
+                .leaf_value(tree_idx, leaf_idx)
+                .ok_or_else(|| LightGBMError::new_err("tree or leaf index out of range"))
+        })
     }
 
     /// Predict a C-contiguous float64 matrix. `kind`: 0 normal, 1 raw, 2 leaf, 3 contrib
@@ -787,31 +895,33 @@ impl NativeBooster {
         num_threads: i32,
         disable_shape_check: bool,
     ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        let shape = data.shape();
-        let (nrow, ncol) = (shape[0], shape[1]);
-        self.check_num_features(ncol, disable_shape_check)?;
-        let cfg = predict_config(
-            kind,
-            start_iteration,
-            num_iteration,
-            pred_early_stop,
-            pred_early_stop_freq,
-            pred_early_stop_margin,
-            num_threads,
-        )?;
-        let slice = data
-            .as_slice()
-            .map_err(|e| LightGBMError::new_err(e.to_string()))?;
-        let model = &self.model;
-        let (out, width) = py
-            .allow_threads(|| {
-                let p = Predictor::new(model, &cfg)?;
-                let w = p.num_pred_one_row();
-                p.predict_dense(slice, nrow, ncol).map(|o| (o, w))
-            })
-            .map_err(to_py)?;
-        let arr = numpy::PyArray1::from_vec(py, out);
-        arr.reshape([nrow, width])
+        guard(move || {
+            let shape = data.shape();
+            let (nrow, ncol) = (shape[0], shape[1]);
+            self.check_num_features(ncol, disable_shape_check)?;
+            let cfg = predict_config(
+                kind,
+                start_iteration,
+                num_iteration,
+                pred_early_stop,
+                pred_early_stop_freq,
+                pred_early_stop_margin,
+                num_threads,
+            )?;
+            let slice = data
+                .as_slice()
+                .map_err(|e| LightGBMError::new_err(e.to_string()))?;
+            let model = &self.model;
+            let (out, width) = py
+                .allow_threads(|| {
+                    let p = Predictor::new(model, &cfg)?;
+                    let w = p.num_pred_one_row();
+                    p.predict_dense(slice, nrow, ncol).map(|o| (o, w))
+                })
+                .map_err(to_py)?;
+            let arr = numpy::PyArray1::from_vec(py, out);
+            arr.reshape([nrow, width])
+        })
     }
 
     /// Predict a scipy CSR (`is_csc=false`) or CSC (`is_csc=true`) matrix of shape
@@ -842,76 +952,80 @@ impl NativeBooster {
         num_threads: i32,
         disable_shape_check: bool,
     ) -> PyResult<Py<PyAny>> {
-        self.check_num_features(ncol, disable_shape_check)?;
-        let cfg = predict_config(
-            kind,
-            start_iteration,
-            num_iteration,
-            pred_early_stop,
-            pred_early_stop_freq,
-            pred_early_stop_margin,
-            num_threads,
-        )?;
-        let as_slice = |e: numpy::NotContiguousError| LightGBMError::new_err(e.to_string());
-        let (indptr, indices, data) = (
-            indptr.as_slice().map_err(as_slice)?,
-            indices.as_slice().map_err(as_slice)?,
-            data.as_slice().map_err(as_slice)?,
-        );
-        let model = &self.model;
-        if cfg.kind == PredictKind::Contrib {
-            let mats = py
+        guard(move || {
+            self.check_num_features(ncol, disable_shape_check)?;
+            let cfg = predict_config(
+                kind,
+                start_iteration,
+                num_iteration,
+                pred_early_stop,
+                pred_early_stop_freq,
+                pred_early_stop_margin,
+                num_threads,
+            )?;
+            let as_slice = |e: numpy::NotContiguousError| LightGBMError::new_err(e.to_string());
+            let (indptr, indices, data) = (
+                indptr.as_slice().map_err(as_slice)?,
+                indices.as_slice().map_err(as_slice)?,
+                data.as_slice().map_err(as_slice)?,
+            );
+            let model = &self.model;
+            if cfg.kind == PredictKind::Contrib {
+                let mats = py
+                    .allow_threads(|| {
+                        let p = Predictor::new(model, &cfg)?;
+                        if is_csc {
+                            p.predict_contrib_csc(indptr, indices, data, nrow)
+                        } else {
+                            p.predict_contrib_csr(indptr, indices, data)
+                        }
+                    })
+                    .map_err(to_py)?;
+                let out: Vec<Py<PyAny>> = mats
+                    .into_iter()
+                    .map(|m| {
+                        let t = (
+                            numpy::PyArray1::from_vec(py, m.indptr),
+                            numpy::PyArray1::from_vec(py, m.indices),
+                            numpy::PyArray1::from_vec(py, m.data),
+                        );
+                        Ok(t.into_pyobject(py)?.into_any().unbind())
+                    })
+                    .collect::<PyResult<_>>()?;
+                return Ok(pyo3::types::PyList::new(py, out)?.into_any().unbind());
+            }
+            let (out, width) = py
                 .allow_threads(|| {
                     let p = Predictor::new(model, &cfg)?;
-                    if is_csc {
-                        p.predict_contrib_csc(indptr, indices, data, nrow)
+                    let w = p.num_pred_one_row();
+                    let out = if is_csc {
+                        p.predict_csc(indptr, indices, data, nrow)?
                     } else {
-                        p.predict_contrib_csr(indptr, indices, data)
-                    }
+                        p.predict_csr(indptr, indices, data)?
+                    };
+                    Ok::<_, lgbm_core::Error>((out, w))
                 })
                 .map_err(to_py)?;
-            let out: Vec<Py<PyAny>> = mats
-                .into_iter()
-                .map(|m| {
-                    let t = (
-                        numpy::PyArray1::from_vec(py, m.indptr),
-                        numpy::PyArray1::from_vec(py, m.indices),
-                        numpy::PyArray1::from_vec(py, m.data),
-                    );
-                    Ok(t.into_pyobject(py)?.into_any().unbind())
-                })
-                .collect::<PyResult<_>>()?;
-            return Ok(pyo3::types::PyList::new(py, out)?.into_any().unbind());
-        }
-        let (out, width) = py
-            .allow_threads(|| {
-                let p = Predictor::new(model, &cfg)?;
-                let w = p.num_pred_one_row();
-                let out = if is_csc {
-                    p.predict_csc(indptr, indices, data, nrow)?
-                } else {
-                    p.predict_csr(indptr, indices, data)?
-                };
-                Ok::<_, lgbm_core::Error>((out, w))
-            })
-            .map_err(to_py)?;
-        let rows = out.len().checked_div(width).unwrap_or(nrow);
-        Ok(numpy::PyArray1::from_vec(py, out)
-            .reshape([rows, width])?
-            .into_any()
-            .unbind())
+            let rows = out.len().checked_div(width).unwrap_or(nrow);
+            Ok(numpy::PyArray1::from_vec(py, out)
+                .reshape([rows, width])?
+                .into_any()
+                .unbind())
+        })
     }
 
     /// upstream: src/c_api.cpp (v4.7.0) Booster::CreatePredictor shape check.
     fn check_num_features(&self, ncol: usize, disable_shape_check: bool) -> PyResult<()> {
-        if !disable_shape_check && ncol != self.model.num_features() {
-            return Err(LightGBMError::new_err(format!(
-                "The number of features in data ({ncol}) is not the same as it was in training data ({}).\n\
+        guard(move || {
+            if !disable_shape_check && ncol != self.model.num_features() {
+                return Err(LightGBMError::new_err(format!(
+                    "The number of features in data ({ncol}) is not the same as it was in training data ({}).\n\
                  You can set ``predict_disable_shape_check=true`` to discard this error, but please be aware what you are doing.",
-                self.model.num_features()
-            )));
-        }
-        Ok(())
+                    self.model.num_features()
+                )));
+            }
+            Ok(())
+        })
     }
 }
 
@@ -960,25 +1074,27 @@ fn predict_config(
     pred_early_stop_margin: f64,
     num_threads: i32,
 ) -> PyResult<PredictConfig> {
-    let kind = match kind {
-        0 => PredictKind::Normal,
-        1 => PredictKind::RawScore,
-        2 => PredictKind::LeafIndex,
-        3 => PredictKind::Contrib,
-        other => {
-            return Err(LightGBMError::new_err(format!(
-                "unknown predict type {other}"
-            )));
-        }
-    };
-    Ok(PredictConfig {
-        kind,
-        start_iteration,
-        num_iteration,
-        pred_early_stop,
-        pred_early_stop_freq,
-        pred_early_stop_margin,
-        num_threads: usize::try_from(num_threads).unwrap_or(0),
+    guard(move || {
+        let kind = match kind {
+            0 => PredictKind::Normal,
+            1 => PredictKind::RawScore,
+            2 => PredictKind::LeafIndex,
+            3 => PredictKind::Contrib,
+            other => {
+                return Err(LightGBMError::new_err(format!(
+                    "unknown predict type {other}"
+                )));
+            }
+        };
+        Ok(PredictConfig {
+            kind,
+            start_iteration,
+            num_iteration,
+            pred_early_stop,
+            pred_early_stop_freq,
+            pred_early_stop_margin,
+            num_threads: usize::try_from(num_threads).unwrap_or(0),
+        })
     })
 }
 
@@ -1010,48 +1126,50 @@ fn load_text_file<'py>(
     precise_float_parser: bool,
     num_features: usize,
 ) -> PyResult<TextFileArrays<'py>> {
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| LightGBMError::new_err(format!("Data file {path} doesn't exist.")))?;
-    let opts = lgbm_core::io::text_loader::TextLoadOptions {
-        header,
-        label_column: &label_column,
-        weight_column: &weight_column,
-        group_column: &group_column,
-        ignore_column: &ignore_column,
-        precise_float_parser,
-        num_features,
-    };
-    let loaded = py
-        .allow_threads(|| lgbm_core::io::text_loader::load_text(&content, &opts))
-        .map_err(to_py)?;
-    let matrix = numpy::PyArray1::from_vec(py, loaded.features)
-        .reshape([loaded.num_data, loaded.num_features])?;
-    Ok((
-        matrix,
-        loaded.label,
-        loaded.weight,
-        loaded.group,
-        loaded.feature_names,
-    ))
+    guard(move || {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|_| LightGBMError::new_err(format!("Data file {path} doesn't exist.")))?;
+        let opts = lgbm_core::io::text_loader::TextLoadOptions {
+            header,
+            label_column: &label_column,
+            weight_column: &weight_column,
+            group_column: &group_column,
+            ignore_column: &ignore_column,
+            precise_float_parser,
+            num_features,
+        };
+        let loaded = py
+            .allow_threads(|| lgbm_core::io::text_loader::load_text(&content, &opts))
+            .map_err(to_py)?;
+        let matrix = numpy::PyArray1::from_vec(py, loaded.features)
+            .reshape([loaded.num_data, loaded.num_features])?;
+        Ok((
+            matrix,
+            loaded.label,
+            loaded.weight,
+            loaded.group,
+            loaded.feature_names,
+        ))
+    })
 }
 
 /// Parse the text of a `<data>.weight` side file (upstream `Metadata::LoadWeights`).
 #[pyfunction]
 fn parse_weights_file(content: &str) -> PyResult<Vec<f32>> {
-    lgbm_core::io::side_files::parse_weights(content).map_err(to_py)
+    guard(move || lgbm_core::io::side_files::parse_weights(content).map_err(to_py))
 }
 
 /// Parse the text of a `<data>.query` side file into group sizes (upstream `LoadQueryBoundaries`).
 #[pyfunction]
 fn parse_query_file(content: &str) -> PyResult<Vec<i32>> {
-    lgbm_core::io::side_files::parse_query(content).map_err(to_py)
+    guard(move || lgbm_core::io::side_files::parse_query(content).map_err(to_py))
 }
 
 /// Parse the text of a `<data>.init` side file: `(num_class, class-major values)`
 /// (upstream `Metadata::LoadInitialScore`).
 #[pyfunction]
 fn parse_init_score_file(content: &str) -> PyResult<(usize, Vec<f64>)> {
-    lgbm_core::io::side_files::parse_init_score(content).map_err(to_py)
+    guard(move || lgbm_core::io::side_files::parse_init_score(content).map_err(to_py))
 }
 
 #[pyfunction]
@@ -1126,7 +1244,7 @@ impl Drop for MuteGuard {
 #[pyfunction]
 #[pyo3(signature = (params))]
 fn validate_params(params: HashMap<String, String>) -> PyResult<()> {
-    Config::from_params(&params).map(|_| ()).map_err(to_py)
+    guard(move || Config::from_params(&params).map(|_| ()).map_err(to_py))
 }
 
 /// upstream: `LGBM_DatasetUpdateParamChecking`: raise when `new` cannot be applied to a Dataset built with `old`.
@@ -1136,28 +1254,32 @@ fn dataset_check_reset_config(
     old_params: HashMap<String, String>,
     new_params: HashMap<String, String>,
 ) -> PyResult<()> {
-    let old = Config::from_params(&old_params).map_err(to_py)?;
-    lgbm_core::config::check_dataset_reset_config(&old, &new_params).map_err(to_py)
+    guard(move || {
+        let old = Config::from_params(&old_params).map_err(to_py)?;
+        lgbm_core::config::check_dataset_reset_config(&old, &new_params).map_err(to_py)
+    })
 }
 
 #[pymodule]
 fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Install once per process; a second module init keeps the first logger.
-    if log::set_logger(&PY_LOGGER).is_ok() {
-        log::set_max_level(log::LevelFilter::Info);
-    }
-    m.add("UPSTREAM_VERSION", lgbm_core::UPSTREAM_VERSION)?;
-    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    m.add("LightGBMError", m.py().get_type::<LightGBMError>())?;
-    m.add_class::<NativeBooster>()?;
-    m.add_class::<NativeDataset>()?;
-    m.add_function(wrap_pyfunction!(param_aliases, m)?)?;
-    m.add_function(wrap_pyfunction!(load_text_file, m)?)?;
-    m.add_function(wrap_pyfunction!(parse_weights_file, m)?)?;
-    m.add_function(wrap_pyfunction!(parse_query_file, m)?)?;
-    m.add_function(wrap_pyfunction!(parse_init_score_file, m)?)?;
-    m.add_function(wrap_pyfunction!(param_types, m)?)?;
-    m.add_function(wrap_pyfunction!(validate_params, m)?)?;
-    m.add_function(wrap_pyfunction!(dataset_check_reset_config, m)?)?;
-    Ok(())
+    guard(move || {
+        // Install once per process; a second module init keeps the first logger.
+        if log::set_logger(&PY_LOGGER).is_ok() {
+            log::set_max_level(log::LevelFilter::Info);
+        }
+        m.add("UPSTREAM_VERSION", lgbm_core::UPSTREAM_VERSION)?;
+        m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+        m.add("LightGBMError", m.py().get_type::<LightGBMError>())?;
+        m.add_class::<NativeBooster>()?;
+        m.add_class::<NativeDataset>()?;
+        m.add_function(wrap_pyfunction!(param_aliases, m)?)?;
+        m.add_function(wrap_pyfunction!(load_text_file, m)?)?;
+        m.add_function(wrap_pyfunction!(parse_weights_file, m)?)?;
+        m.add_function(wrap_pyfunction!(parse_query_file, m)?)?;
+        m.add_function(wrap_pyfunction!(parse_init_score_file, m)?)?;
+        m.add_function(wrap_pyfunction!(param_types, m)?)?;
+        m.add_function(wrap_pyfunction!(validate_params, m)?)?;
+        m.add_function(wrap_pyfunction!(dataset_check_reset_config, m)?)?;
+        Ok(())
+    })
 }
