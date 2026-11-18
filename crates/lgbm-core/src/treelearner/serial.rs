@@ -190,6 +190,17 @@ impl SerialTreeLearner {
     /// upstream: `SerialTreeLearner::Init` (col-wise histogram layout).
     pub fn new(cfg: Arc<Config>, ds: Arc<Dataset>, is_constant_hessian: bool) -> Result<Self> {
         let l = &ds.layout;
+        // upstream: `Dataset::GetShareStates` (v4.7.0) rejects both force flags at once. The
+        // layout choice is otherwise a performance-only decision (both layouts build identical
+        // histograms), and column-wise is at least as fast as the dense row-wise path on every
+        // measured shape, so the auto path (neither flag set) stays column-wise; see DECISIONS
+        // D-013.
+        if cfg.force_col_wise && cfg.force_row_wise {
+            return Err(Error::InvalidParameter(
+                "Cannot set both of `force_col_wise` and `force_row_wise` to `true` at the same time"
+                    .into(),
+            ));
+        }
         let row_wise = cfg.force_row_wise;
         let mut row_major_col: Vec<Option<usize>> = vec![None; ds.data.len()];
         let mut dense_cols: Vec<&DenseBin> = Vec::new();
