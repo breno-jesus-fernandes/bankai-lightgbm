@@ -157,3 +157,25 @@ Entry format:
   symbols directly and checks them against `lgbm-core`.
 - SPEC ref: SPEC-ERR-5 (and SPEC-ERR-4 for the panic boundary)
 - Status: active
+
+## D-013: Layout auto-choice stays column-wise instead of upstream's runtime timing probe
+
+- Date: 2026-11-18
+- Question: T2.2. Upstream picks column-wise vs row-wise in auto mode (neither `force_col_wise`
+  nor `force_row_wise` set) by building both share states and *timing* a histogram construction
+  of each (`Dataset::GetShareStates`, v4.7.0), keeping the faster. Should bankai mirror that
+  runtime probe?
+- Choice: no. bankai's auto path stays column-wise and skips the probe. It still rejects the
+  `force_col_wise && force_row_wise` conflict exactly like upstream's fatal in the same function.
+- Rationale: the layout choice is performance-only — column-wise and row-wise accumulate the same
+  bins over the same rows, so they produce bit-identical histograms and the trained model is the
+  same whichever is chosen (`tests/parity/test_auto_layout_parity.py` pins auto == force_col_wise
+  == force_row_wise == upstream auto). Upstream probes because it cannot rank the two statically;
+  bankai can, from the interleaved benchmark (release, 50k rows, 50 rounds, 7 interleaved rounds,
+  medians; bankai/upstream time ratio): dense column-wise 0.69x (1 thread) / 0.58x (2), dense
+  row-wise 0.95x / 0.99x. Column-wise is faster on every measured dense shape, and mirroring
+  upstream's probe would only add the cost of building and timing a row-wise state that is then
+  discarded. Revisit when the multi-value row-wise path (T2.3) and the perf work (T3.1/T3.2) make
+  row-wise competitive somewhere. Extends D-006 (which deferred auto-choice pending this data).
+- SPEC ref: none (performance-only choice; model output is identical, AGENTS.md section 5)
+- Status: active
