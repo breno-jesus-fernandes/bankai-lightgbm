@@ -56,7 +56,7 @@ Changing these nodes requires a DECISIONS.md entry and a parity test that fails 
 ## Tier 4: boosting gaps
 
 - [x] T4.1 `rank_xendcg` accepts a `position` field. Upstream v4.7.0 does not override `UpdatePositionBiasFactors` for `RankXENDCG`, so its position-bias factors stay 0 and the adjustment is a no-op: positions are accepted but inert (only lambdarank learns the bias). bankai matches, and no longer raises `NotImplementedError` (`tests/parity/test_xendcg_positions_parity.py`; see DECISIONS D-009). Depends: T0.6. Verify: `pytest tests/parity -k position`, GATES. Bench: n/a.
-- [ ] T4.2 `bagging_by_query` for `rank_xendcg`. Depends: T4.1. Verify: `pytest tests/parity -k bagging_by_query`, GATES. Bench: n/a.
+- [x] T4.2 `bagging_by_query` for `rank_xendcg`. Depends: T4.1. Verify: `pytest tests/parity -k bagging_by_query`, GATES. Bench: n/a.
 - [ ] T4.3 Model merge (upstream `Booster.merge` semantics). Depends: T0.4. Verify: `pytest tests/parity -k merge`, GATES. Bench: n/a.
 - [ ] T4.4 Monotone `advanced` with categorical features (currently refused; needs the upstream undefined-behaviour decision in DECISIONS.md first). Depends: T3.2. Verify: `pytest tests/parity -k monotone`, GATES. Bench: n/a.
 

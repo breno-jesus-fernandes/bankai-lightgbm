@@ -16,6 +16,20 @@ pub trait Objective: Send + Sync {
     fn to_model_string(&self) -> String;
     /// Gradients for all `num_model_per_iteration()` classes (class-major, like `score`).
     fn get_gradients(&self, score: &[f64], gradients: &mut [f32], hessians: &mut [f32]);
+    /// upstream: `ObjectiveFunction::GetGradientsWithSampledQueries`. When `bagging_by_query`
+    /// is on, only the sampled queries get gradients. `sampled` holds their query indices
+    /// (`None` means every query, i.e. the same as [`Objective::get_gradients`]). Objectives
+    /// that keep per-query state (`rank_xendcg`) override this so the state advances only for
+    /// the sampled queries; the default pass is correct for every objective without such state.
+    fn get_gradients_with_sampled_queries(
+        &self,
+        score: &[f64],
+        _sampled: Option<&[i32]>,
+        gradients: &mut [f32],
+        hessians: &mut [f32],
+    ) {
+        self.get_gradients(score, gradients, hessians);
+    }
     fn boost_from_score(&self, class_id: usize) -> f64;
     fn is_constant_hessian(&self) -> bool;
     fn num_model_per_iteration(&self) -> usize {

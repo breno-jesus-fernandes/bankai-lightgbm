@@ -589,15 +589,32 @@ impl Trainer {
                 self.dart_drop();
             }
         }
-        self.objective
-            .get_gradients(&self.score, &mut self.gradients, &mut self.hessians);
         let iter = self.iter;
         self.iter += 1;
-        // upstream: `Bagging`/GOSS run after gradients; GOSS may rescale them in place.
-        let rows: Option<Vec<i32>> = self
-            .sampler
-            .sample(iter, &mut self.gradients, &mut self.hessians)
-            .map(<[i32]>::to_vec);
+        // upstream: `GBDT::Boosting` runs `Bagging` first. With `bagging_by_query` the objective's
+        // gradient pass is then restricted to the sampled queries, so a per-query objective
+        // (rank_xendcg) advances its RNG only for them (gbdt.cpp: GetGradientsWithSampledQueries).
+        // Otherwise gradients come first and `Bagging`/GOSS run after (GOSS rescales in place).
+        let rows: Option<Vec<i32>> = if self.cfg.bagging_by_query {
+            let rows = self
+                .sampler
+                .sample(iter, &mut self.gradients, &mut self.hessians)
+                .map(<[i32]>::to_vec);
+            let sampled = self.sampler.sampled_query_indices();
+            self.objective.get_gradients_with_sampled_queries(
+                &self.score,
+                sampled,
+                &mut self.gradients,
+                &mut self.hessians,
+            );
+            rows
+        } else {
+            self.objective
+                .get_gradients(&self.score, &mut self.gradients, &mut self.hessians);
+            self.sampler
+                .sample(iter, &mut self.gradients, &mut self.hessians)
+                .map(<[i32]>::to_vec)
+        };
         let oob = out_of_bag(rows.as_deref(), n);
 
         let mut should_continue = false;

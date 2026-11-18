@@ -50,3 +50,25 @@ def test_query_bagging_matches_upstream_tree_by_tree() -> None:
         ours.update()
     assert ours.num_trees() == up.num_trees()
     np.testing.assert_allclose(ours.predict(x), up.predict(x), rtol=1e-9, atol=0)
+
+
+# upstream: RankXENDCG seeds one Random per query (seed_ + query_id) and draws NextFloat() for
+# each sampled query inside GetGradientsWithSampledQueries. Because each query's RNG is indexed
+# by query id, sampling whole queries never perturbs another query's draw sequence, so query
+# bagging must still match upstream tree by tree.
+XENDCG_PARAMS = {**PARAMS, "objective": "rank_xendcg", "objective_seed": 5}
+
+
+def test_query_bagging_xendcg_matches_upstream_tree_by_tree() -> None:
+    x, y, group = _ranking_data()
+    up = lightgbm.Booster(
+        params=XENDCG_PARAMS, train_set=lightgbm.Dataset(x, y, group=group, free_raw_data=False)
+    )
+    ours = lgb.Booster(
+        params=XENDCG_PARAMS, train_set=lgb.Dataset(x, y, group=group, free_raw_data=False)
+    )
+    for _ in range(10):
+        up.update()
+        ours.update()
+    assert ours.num_trees() == up.num_trees()
+    np.testing.assert_allclose(ours.predict(x), up.predict(x), rtol=1e-9, atol=0)

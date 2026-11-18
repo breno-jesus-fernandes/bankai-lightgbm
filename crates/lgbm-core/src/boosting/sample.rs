@@ -31,6 +31,9 @@ pub(crate) struct Bagging {
     /// Row boundaries of each query (`num_queries + 1` entries) when `bagging_by_query` is
     /// on; empty otherwise. Whole queries are kept or dropped together.
     query_boundaries: Vec<i32>,
+    /// The query indices drawn into the current bag, ascending. Filled by [`Bagging::draw`]
+    /// on the query path and exposed as upstream's `sampled_query_indices()`.
+    sampled_queries: Vec<i32>,
 }
 
 /// GOSS: keep the `top_rate` rows with the largest gradients, sample `other_rate` of the
@@ -113,21 +116,16 @@ impl SampleStrategy {
             need_rebag: true,
             bag: Vec::new(),
             query_boundaries: Vec::new(),
+            sampled_queries: Vec::new(),
         }))
     }
 
-    /// upstream: `BaggingSampleStrategy` with `bagging_by_query`. Only the ranking objective
-    /// is supported: `rank_xendcg` draws a random number per query, and upstream computes
-    /// gradients for the sampled queries only, which this port does not yet mirror.
+    /// upstream: `BaggingSampleStrategy` with `bagging_by_query`. Whole queries are bagged and
+    /// the objective's gradient pass is restricted to the sampled queries (see
+    /// `GetGradientsWithSampledQueries`). `rank_xendcg` draws a random number per query from a
+    /// generator seeded per query id, so sampling whole queries never perturbs another query's
+    /// draw sequence.
     fn new_query_bagging(cfg: &Config, md: &Metadata, _ntpi: usize) -> Result<Self> {
-        if matches!(
-            cfg.objective.as_str(),
-            "rank_xendcg" | "xendcg" | "xe_ndcg" | "xe_ndcg_mart" | "xendcg_mart"
-        ) {
-            return Err(Error::Unsupported(
-                "bagging_by_query with rank_xendcg".into(),
-            ));
-        }
         if md.query_boundaries.is_empty() {
             return Err(Error::InvalidParameter(
                 "bagging_by_query requires query or group information".into(),
@@ -145,7 +143,19 @@ impl SampleStrategy {
             need_rebag: true,
             bag: Vec::new(),
             query_boundaries: md.query_boundaries.clone(),
+            sampled_queries: Vec::new(),
         }))
+    }
+
+    /// The query indices in the current bag (ascending), or `None` when bagging is not by
+    /// query. upstream: `SampleStrategy::sampled_query_indices()`.
+    pub fn sampled_query_indices(&self) -> Option<&[i32]> {
+        match self {
+            SampleStrategy::Bagging(b) if !b.query_boundaries.is_empty() => {
+                Some(&b.sampled_queries)
+            }
+            _ => None,
+        }
     }
 
     /// upstream: `SampleStrategy::IsHessianChange`
@@ -199,9 +209,11 @@ impl Bagging {
     fn draw(&mut self, n: usize) -> Vec<i32> {
         let mut bag = Vec::new();
         if !self.query_boundaries.is_empty() {
+            self.sampled_queries.clear();
             for (q, span) in self.query_boundaries.windows(2).enumerate() {
                 let r = f64::from(self.rands[q / RAND_BLOCK].next_float());
                 if r < self.fraction {
+                    self.sampled_queries.push(q as i32);
                     bag.extend(span[0]..span[1]);
                 }
             }
@@ -297,6 +309,7 @@ mod tests {
             need_rebag: true,
             bag: Vec::new(),
             query_boundaries: Vec::new(),
+            sampled_queries: Vec::new(),
         };
         let bag = b.draw(2500);
         assert!(bag.windows(2).all(|w| w[0] < w[1]));
@@ -324,15 +337,19 @@ mod tests {
             need_rebag: true,
             bag: Vec::new(),
             query_boundaries: bounds.clone(),
+            sampled_queries: Vec::new(),
         };
         assert_eq!(b.num_rows(), 12);
         let bag = b.draw(12);
         assert!(bag.windows(2).all(|w| w[0] < w[1]));
-        // Each query is either fully in the bag or fully out of it.
-        for span in bounds.windows(2) {
+        // Each query is either fully in the bag or fully out of it, and the sampled query
+        // indices are exactly those whose rows landed in the bag, ascending.
+        for (q, span) in bounds.windows(2).enumerate() {
             let inside = bag.iter().filter(|&&r| r >= span[0] && r < span[1]).count();
             assert!(inside == 0 || inside == (span[1] - span[0]) as usize);
+            assert_eq!(b.sampled_queries.contains(&(q as i32)), inside > 0);
         }
+        assert!(b.sampled_queries.windows(2).all(|w| w[0] < w[1]));
         // The same seed reproduces the same draw.
         let mut b2 = Bagging {
             rands: block_rands(3, 12),
