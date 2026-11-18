@@ -479,12 +479,16 @@ impl SerialTreeLearner {
                 self.num_data
             }
         };
+        // upstream: `LeafSplits::Init(gradients, hessians)` (src/treelearner/leaf_splits.hpp, v4.7.0)
+        // sets no weight, so the root keeps the weight of the previous tree's smaller leaf. The
+        // forced split at the root reads it as its parent output, and its recorded gain depends on it.
+        let carried = self.smaller.weight;
         self.smaller = LeafSplits {
             leaf_index: 0,
             num_data_in_leaf: count as i32,
             sum_gradients: sg,
             sum_hessians: sh,
-            weight: 0.0,
+            weight: carried,
         };
         self.larger = LeafSplits::empty();
     }
