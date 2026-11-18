@@ -8,6 +8,7 @@ mod intermediate;
 mod linear;
 
 use self::forced::ForcedSplits;
+use super::cegb::Cegb;
 use super::col_sampler::ColSampler;
 use super::data_partition::{DataPartition, SplitRule};
 use super::feature_histogram::{
@@ -151,6 +152,8 @@ pub struct SerialTreeLearner {
     splits: Vec<SplitRecord>,
     pub partition: DataPartition,
     best_split_per_leaf: Vec<SplitInfo>,
+    /// Cost-efficient gradient boosting state (`cegb_*`); `None` when CEGB is not enabled.
+    cegb: Option<Cegb>,
     /// Forced splits applied at the start of every tree (`forcedsplits_filename`).
     forced: Option<Arc<ForcedSplits>>,
     /// Per-dataset facts for linear leaves (`linear_tree`); `None` otherwise.
@@ -348,6 +351,13 @@ impl SerialTreeLearner {
             ))
         .then(|| intermediate::IntermediateConstraints::new(num_leaves));
         let monotone_advanced = advanced_on.then(|| advanced::new_store(num_leaves, num_features));
+        let cegb = Cegb::new(
+            &cfg,
+            num_features,
+            ds.layout.num_total_features,
+            num_leaves,
+            num_data,
+        )?;
         Ok(SerialTreeLearner {
             cfg,
             params,
@@ -368,6 +378,7 @@ impl SerialTreeLearner {
             splits: Vec::new(),
             partition: DataPartition::new(num_data, num_leaves),
             best_split_per_leaf: vec![SplitInfo::default(); num_leaves],
+            cegb,
             forced,
             linear,
             intermediate,
@@ -462,6 +473,9 @@ impl SerialTreeLearner {
             }
         }
         self.leaf_depth.fill(0);
+        if let Some(cegb) = self.cegb.as_mut() {
+            cegb.before_train();
+        }
         self.col_sampler.reset_by_tree();
         match rows {
             Some(r) => self.partition.init_with(r),
@@ -971,22 +985,65 @@ impl SerialTreeLearner {
         };
 
         // Fold in feature order, as the sequential search did.
+        // upstream: `ComputeBestSplitForFeature` subtracts `cegb_->DeltaGain` from each feature's
+        // split gain before comparing it to the leaf's best. The lazy per-data cost reads the
+        // leaf's current rows, cloned here so the fold borrows nothing of `self` through CEGB.
+        let mut cegb = self.cegb.take();
+        let (smaller_idx, larger_idx): (Vec<i32>, Vec<i32>) = if cegb.is_some() {
+            let si = self
+                .partition
+                .indices_on_leaf(smaller.leaf_index as usize)
+                .to_vec();
+            let li = if larger.is_some() {
+                self.partition
+                    .indices_on_leaf(larger_leaf.leaf_index as usize)
+                    .to_vec()
+            } else {
+                Vec::new()
+            };
+            (si, li)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let mut smaller_best = SplitInfo::default();
         let mut larger_best = SplitInfo::default();
         for (f, outcome) in outcomes.into_iter().enumerate() {
             let Some(o) = outcome else { continue };
-            let (splittable, candidate) = o.small;
+            let (splittable, mut candidate) = o.small;
             self.pool.splittable[smaller_slot][f] = splittable;
+            if let Some(c) = cegb.as_mut() {
+                let real = self.ds.layout.real_feature_idx[f] as usize;
+                candidate.gain -= c.delta_gain(
+                    f,
+                    real,
+                    smaller.leaf_index as usize,
+                    smaller.num_data_in_leaf,
+                    &candidate,
+                    &smaller_idx,
+                );
+            }
             if smaller_mask[f] && candidate.better_than(&smaller_best) {
                 smaller_best = candidate;
             }
-            if let (Some((splittable, candidate)), Some(ls)) = (o.large, larger) {
+            if let (Some((splittable, mut candidate)), Some(ls)) = (o.large, larger) {
                 self.pool.splittable[ls][f] = splittable;
+                if let Some(c) = cegb.as_mut() {
+                    let real = self.ds.layout.real_feature_idx[f] as usize;
+                    candidate.gain -= c.delta_gain(
+                        f,
+                        real,
+                        larger_leaf.leaf_index as usize,
+                        larger_leaf.num_data_in_leaf,
+                        &candidate,
+                        &larger_idx,
+                    );
+                }
                 if larger_mask[f] && candidate.better_than(&larger_best) {
                     larger_best = candidate;
                 }
             }
         }
+        self.cegb = cegb;
         self.monotone_bounds = bounds;
         self.monotone_advanced = advanced;
         self.best_split_per_leaf[smaller.leaf_index as usize] = smaller_best;
@@ -1120,6 +1177,27 @@ impl SerialTreeLearner {
         let g = &l.groups[l.feature2group[inner] as usize];
         let m = &g.bin_mappers[l.feature2subfeature[inner] as usize];
         let next_leaf = tree.num_leaves;
+        // upstream: `SerialTreeLearner::SplitInner` calls `cegb_->UpdateLeafBestSplits` first:
+        // now this feature is paid for, refund the coupled penalty to the other leaves' stored
+        // splits and mark this leaf's rows as having used it. Runs before the partition is split,
+        // so the leaf indices are still this node's rows.
+        if self.cegb.is_some() && info.feature >= 0 {
+            let real = info.feature as usize;
+            let num_leaves_now = next_leaf;
+            let indices = self.partition.indices_on_leaf(best_leaf).to_vec();
+            let mut cegb = self.cegb.take();
+            if let Some(c) = cegb.as_mut() {
+                c.update_leaf_best_splits(
+                    best_leaf,
+                    inner,
+                    real,
+                    num_leaves_now,
+                    &mut self.best_split_per_leaf,
+                    &indices,
+                );
+            }
+            self.cegb = cegb;
+        }
         // upstream: `constraints_->BeforeSplit`, before the tree and the partition split
         if let Some(im) = self.intermediate.as_mut() {
             im.before_split(tree, best_leaf, next_leaf, info.monotone_type);

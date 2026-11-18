@@ -179,3 +179,22 @@ Entry format:
   row-wise competitive somewhere. Extends D-006 (which deferred auto-choice pending this data).
 - SPEC ref: none (performance-only choice; model output is identical, AGENTS.md section 5)
 - Status: active
+
+## D-014: Took the first deterministic node (T3.4 CEGB) over the benchmark-gated T2.3/T2.4
+
+- Date: 2026-11-18
+- Question: after T2.2, PROGRESS lists T2.3 (row-wise multi-value) as the next node, then T2.4
+  (`spin_pool`→rayon). Which node to take next in the autonomous per-node loop?
+- Choice: skip the benchmark-gated T2.x nodes for now and take T3.4 (CEGB), the first eligible
+  node with a deterministic (`Bench: n/a`) gate.
+- Rationale: T2.3's gate is the sparse interleaved benchmark, and sparse is a known perf gap
+  (ROADMAP: 1.14–1.41x upstream) whose fix is T3.1 (sparse data partition), which itself depends
+  on T2.4 (the `spin_pool`→rayon migration). So T2.3 cannot clear its own benchmark gate before
+  that perf chain lands, and T2.4 is the delicate concurrency rewrite best done with focused
+  attention rather than unattended. CEGB has a clean deterministic parity gate and is completable
+  now. The per-node loop (AGENTS.md section 13) picks "the first node whose dependencies are all
+  `[x]`"; among those, this takes the first one whose gate can actually be verified unattended.
+  The benchmark-gated perf chain (T2.3, T2.4, T3.1, T3.2) remains the next focus for a session
+  that can run and compare benchmarks interactively.
+- SPEC ref: none (operational choice under AGENTS.md section 13)
+- Status: active
