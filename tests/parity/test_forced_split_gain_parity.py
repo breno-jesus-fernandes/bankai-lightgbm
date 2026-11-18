@@ -37,10 +37,13 @@ def _data(seed: int = 9, n: int = 1500) -> tuple[np.ndarray, np.ndarray]:
     return X, y
 
 
-@pytest.mark.parametrize("forced", [
-    {"feature": 1, "threshold": 0.0},
-    {"feature": 1, "threshold": 0.5, "left": {"feature": 1, "threshold": -0.5}},
-])
+@pytest.mark.parametrize(
+    "forced",
+    [
+        {"feature": 1, "threshold": 0.0},
+        {"feature": 1, "threshold": 0.5, "left": {"feature": 1, "threshold": -0.5}},
+    ],
+)
 def test_forced_split_gain_matches_upstream_in_every_tree(tmp_path, forced: dict) -> None:
     X, y = _data()
     path = tmp_path / "forced.json"
