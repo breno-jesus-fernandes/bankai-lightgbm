@@ -31,7 +31,7 @@
 
 - `Dataset.add_features_from` appends another constructed Dataset's features in place, as upstream's `AddFeaturesFrom` does: groups, bins, feature names (clashes get a `D<n>_` prefix) and the data type of the raw data are merged. Both Datasets must have the same number of rows. Adding features when both sides have multi-value feature bundles raises `NotImplementedError`; upstream re-bundles both sides there, which is not ported yet.
 
-- `forcedbins_filename` sets per-feature upper bin bounds from the JSON file, as upstream's `GetForcedBins`; categorical features are skipped with a warning. The model matches `lightgbm==4.7.0`. The text dump's `forced_bins` line is still empty.
+- `forcedbins_filename` sets per-feature upper bin bounds from the JSON file, as upstream's `GetForcedBins`; categorical features are skipped with a warning. The model matches `lightgbm==4.7.0`, and the bounds are now stored on the dataset so `Dataset._dump_text`'s `forced_bins` section matches upstream byte for byte (`tests/parity/test_forced_bins_dump_parity.py`) instead of being empty.
 
 - A subset of a Dataset built from a file keeps the file path as its data (upstream logs a warning and returns the original raw data). Predicting from a binary dataset file raises upstream's `Unknown format of training data` error.
 

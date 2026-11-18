@@ -198,3 +198,20 @@ Entry format:
   that can run and compare benchmarks interactively.
 - SPEC ref: none (operational choice under AGENTS.md section 13)
 - Status: active
+
+## D-015: Took T5.2 (forced-bins dump) over T4.3 (model merge), which is underspecified
+
+- Date: 2026-11-18
+- Question: after T3.4, the next deterministic nodes are T4.3 (model merge, "upstream
+  `Booster.merge` semantics") and T5.2 (dataset surface). Which to take?
+- Choice: take T5.2. Defer T4.3 until its contract is pinned.
+- Rationale: upstream `lightgbm` has no public `Booster.merge` on the Python `Booster`, and
+  `pytest tests/parity -k merge` collects zero tests, so there is no parity surface to write a
+  failing test against without first inventing the semantics (the closest upstream construct is
+  the C API `LGBM_BoosterMerge` / `GBDT::MergeFrom`, used for distributed training, which belongs
+  with the C-API/network work, not a Python parity node). T5.2 is a concrete, deterministic gap:
+  `forcedbins_filename` bounds were applied to binning but not stored, so the dataset text dump's
+  `forced_bins` section was empty; storing them (`forced_bin_bounds_for`) makes the dump match
+  upstream byte for byte. T4.3 should be revisited once its intended API surface is decided.
+- SPEC ref: none (operational choice under AGENTS.md section 13)
+- Status: active
