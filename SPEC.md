@@ -108,16 +108,14 @@ before the module that uses it is merged. Rows marked `(verify)` are not yet che
 - **SPEC-NUM-4 (bin mappers).** Bin boundaries are bit-exact with upstream on the fixture platform
   (`tests/fixtures/train/*`, `datasets/*`). Off-platform, the same 64 ULP bound applies.
 - **SPEC-NUM-5 (split gain).** Split gains are computed in `f64` as upstream does. A gain tie is broken
-  by the rule in SPEC-NUM-7. The exact comparison upstream uses for gains is not yet pinned in this file:
-  the Tier 1 tie-break audit (PROGRESS.md) reads `src/treelearner/split_info.hpp` and
-  `feature_histogram.hpp` (verify), records the exact comparison here, and adds a parity test before any
-  tolerance is considered.
+  by the rule in SPEC-NUM-7. Pinned by D-005: gains are compared with upstream's `SplitInfo::operator>`
+  (`src/treelearner/split_info.hpp`, v4.7.0), exact `f64` comparison, no tolerance; the NaN check is
+  upstream's always-false `gain == NAN`, reproduced on purpose. Tested by `tests/parity/test_split_tie_parity.py`.
 - **SPEC-NUM-6 (accumulation order).** Wherever upstream writes `x += a * b`, bankai uses
   `utils::common::madd` so the rounding matches upstream's compiled code (fused on aarch64). Histogram
   sums accumulate rows in leaf order, within each bin, as the column-wise and row-wise kernels both do.
-- **SPEC-NUM-7 (tie-breaking).** The tie rule is upstream's, and it is pinned by the Tier 1 audit before
-  any new code depends on it. Until that audit lands, the rule bankai follows is the one the existing
-  parity tests pass under, and the audit either confirms it or records the difference in `DECISIONS.md`.
+- **SPEC-NUM-7 (tie-breaking).** Equal gains: the lower feature index wins, `-1` counts as the largest. Confirmed
+  against upstream `SplitInfo::operator>` (D-005) and pinned by `tests/parity/test_split_tie_parity.py`.
 - **SPEC-NUM-8 (float parsing).** Upstream has two parsers. `StringToArray` uses the precise
   `fast_double_parser` path and `StringToArrayFast` uses the legacy `Common::Atof`, which is not correctly
   rounded. Each call site ports with the same parser. Prediction-relevant fields use the precise parser.

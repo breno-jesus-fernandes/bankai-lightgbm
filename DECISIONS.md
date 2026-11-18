@@ -74,6 +74,65 @@ Entry format:
 - SPEC ref: none (new rule proposed; revisit when row-wise beats column-wise on any benchmark case)
 - Status: active
 
+## D-007: Took the first deterministic node (T3.3) ahead of finishing T2.1's benchmark
+
+- Date: 2026-11-17
+- Question: PROGRESS orders T2.1 (`[~]`) before T3.3. T2.1's only outstanding item is the forced row-wise training benchmark; the feature merged in PR #84. Which node to work next in an autonomous session on the 2-vCPU dev VM?
+- Choice: leave T2.1 at `[~]` and implement T3.3 (categorical forced splits), the first eligible node whose verify is deterministic (parity, no benchmark gate).
+- Rationale: AGENTS.md section 12 says a single-run timing below ~3% is noise on this VM and benchmark gates need interleaved medians over 7+ rounds; a benchmark pass/fail cannot be decided reliably unattended. T3.3 depends only on T0.3 `[x]` and is verified by `pytest tests/parity -k forced_split`, which is deterministic. The benchmark for T2.1 is deferred to a session that can run it under controlled load.
+- SPEC ref: none (operational choice under AGENTS.md section 12 and section 13)
+- Status: active
+
+## D-008: T3.3 is built on top of the forced-split root-weight fix (a7a9147)
+
+- Date: 2026-11-17
+- Question: categorical forced-split parity compares the full model text over several trees. The recorded `split_gain` of a root forced split depends on the carried root weight, which commit `a7a9147` ("forced splits record upstream's gain in every tree") fixes but which is not yet on `main`. Base the work on `main` or on `a7a9147`?
+- Choice: base `feat/forced-cat-splits` on `a7a9147`. The PR stacks on that unmerged fix (noted in the PR body). While there, `a7a9147`'s `tests/parity/test_forced_split_gain_parity.py` was reformatted with `ruff format` (it failed `ruff format --check` under ruff 0.17.4); no assertion changed.
+- Rationale: `a7a9147`'s own message records the discrepancy "933.6 vs 5814.6 in a categorical case" from the second tree on. Without the fix, `test_forced_split_categorical_parity.py`'s `model_to_string()` comparison would fail on gain from tree 2+, masking correct categorical-split behaviour. The fix is a true dependency of the test, not optional.
+- SPEC ref: none (operational choice; see AGENTS.md section 9 on green builds)
+- Status: active
+
+## D-009: rank_xendcg accepts positions but keeps them inert, matching upstream
+
+- Date: 2026-11-17
+- Question: T4.1 was framed as "unbiased lambdarank for rank_xendcg with positions". Should rank_xendcg learn position-bias factors like lambdarank?
+- Choice: no. rank_xendcg accepts a `position` field (no longer `NotImplementedError`) but does not learn any bias; the factors stay 0 and the score adjustment is a no-op, so training with positions equals training without them.
+- Rationale: read upstream `src/objective/rank_objective.hpp` (v4.7.0). `RankXENDCG` does not override the base `RankingObjective::UpdatePositionBiasFactors`, whose default body is empty, so `pos_biases_` stays 0 for xendcg. Only `LambdarankNDCG` overrides it. Matching upstream means accepting positions and leaving them inert. `tests/parity/test_xendcg_positions_parity.py` pins both the upstream parity and the inert behaviour.
+- SPEC ref: none (upstream quirk; matched on purpose like the other documented upstream quirks)
+- Status: active
+
+## D-010: DECISIONS ids are numbered to avoid collisions across parallel branches
+
+- Date: 2026-11-17
+- Question: two independent feature branches off `main` (`feat/forced-cat-splits`, `feat/xendcg-position-bias`) both append DECISIONS entries in the same autonomous session. How to number them so they do not collide on merge?
+- Choice: the forced-categorical branch took D-007 and D-008; this branch skips to D-009 (and this note is D-010). Numbers are assigned per branch, not per file state, so `main` ends up with a contiguous D-001..D-010 once both merge.
+- Rationale: a text log keyed by number conflicts if two branches both add "D-007". Assigning disjoint numbers up front avoids the conflict without coordination.
+- SPEC ref: none (process note)
+- Status: active
+
+## D-011: `bagging_by_query` is supported for `rank_xendcg`
+
+- Date: 2026-11-18
+- Question: T4.2. `rank_xendcg` draws a random number per query, so the port refused query
+  bagging rather than risk diverging from upstream. Can it be supported bit-exactly?
+- Choice: supported. The trainer now bags before computing gradients when `bagging_by_query`
+  is on, and the objective's gradient pass is restricted to the sampled queries
+  (`Objective::get_gradients_with_sampled_queries`, overridden by `RankXendcg`). The refusal in
+  `boosting::sample::new_query_bagging` is removed. Numbering skips D-007..D-010, which belong
+  to the parallel open PRs #94 and #95, so this entry does not collide with them.
+- Rationale: upstream `RankXENDCG` seeds one `Random` per query (`seed_ + query_id`) and draws
+  `rands_[query_id].NextFloat()` inside `GetGradientsForOneQuery`
+  (`src/objective/rank_objective.hpp`, v4.7.0). Because each query's generator is indexed by
+  its own id, computing gradients for a subset of queries never perturbs another query's draw
+  sequence — exactly what `GetGradientsWithSampledQueries` relies on, and what
+  `src/boosting/gbdt.cpp` (v4.7.0) calls under `bagging_by_query`. bankai's query-sample set
+  already matches upstream (lambdarank parity), so the xendcg model matches tree by tree
+  (`tests/parity/test_bagging_by_query_parity.py::test_query_bagging_xendcg_matches_upstream_tree_by_tree`).
+  The Harness dropped `test_bagging_by_query_rejects_rank_xendcg_until_ported`, whose only
+  purpose was to pin the now-lifted refusal.
+- SPEC ref: none (AGENTS.md section 8: the feature is ported rather than refused)
+- Status: active
+
 ## D-012: C API conventions for `lgbm-capi` (slice 1)
 
 - Date: 2026-11-18

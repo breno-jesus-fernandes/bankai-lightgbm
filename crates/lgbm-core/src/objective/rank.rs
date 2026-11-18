@@ -49,9 +49,24 @@ impl Queries {
         score: &[f64],
         g: &mut [f32],
         h: &mut [f32],
+        one_query: impl FnMut(usize, &[f32], &[f64], &mut [f32], &mut [f32]),
+    ) {
+        self.gradients_sampled(score, None, g, h, one_query);
+    }
+
+    /// upstream: `RankingObjective::GetGradientsWithSampledQueries`. `sampled` lists the query
+    /// indices to process (`None` means every query, in ascending order); other queries keep
+    /// their current gradients. Query indices address `one_query`'s per-query state directly,
+    /// so processing a subset leaves the untouched queries' state exactly as upstream does.
+    fn gradients_sampled(
+        &self,
+        score: &[f64],
+        sampled: Option<&[i32]>,
+        g: &mut [f32],
+        h: &mut [f32],
         mut one_query: impl FnMut(usize, &[f32], &[f64], &mut [f32], &mut [f32]),
     ) {
-        for q in 0..self.num_queries() {
+        let mut run = |q: usize, g: &mut [f32], h: &mut [f32]| {
             let (lo, hi) = (self.boundaries[q] as usize, self.boundaries[q + 1] as usize);
             one_query(
                 q,
@@ -64,6 +79,18 @@ impl Queries {
                 for j in lo..hi {
                     g[j] *= self.weights[j];
                     h[j] *= self.weights[j];
+                }
+            }
+        };
+        match sampled {
+            Some(queries) => {
+                for &q in queries {
+                    run(q as usize, g, h);
+                }
+            }
+            None => {
+                for q in 0..self.num_queries() {
+                    run(q, g, h);
                 }
             }
         }
@@ -365,10 +392,9 @@ pub struct RankXendcg {
 
 impl RankXendcg {
     pub fn new(cfg: &Config, md: &Metadata) -> Result<Self> {
-        if !md.positions.is_empty() {
-            // Position bias is only ported for lambdarank; upstream applies it to both.
-            return Err(Error::Unsupported("position bias for rank_xendcg".into()));
-        }
+        // upstream (v4.7.0): `RankXENDCG` does not override `UpdatePositionBiasFactors`, so the
+        // base keeps every position-bias factor at 0 and the score adjustment is a no-op.
+        // Positions are therefore accepted but inert for rank_xendcg (unlike lambdarank).
         let queries = Queries::new(md)?;
         let rands = (0..queries.num_queries())
             .map(|i| Random::new(cfg.objective_seed.wrapping_add(i as i32)))
@@ -377,6 +403,51 @@ impl RankXendcg {
             queries,
             rands: Mutex::new(rands),
         })
+    }
+
+    /// upstream: `RankXENDCG::GetGradientsForOneQuery`. `rand` is this query's own generator,
+    /// advanced once per document, so it is drawn only for the queries actually processed.
+    fn gradients_for_one_query(
+        rand: &mut Random,
+        label: &[f32],
+        sc: &[f64],
+        lambdas: &mut [f32],
+        hessians: &mut [f32],
+    ) {
+        let cnt = label.len();
+        if cnt <= 1 {
+            lambdas.fill(0.0);
+            hessians.fill(0.0);
+            return;
+        }
+        let mut rho = sc.to_vec();
+        softmax(&mut rho);
+        let mut params = vec![0.0f64; cnt];
+        let mut inv_denominator = 0.0f64;
+        for i in 0..cnt {
+            let phi = pow_int(2, label[i] as i32) - f64::from(rand.next_float());
+            params[i] = phi;
+            inv_denominator += phi;
+        }
+        inv_denominator = 1.0 / f64::from(K_EPSILON).max(inv_denominator);
+        let mut sum_l1 = 0.0f64;
+        for i in 0..cnt {
+            let term = -params[i] * inv_denominator + rho[i];
+            lambdas[i] = term as f32;
+            params[i] = term / (1.0 - rho[i]);
+            sum_l1 += params[i];
+        }
+        let mut sum_l2 = 0.0f64;
+        for i in 0..cnt {
+            let term = rho[i] * (sum_l1 - params[i]);
+            lambdas[i] += term as f32;
+            params[i] = term / (1.0 - rho[i]);
+            sum_l2 += params[i];
+        }
+        for i in 0..cnt {
+            lambdas[i] += (rho[i] * (sum_l2 - params[i])) as f32;
+            hessians[i] = (rho[i] * (1.0 - rho[i])) as f32;
+        }
     }
 }
 
@@ -390,45 +461,22 @@ impl Objective for RankXendcg {
     }
 
     fn get_gradients(&self, score: &[f64], g: &mut [f32], h: &mut [f32]) {
+        self.get_gradients_with_sampled_queries(score, None, g, h);
+    }
+
+    fn get_gradients_with_sampled_queries(
+        &self,
+        score: &[f64],
+        sampled: Option<&[i32]>,
+        g: &mut [f32],
+        h: &mut [f32],
+    ) {
         let Ok(mut rands) = self.rands.lock() else {
             return;
         };
         self.queries
-            .gradients(score, g, h, |q, label, sc, lambdas, hessians| {
-                let cnt = label.len();
-                if cnt <= 1 {
-                    lambdas.fill(0.0);
-                    hessians.fill(0.0);
-                    return;
-                }
-                let mut rho = sc.to_vec();
-                softmax(&mut rho);
-                let mut params = vec![0.0f64; cnt];
-                let mut inv_denominator = 0.0f64;
-                for i in 0..cnt {
-                    let phi = pow_int(2, label[i] as i32) - f64::from(rands[q].next_float());
-                    params[i] = phi;
-                    inv_denominator += phi;
-                }
-                inv_denominator = 1.0 / f64::from(K_EPSILON).max(inv_denominator);
-                let mut sum_l1 = 0.0f64;
-                for i in 0..cnt {
-                    let term = -params[i] * inv_denominator + rho[i];
-                    lambdas[i] = term as f32;
-                    params[i] = term / (1.0 - rho[i]);
-                    sum_l1 += params[i];
-                }
-                let mut sum_l2 = 0.0f64;
-                for i in 0..cnt {
-                    let term = rho[i] * (sum_l1 - params[i]);
-                    lambdas[i] += term as f32;
-                    params[i] = term / (1.0 - rho[i]);
-                    sum_l2 += params[i];
-                }
-                for i in 0..cnt {
-                    lambdas[i] += (rho[i] * (sum_l2 - params[i])) as f32;
-                    hessians[i] = (rho[i] * (1.0 - rho[i])) as f32;
-                }
+            .gradients_sampled(score, sampled, g, h, |q, label, sc, lambdas, hessians| {
+                Self::gradients_for_one_query(&mut rands[q], label, sc, lambdas, hessians);
             });
     }
 
