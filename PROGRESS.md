@@ -50,7 +50,7 @@ Changing these nodes requires a DECISIONS.md entry and a parity test that fails 
 
 - [ ] T3.1 Sparse data partition and thread scaling (current gap: sparse 1.14–1.41x upstream time). Depends: T2.4. Verify: GATES, `pytest tests/parity -k partition`. Bench: `benches/bench_train_interleaved.py` sparse, target ≤1.0x upstream.
 - [ ] T3.2 Split search: sequential threshold phase scaling. Depends: T2.4. Verify: GATES, thread_invariance. Bench: criterion split_finding, `benches/bench_train_interleaved.py` dense 2 threads.
-- [ ] T3.3 Forced splits for categorical features (currently `NotImplementedError`). Depends: T0.3. Verify: `pytest tests/parity -k forced_split`, GATES. Bench: n/a.
+- [x] T3.3 Forced splits for categorical features (upstream `GatherInfoForThresholdCategorical`: one-vs-rest, the forced bin goes left, `default_left=false`, `lambda_l2` without `cat_l2`). Byte-identical model text over 4 trees, including nested categorical and categorical→numerical forced trees (`tests/parity/test_forced_split_categorical_parity.py`). Depends: T0.3. Verify: `pytest tests/parity -k forced_split`, GATES. Bench: n/a.
 - [ ] T3.4 CEGB (`cegb_*`). Depends: T2.1. Verify: `pytest tests/parity -k cegb`, GATES. Bench: n/a.
 
 ## Tier 4: boosting gaps
