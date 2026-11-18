@@ -564,6 +564,17 @@ fn numeric_feature_map(layout: &DatasetLayout) -> Vec<i32> {
     map
 }
 
+/// Per-feature forced upper bin bounds from `forcedbins_filename`, stored on the dataset so the
+/// text dump shows them. upstream: `DatasetLoader::GetForcedBins`, kept in `forced_bin_bounds_`.
+fn forced_bin_bounds_for(
+    cfg: &Config,
+    num_total: usize,
+    categorical: &[i32],
+) -> Result<Vec<Vec<f64>>> {
+    let set: std::collections::HashSet<i32> = categorical.iter().copied().collect();
+    crate::io::forced_bins::get_forced_bins(&cfg.forcedbins_filename, num_total, &set)
+}
+
 /// Labels as stored by upstream's `Metadata::SetLabel` (src/io/metadata.cpp v4.7.0):
 /// `label_t` (float) through `Common::AvoidInf`, so NaN becomes `0` and infinities are
 /// clamped to `+-1e38`.
@@ -957,7 +968,7 @@ impl Dataset {
             use_missing: cfg.use_missing,
             zero_as_missing: cfg.zero_as_missing,
             max_bin_by_feature: cfg.max_bin_by_feature.clone(),
-            forced_bin_bounds: vec![Vec::new(); ncol],
+            forced_bin_bounds: forced_bin_bounds_for(cfg, ncol, categorical)?,
             metadata: Metadata {
                 label: label_values(label),
                 ..Metadata::default()
@@ -1041,7 +1052,7 @@ impl Dataset {
             use_missing: cfg.use_missing,
             zero_as_missing: cfg.zero_as_missing,
             max_bin_by_feature: cfg.max_bin_by_feature.clone(),
-            forced_bin_bounds: vec![Vec::new(); m.ncol()],
+            forced_bin_bounds: forced_bin_bounds_for(cfg, m.ncol(), categorical)?,
             metadata: Metadata {
                 label: label_values(label),
                 ..Metadata::default()
