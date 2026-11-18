@@ -46,11 +46,8 @@ impl ForcedSplits {
                         "Forced split on feature {real}, which the dataset does not use"
                     ))
                 })?;
-            if metas[inner].bin_type == BinType::Categorical {
-                return Err(Error::Unsupported(
-                    "forced split on a categorical feature".into(),
-                ));
-            }
+            // Both numerical and categorical features may be forced; the gather chooses the
+            // right evaluator by the feature's bin type (upstream: `GatherInfoForThreshold`).
             features[inner] = true;
             for side in ["left", "right"] {
                 if let Some(child) = node.get(side) {
@@ -197,7 +194,13 @@ impl SerialTreeLearner {
             num_data: ls.num_data_in_leaf,
             parent_output: ls.weight,
         };
-        let mut info = gather_numerical(hist, &self.metas[inner], &self.params, sums, bin);
+        let meta = &self.metas[inner];
+        // upstream: `FeatureHistogram::GatherInfoForThreshold` dispatches on the bin type.
+        let mut info = if meta.bin_type == BinType::Categorical {
+            gather_categorical(hist, meta, &self.params, sums, bin)
+        } else {
+            gather_numerical(hist, meta, &self.params, sums, bin)
+        };
         info.feature = real as i32;
         info
     }
@@ -345,6 +348,123 @@ fn gather_numerical_inner<const SMOOTH: bool>(
     out
 }
 
+/// upstream: `FeatureHistogram::GatherInfoForThresholdCategorical`. Evaluates one category (the
+/// bin `threshold`) as a one-vs-rest split: that bin goes left, everything else goes right.
+fn gather_categorical(
+    hist: &[f64],
+    meta: &FeatureMeta,
+    p: &SplitParams,
+    sums: LeafSums,
+    threshold: u32,
+) -> SplitInfo {
+    if p.path_smooth > f64::from(K_EPSILON) {
+        gather_categorical_inner::<true>(hist, meta, p, sums, threshold)
+    } else {
+        gather_categorical_inner::<false>(hist, meta, p, sums, threshold)
+    }
+}
+
+fn gather_categorical_inner<const SMOOTH: bool>(
+    hist: &[f64],
+    meta: &FeatureMeta,
+    p: &SplitParams,
+    sums: LeafSums,
+    threshold: u32,
+) -> SplitInfo {
+    let LeafSums {
+        sum_gradient,
+        sum_hessian,
+        num_data,
+        parent_output,
+    } = sums;
+    let mut out = SplitInfo::default();
+    let gain_shift = leaf_gain_given_output::<true>(
+        sum_gradient,
+        sum_hessian,
+        p.lambda_l1,
+        p.lambda_l2,
+        parent_output,
+    );
+    let min_gain_shift = gain_shift + p.min_gain_to_split;
+    // upstream: a one-hot categorical split evaluates a single bin, which must be a real bin.
+    out.default_left = false;
+    if threshold >= meta.num_bin as u32 || threshold == 0 {
+        out.gain = K_MIN_SCORE;
+        log::warn!("Invalid categorical threshold split");
+        return out;
+    }
+    let cnt_factor = f64::from(num_data) / sum_hessian;
+    // upstream: `GET_GRAD(data_, threshold - meta_->offset)`.
+    let idx = ((threshold as i32 - meta.offset) as usize) << 1;
+    let (grad, hess) = (hist[idx], hist[idx + 1]);
+    // upstream: `Common::RoundInt(hess * cnt_factor)`
+    let cnt = (hess * cnt_factor + 0.5) as i32;
+    // upstream: the categorical forced gather uses `lambda_l2` without `cat_l2`.
+    let l2 = p.lambda_l2;
+    let left_count = cnt;
+    let right_count = num_data - left_count;
+    let sum_left_hessian = hess + f64::from(K_EPSILON);
+    let sum_right_hessian = sum_hessian - sum_left_hessian;
+    let sum_left_gradient = grad;
+    let sum_right_gradient = sum_gradient - sum_left_gradient;
+    let (l1, mds, sm) = (p.lambda_l1, p.max_delta_step, p.path_smooth);
+    let current_gain = leaf_gain::<true, true, SMOOTH>(
+        sum_right_gradient,
+        sum_right_hessian,
+        l1,
+        l2,
+        mds,
+        sm,
+        right_count,
+        parent_output,
+    ) + leaf_gain::<true, true, SMOOTH>(
+        sum_left_gradient,
+        sum_left_hessian,
+        l1,
+        l2,
+        mds,
+        sm,
+        left_count,
+        parent_output,
+    );
+    // upstream: "'Forced Split' will be ignored since the gain getting worse."
+    if current_gain.is_nan() || current_gain <= min_gain_shift {
+        out.gain = K_MIN_SCORE;
+        log::warn!("'Forced Split' will be ignored since the gain getting worse.");
+        return out;
+    }
+    out.left_output = calculate_splitted_leaf_output::<true, true, SMOOTH>(
+        sum_left_gradient,
+        sum_left_hessian,
+        l1,
+        l2,
+        mds,
+        sm,
+        left_count,
+        parent_output,
+    );
+    out.left_count = left_count;
+    out.left_sum_gradient = sum_left_gradient;
+    out.left_sum_hessian = sum_left_hessian - f64::from(K_EPSILON);
+    out.right_output = calculate_splitted_leaf_output::<true, true, SMOOTH>(
+        sum_right_gradient,
+        sum_right_hessian,
+        l1,
+        l2,
+        mds,
+        sm,
+        right_count,
+        parent_output,
+    );
+    out.right_count = right_count;
+    out.right_sum_gradient = sum_gradient - sum_left_gradient;
+    out.right_sum_hessian = sum_right_hessian - f64::from(K_EPSILON);
+    out.gain = current_gain - min_gain_shift;
+    out.num_cat_threshold = 1;
+    out.cat_threshold = vec![threshold];
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +528,54 @@ mod tests {
         };
         let info = gather_numerical(&hist, &meta(2), &params(), sums, 0);
         assert_eq!(info.gain, K_MIN_SCORE);
+    }
+
+    fn cat_meta(num_bin: i32) -> FeatureMeta {
+        FeatureMeta {
+            bin_type: BinType::Categorical,
+            ..meta(num_bin)
+        }
+    }
+
+    #[test]
+    fn gather_categorical_sends_the_named_bin_left() {
+        // Bins (grad, hess): 0 unused, 1 -> (-4, 4), 2 -> (6, 2); leaf sums (2, 6), 6 rows.
+        let hist = [0.0, 0.0, -4.0, 4.0, 6.0, 2.0];
+        let sums = LeafSums {
+            sum_gradient: 2.0,
+            sum_hessian: 6.0,
+            num_data: 6,
+            parent_output: 0.0,
+        };
+        // Force the category in bin 1: that bin goes left, the rest right.
+        let info = gather_categorical(&hist, &cat_meta(3), &params(), sums, 1);
+        assert_eq!(info.num_cat_threshold, 1);
+        assert_eq!(info.cat_threshold, vec![1]);
+        assert!(!info.default_left);
+        assert_eq!(info.left_count, 4);
+        assert_eq!(info.right_count, 2);
+        assert!((info.left_sum_gradient - (-4.0)).abs() < 1e-9);
+        assert!((info.right_sum_gradient - 6.0).abs() < 1e-9);
+        assert!(info.gain > 0.0);
+    }
+
+    #[test]
+    fn gather_categorical_rejects_bin_zero_and_out_of_range() {
+        let hist = [0.0, 0.0, -4.0, 4.0, 6.0, 2.0];
+        let sums = LeafSums {
+            sum_gradient: 2.0,
+            sum_hessian: 6.0,
+            num_data: 6,
+            parent_output: 0.0,
+        };
+        // Bin 0 is never a valid one-hot category, and num_bin is out of range.
+        assert_eq!(
+            gather_categorical(&hist, &cat_meta(3), &params(), sums, 0).gain,
+            K_MIN_SCORE
+        );
+        assert_eq!(
+            gather_categorical(&hist, &cat_meta(3), &params(), sums, 3).gain,
+            K_MIN_SCORE
+        );
     }
 }

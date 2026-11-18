@@ -30,15 +30,15 @@ Changing these nodes requires a DECISIONS.md entry and a parity test that fails 
 
 ## Tier 1: foundations for the remaining work
 
-- [ ] T1.1 Tie-break audit: read upstream `split_info.hpp` and `feature_histogram.hpp` (verify), record the exact gain comparison and tie rule in SPEC.md (SPEC-NUM-5, SPEC-NUM-7), add a parity test on constructed ties. Depends: T0.3. Verify: `pytest tests/parity -k tie`. Bench: n/a.
-- [ ] T1.2 `deterministic=true` implemented per SPEC-NUM-2, with a 1-thread structure parity test. Depends: T1.1. Verify: `pytest tests/parity -k deterministic`, GATES. Bench: n/a.
-- [ ] T1.3 `catch_unwind` at the PyO3 boundary (SPEC-ERR-4): panics surface as `LightGBMError`, with a regression test that forces a panic. Depends: T0.5. Verify: `pytest tests/parity -k panic`, GATES. Bench: n/a.
-- [ ] T1.4 proptest and fuzz scaffolding (AGENTS.md section 4): binning invariants, serialization round-trips, and fuzz targets for model text, JSON, CSV and LibSVM. Depends: T0.4. Verify: `cargo test -p lgbm-core --test proptest_binning`, `cargo +nightly fuzz build`. Bench: n/a.
-- [ ] T1.5 Miri coverage for `utils::spin_pool` (the current unsafe module without it). Depends: none. Verify: `scripts/miri.sh spin_pool`. Bench: n/a.
+- [x] T1.1 (PR #86) Tie-break audit: read upstream `split_info.hpp` and `feature_histogram.hpp` (verify), record the exact gain comparison and tie rule in SPEC.md (SPEC-NUM-5, SPEC-NUM-7), add a parity test on constructed ties. Depends: T0.3. Verify: `pytest tests/parity -k tie`. Bench: n/a.
+- [x] T1.2 (PR #87; a pin, not an implementation, see DECISIONS D-004) `deterministic=true` implemented per SPEC-NUM-2, with a 1-thread structure parity test. Depends: T1.1. Verify: `pytest tests/parity -k deterministic`, GATES. Bench: n/a.
+- [x] T1.3 (PR #88; the 40 PyResult entry points are guarded, infallible getters are not) `catch_unwind` at the PyO3 boundary (SPEC-ERR-4): panics surface as `LightGBMError`, with a regression test that forces a panic. Depends: T0.5. Verify: `pytest tests/parity -k panic`, GATES. Bench: n/a.
+- [x] T1.4 (PR #90 proptest, PR #91 fuzz targets; JSON model parsing has no entry point yet) proptest and fuzz scaffolding (AGENTS.md section 4): binning invariants, serialization round-trips, and fuzz targets for model text, JSON, CSV and LibSVM. Depends: T0.4. Verify: `cargo test -p lgbm-core --test proptest_binning`, `cargo +nightly fuzz build`. Bench: n/a.
+- [x] T1.5 (PR #89) Miri coverage for `utils::spin_pool` (the current unsafe module without it). Depends: none. Verify: `scripts/miri.sh spin_pool`. Bench: n/a.
 
 ## Tier 2: histograms and the training hot path
 
-- [~] T2.1 Row-wise histogram layout for `force_row_wise` (dense single-value groups). Depends: T0.3. Verify: `pytest tests/parity/test_row_wise_training_parity.py`, GATES. Bench: `cargo bench -p lgbm-core` (kernels) plus `benches/bench_train_interleaved.py` for the forced row-wise path. Status: merged in PR #84 (kernel gate passed; the forced row-wise training benchmark is still outstanding). Auto-choice and the multi-value row-wise path are not done.
+- [x] T2.1 (PR #84, row-major copy in PR #92; column-wise stays the auto default, see DECISIONS D-006) Row-wise histogram layout for `force_row_wise` (dense single-value groups). Depends: T0.3. Verify: `pytest tests/parity/test_row_wise_training_parity.py`, GATES. Bench: `cargo bench -p lgbm-core` (kernels) plus `benches/bench_train_interleaved.py` for the forced row-wise path. Status: merged in PR #84 (kernel gate passed; the forced row-wise training benchmark is still outstanding). Auto-choice and the multi-value row-wise path are not done.
 - [ ] T2.2 Row-wise layout auto-choice (upstream `force_col_wise`/`force_row_wise` selection rules). Depends: T2.1. Verify: `pytest tests/parity -k auto_layout`, GATES. Bench: `benches/bench_train_interleaved.py` (dense, both thread counts).
 - [ ] T2.3 Row-wise for multi-value groups (upstream `GetMultiBinFromAllFeatures`, all groups). Depends: T2.1. Verify: `pytest tests/parity/test_multi_val_training_parity.py -k row_wise`, GATES. Bench: `benches/bench_train_interleaved.py` (sparse).
 - [ ] T2.4 `spin_pool -> rayon` migration (SPEC-CONC-1, SPEC-CONC-5). Depends: T1.5, T2.1. Verify: `cargo test -p lgbm-core --test thread_invariance` for 1, 2 and 3 threads, GATES. Bench: interleaved kernels and `benches/bench_train_interleaved.py` at 2 threads; no slowdown above 3% against the spin_pool baseline.
@@ -50,12 +50,12 @@ Changing these nodes requires a DECISIONS.md entry and a parity test that fails 
 
 - [ ] T3.1 Sparse data partition and thread scaling (current gap: sparse 1.14–1.41x upstream time). Depends: T2.4. Verify: GATES, `pytest tests/parity -k partition`. Bench: `benches/bench_train_interleaved.py` sparse, target ≤1.0x upstream.
 - [ ] T3.2 Split search: sequential threshold phase scaling. Depends: T2.4. Verify: GATES, thread_invariance. Bench: criterion split_finding, `benches/bench_train_interleaved.py` dense 2 threads.
-- [ ] T3.3 Forced splits for categorical features (currently `NotImplementedError`). Depends: T0.3. Verify: `pytest tests/parity -k forced_split`, GATES. Bench: n/a.
+- [x] T3.3 Forced splits for categorical features (upstream `GatherInfoForThresholdCategorical`: one-vs-rest, the forced bin goes left, `default_left=false`, `lambda_l2` without `cat_l2`). Byte-identical model text over 4 trees, including nested categorical and categorical→numerical forced trees (`tests/parity/test_forced_split_categorical_parity.py`). Depends: T0.3. Verify: `pytest tests/parity -k forced_split`, GATES. Bench: n/a.
 - [ ] T3.4 CEGB (`cegb_*`). Depends: T2.1. Verify: `pytest tests/parity -k cegb`, GATES. Bench: n/a.
 
 ## Tier 4: boosting gaps
 
-- [ ] T4.1 Unbiased lambdarank for `rank_xendcg` with positions. Depends: T0.6. Verify: `pytest tests/parity -k position`, GATES. Bench: n/a.
+- [x] T4.1 `rank_xendcg` accepts a `position` field. Upstream v4.7.0 does not override `UpdatePositionBiasFactors` for `RankXENDCG`, so its position-bias factors stay 0 and the adjustment is a no-op: positions are accepted but inert (only lambdarank learns the bias). bankai matches, and no longer raises `NotImplementedError` (`tests/parity/test_xendcg_positions_parity.py`; see DECISIONS D-009). Depends: T0.6. Verify: `pytest tests/parity -k position`, GATES. Bench: n/a.
 - [x] T4.2 `bagging_by_query` for `rank_xendcg`. Depends: T4.1. Verify: `pytest tests/parity -k bagging_by_query`, GATES. Bench: n/a.
 - [ ] T4.3 Model merge (upstream `Booster.merge` semantics). Depends: T0.4. Verify: `pytest tests/parity -k merge`, GATES. Bench: n/a.
 - [ ] T4.4 Monotone `advanced` with categorical features (currently refused; needs the upstream undefined-behaviour decision in DECISIONS.md first). Depends: T3.2. Verify: `pytest tests/parity -k monotone`, GATES. Bench: n/a.

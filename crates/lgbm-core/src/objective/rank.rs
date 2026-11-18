@@ -392,10 +392,9 @@ pub struct RankXendcg {
 
 impl RankXendcg {
     pub fn new(cfg: &Config, md: &Metadata) -> Result<Self> {
-        if !md.positions.is_empty() {
-            // Position bias is only ported for lambdarank; upstream applies it to both.
-            return Err(Error::Unsupported("position bias for rank_xendcg".into()));
-        }
+        // upstream (v4.7.0): `RankXENDCG` does not override `UpdatePositionBiasFactors`, so the
+        // base keeps every position-bias factor at 0 and the score adjustment is a no-op.
+        // Positions are therefore accepted but inert for rank_xendcg (unlike lambdarank).
         let queries = Queries::new(md)?;
         let rands = (0..queries.num_queries())
             .map(|i| Random::new(cfg.objective_seed.wrapping_add(i as i32)))
