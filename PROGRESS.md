@@ -56,7 +56,7 @@ Changing these nodes requires a DECISIONS.md entry and a parity test that fails 
 ## Tier 4: boosting gaps
 
 - [ ] T4.1 Unbiased lambdarank for `rank_xendcg` with positions. Depends: T0.6. Verify: `pytest tests/parity -k position`, GATES. Bench: n/a.
-- [ ] T4.2 `bagging_by_query` for `rank_xendcg`. Depends: T4.1. Verify: `pytest tests/parity -k bagging_by_query`, GATES. Bench: n/a.
+- [x] T4.2 `bagging_by_query` for `rank_xendcg`. Depends: T4.1. Verify: `pytest tests/parity -k bagging_by_query`, GATES. Bench: n/a.
 - [ ] T4.3 Model merge (upstream `Booster.merge` semantics). Depends: T0.4. Verify: `pytest tests/parity -k merge`, GATES. Bench: n/a.
 - [ ] T4.4 Monotone `advanced` with categorical features (currently refused; needs the upstream undefined-behaviour decision in DECISIONS.md first). Depends: T3.2. Verify: `pytest tests/parity -k monotone`, GATES. Bench: n/a.
 

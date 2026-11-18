@@ -73,3 +73,26 @@ Entry format:
 - Rationale: interleaved benchmark, 50k rows, 7 rounds, medians (`benches/bench_train_interleaved.py`). Column-wise is 0.57 to 0.69x upstream on dense data, and after the row-major copy (PR #92) forced row-wise is 0.95 to 0.98x. Column-wise is still the faster option, so auto should keep it. The timing-based choice only pays off once row-wise is faster somewhere.
 - SPEC ref: none (new rule proposed; revisit when row-wise beats column-wise on any benchmark case)
 - Status: active
+
+## D-011: `bagging_by_query` is supported for `rank_xendcg`
+
+- Date: 2026-11-18
+- Question: T4.2. `rank_xendcg` draws a random number per query, so the port refused query
+  bagging rather than risk diverging from upstream. Can it be supported bit-exactly?
+- Choice: supported. The trainer now bags before computing gradients when `bagging_by_query`
+  is on, and the objective's gradient pass is restricted to the sampled queries
+  (`Objective::get_gradients_with_sampled_queries`, overridden by `RankXendcg`). The refusal in
+  `boosting::sample::new_query_bagging` is removed. Numbering skips D-007..D-010, which belong
+  to the parallel open PRs #94 and #95, so this entry does not collide with them.
+- Rationale: upstream `RankXENDCG` seeds one `Random` per query (`seed_ + query_id`) and draws
+  `rands_[query_id].NextFloat()` inside `GetGradientsForOneQuery`
+  (`src/objective/rank_objective.hpp`, v4.7.0). Because each query's generator is indexed by
+  its own id, computing gradients for a subset of queries never perturbs another query's draw
+  sequence — exactly what `GetGradientsWithSampledQueries` relies on, and what
+  `src/boosting/gbdt.cpp` (v4.7.0) calls under `bagging_by_query`. bankai's query-sample set
+  already matches upstream (lambdarank parity), so the xendcg model matches tree by tree
+  (`tests/parity/test_bagging_by_query_parity.py::test_query_bagging_xendcg_matches_upstream_tree_by_tree`).
+  The Harness dropped `test_bagging_by_query_rejects_rank_xendcg_until_ported`, whose only
+  purpose was to pin the now-lifted refusal.
+- SPEC ref: none (AGENTS.md section 8: the feature is ported rather than refused)
+- Status: active
