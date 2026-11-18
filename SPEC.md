@@ -92,7 +92,10 @@ before the module that uses it is merged. Rows marked `(verify)` are not yet che
   `spin_pool -> rayon` in PROGRESS.md lands. Its gate: no interleaved-benchmark slowdown above 3%
   against the current code, thread scaling not worse than the current ~1.2x on 2 threads, and
   `thread_invariance` passing for 1, 2 and 3 threads. If the gate is missed, the failure goes to
-  `DECISIONS.md` and the gate is not relaxed.
+  `DECISIONS.md` and the gate is not relaxed. **Landed 2026-11-18:** the migration node shipped;
+  `utils::spin_pool` is replaced by `utils::worker_pool::WorkerPool` (a per-Booster
+  `rayon::ThreadPool`), with each tree run inside one `pool.install` to meet the gate (DECISIONS
+  D-016).
 - **SPEC-CONC-6.** SIMD uses `std::arch` with runtime detection (`is_x86_feature_detected!`) or `pulp`.
   A scalar fallback exists and is tested. Results must match the scalar path bit for bit on the
   fixture platform.

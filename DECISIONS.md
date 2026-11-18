@@ -215,3 +215,27 @@ Entry format:
   upstream byte for byte. T4.3 should be revisited once its intended API surface is decided.
 - SPEC ref: none (operational choice under AGENTS.md section 13)
 - Status: active
+
+## D-016: Run each tree inside one rayon `install` to meet the spin_pool → rayon gate
+
+- Date: 2026-11-18
+- Question: T2.4. A straight `spin_pool -> rayon` swap regressed dense 2-thread training ~11%
+  against the spin_pool baseline (bankai/upstream ratio 0.656 -> 0.729), missing SPEC-CONC-5's
+  3% gate. spin_pool kept workers spinning between the many short per-node regions; rayon lets
+  them sleep, and waking them costs 15-30 us. How to close the gap without reviving spin_pool?
+- Choice: build a per-Booster `rayon::ThreadPool` (`utils::worker_pool::WorkerPool`) and run the
+  whole tree inside one `pool.install` (`SerialTreeLearner::train`). The per-region primitives
+  (`run`, `for_each_mut`, ...) then nest on the already-active pool instead of re-entering rayon
+  each region. Raising the parallel thresholds (`PARALLEL_HIST_MIN_WORK`, `PARALLEL_SEARCH_MIN_BINS`,
+  `PARALLEL_PARTITION_MIN_ROWS`) was tried first and made it *worse* (dense 2-thread 0.729 -> 0.750),
+  because the cost was per-region rayon entry, not too many small regions, so serialising more only
+  lost the 2-thread gain.
+- Rationale: inside one `install` the pool stays active for the tree's duration, so the short
+  regions no longer each pay the wake latency. Measured (release, 50k rows, 9 interleaved rounds,
+  bankai/upstream ratio): dense 2-thread 0.665 vs 0.656 baseline (+1.4%, within gate), dense
+  1-thread 0.795 vs 0.797, sparse 2-thread 0.907 vs 0.915; 2-thread scaling dense 1.49x, sparse
+  1.66x (both above the 1.2x floor). Results are unchanged (parallel and serial write disjoint
+  data and merge in index order, SPEC-CONC-2), so `thread_invariance` holds for 1/2/3 threads and
+  the full parity suite is unchanged. The gate was met, not relaxed.
+- SPEC ref: SPEC-CONC-1 (rayon, one pool per Booster), SPEC-CONC-5 (migration gate)
+- Status: active
