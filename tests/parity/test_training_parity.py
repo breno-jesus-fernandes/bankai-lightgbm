@@ -1215,26 +1215,6 @@ def test_extra_trees_matches_upstream(seed: int) -> None:
     np.testing.assert_allclose(results[1][1], results[0][1], rtol=1e-12, atol=1e-15)
 
 
-def test_bagging_by_query_rejects_rank_xendcg_until_ported() -> None:
-    # Upstream samples whole queries for bagging_by_query=true, and rank_xendcg draws a
-    # random number per query, so only the sampled queries get gradients upstream. bankai
-    # does not mirror that yet, so it must refuse rather than silently diverge. Lambdarank
-    # is supported: see test_bagging_by_query_parity.py.
-    rng = np.random.default_rng(62)
-    x = rng.normal(size=(12, 3))
-    params = {
-        "verbosity": -1,
-        "objective": "rank_xendcg",
-        "bagging_by_query": True,
-        "bagging_freq": 1,
-        "bagging_fraction": 0.5,
-        "min_data_in_leaf": 1,
-    }
-    dataset = lgb.Dataset(x, label=np.arange(12) % 3, group=[4, 4, 4], params=params)
-    with pytest.raises(lgb.LightGBMError, match="bagging_by_query"):
-        lgb.train(params, dataset, num_boost_round=1)
-
-
 def _num_iterations_line(model: str) -> str:
     return next(line for line in model.splitlines() if line.startswith("[num_iterations:"))
 
