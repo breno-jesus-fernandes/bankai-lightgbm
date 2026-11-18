@@ -132,3 +132,28 @@ Entry format:
   purpose was to pin the now-lifted refusal.
 - SPEC ref: none (AGENTS.md section 8: the feature is ported rather than refused)
 - Status: active
+
+## D-012: C API conventions for `lgbm-capi` (slice 1)
+
+- Date: 2026-11-18
+- Question: T5.3. The `lgbm-capi` crate was an empty stub. Porting `c_api.h` needs a settled
+  error-reporting convention, handle representation, panic policy and crate output, none of
+  which SPEC.md pins in detail.
+- Choice: match upstream's C API exactly. Every entry point returns `int` `0` on success and
+  `-1` on failure (upstream `API_BEGIN`/`API_END`); the message is read with
+  `LGBM_GetLastError`, backed by a thread-local `CString`. `BoosterHandle` is an opaque
+  `*mut c_void` to a heap-boxed wrapper owned by the caller until `LGBM_BoosterFree`. Every
+  entry point runs its body inside `std::panic::catch_unwind`, so a panic becomes a `-1` error
+  instead of unwinding across the FFI boundary (SPEC-ERR-4, SPEC-ERR-5). The crate builds as
+  `cdylib` + `staticlib` (the C artifacts) and `rlib` (so Rust integration tests exercise the
+  symbols without a C toolchain). Slice 1 covers error handling, model load
+  (`LGBM_BoosterCreateFromModelfile`, `LGBM_BoosterLoadModelFromString`), `LGBM_BoosterFree`
+  and metadata (`LGBM_BoosterGetNumClasses`, `LGBM_BoosterGetCurrentIteration`). Numbering
+  skips D-007..D-011, which belong to the parallel open PRs #94/#95/#96.
+- Rationale: `include/LightGBM/c_api.h` and `src/c_api.cpp` (v4.7.0) define exactly these
+  return codes, the thread-local last error and the opaque handle; matching them is what makes
+  the symbols drop-in. The C-header test harness named in PROGRESS T5.3 comes in a later slice;
+  slice 1 is validated by `crates/lgbm-capi/tests/booster_load.rs`, which calls the `extern "C"`
+  symbols directly and checks them against `lgbm-core`.
+- SPEC ref: SPEC-ERR-5 (and SPEC-ERR-4 for the panic boundary)
+- Status: active

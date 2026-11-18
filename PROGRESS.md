@@ -64,7 +64,7 @@ Changing these nodes requires a DECISIONS.md entry and a parity test that fails 
 
 - [ ] T5.1 Native layer: remove the remaining float64 copy for row-major dense and CSR input (SPEC-PY-1). Depends: T1.3. Verify: `pytest tests/parity -k zero_copy`, GATES. Bench: `benches/bench_dataset.py`, no slowdown.
 - [ ] T5.2 Dataset surface: pyarrow input, `forced_bin_bounds` in the text dump. Depends: T0.3. Verify: `pytest tests/python_package_test -k dataset`, GATES. Bench: n/a.
-- [ ] T5.3 `lgbm-capi`: `LGBM_*` symbols compatible with upstream `c_api.h` (SPEC-ERR-5). Depends: T1.3. Verify: a C test harness built against the upstream header, GATES. Bench: n/a.
+- [~] T5.3 `lgbm-capi`: `LGBM_*` symbols compatible with upstream `c_api.h` (SPEC-ERR-5). Depends: T1.3. Verify: a C test harness built against the upstream header, GATES. Bench: n/a. Status: slice 1 landed — error handling (`LGBM_GetLastError`, `0`/`-1` codes, thread-local last error), model load (`LGBM_BoosterCreateFromModelfile`, `LGBM_BoosterLoadModelFromString`), `LGBM_BoosterFree`, and metadata (`LGBM_BoosterGetNumClasses`, `LGBM_BoosterGetCurrentIteration`), with every entry point wrapped in `catch_unwind` (SPEC-ERR-4/5). Rust integration tests exercise the symbols; the C-header harness and the remaining surface (predict, dataset, training) are still to do. See DECISIONS.md D-012.
 - [ ] T5.4 `lgbm-cli`: `task=train|predict|convert_model|refit|save_binary`. Depends: T5.3. Verify: parity against the upstream CLI on the example configs, GATES. Bench: n/a.
 - [ ] T5.5 `convert_model` (C++ codegen output). Depends: T5.4. Verify: `pytest tests/parity -k convert_model`, GATES. Bench: n/a.
 
