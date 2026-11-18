@@ -120,7 +120,12 @@ impl Cegb {
 
     /// The lazy per-data cost: one `lazy[real]` for each row in the leaf that has not yet used the
     /// feature. upstream: `CalculateOndemandCosts`.
-    fn ondemand_cost(&self, inner_feature: usize, real_feature: usize, leaf_indices: &[i32]) -> f64 {
+    fn ondemand_cost(
+        &self,
+        inner_feature: usize,
+        real_feature: usize,
+        leaf_indices: &[i32],
+    ) -> f64 {
         if self.lazy.is_empty() {
             return 0.0;
         }
