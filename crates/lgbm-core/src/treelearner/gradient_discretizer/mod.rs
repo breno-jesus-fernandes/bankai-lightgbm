@@ -57,6 +57,12 @@ impl GradientDiscretizer {
     /// A zero maximum gradient or variable Hessian is refused because upstream's
     /// zero scale leads to an undefined NaN-to-int8 conversion (SPEC-NUM-10).
     /// Constant Hessians always have integer value one and need no such cast.
+    ///
+    /// `#[inline(never)]`: this is a long per-tree pass, so not inlining costs nothing, and it
+    /// pins the hot loop's codegen so it stays independent of its callers. Without it, adding
+    /// the serial learner's call to this function shifted its code layout and moved the
+    /// `quantization/*` criterion benchmarks by ~6% on unchanged code.
+    #[inline(never)]
     pub fn discretize_nearest(&mut self, gradients: &[f32], hessians: &[f32]) -> Result<()> {
         if gradients.len() != self.packed.len() || hessians.len() != self.packed.len() {
             return Err(Error::InvalidParameter(
