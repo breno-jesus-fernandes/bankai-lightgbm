@@ -109,6 +109,8 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] CEGB (`cegb_*`): cost-efficient gradient boosting penalises each split's gain by `cegb_tradeoff ×` (`cegb_penalty_split` per leaf row `+` a one-off `cegb_penalty_feature_coupled[f]` the first time feature `f` is used `+` a lazy `cegb_penalty_feature_lazy[f]` per leaf row that has not touched `f`), matching upstream `CostEfficientGradientBoosting` byte for byte (`tests/parity/test_cegb_parity.py`). `forcedsplits_filename` is done for numerical and categorical features (parity-tested with and without `feature_fraction` and with NaN values; categorical forced splits apply one-vs-rest with byte-identical model text, `tests/parity/test_forced_split_categorical_parity.py`)
 - [x] `linear_tree` (`linear_lambda`): training and model text/JSON match upstream (parity-tested over several rounds, `tests/parity/test_linear_tree_parity.py`); binary datasets keep raw data, and the upstream linear tests pass. Refit with linear trees stays `Unsupported`
 - [ ] Quantized training (`use_quantized_grad`, `num_grad_quant_bins`, ...)
+  - [x] Nearest-rounding gradient/Hessian discretization primitives, verified against native upstream leaf statistics.
+  - [ ] Stochastic rounding, integer histograms/split search, leaf renewal and learner integration.
 - [x] `refit` (byte-identical leaves vs upstream on upstream models, decay 0/0.9/1; `validate_features`; categorical reconciliation; `linear_tree` and `boosting=rf|dart` raise `Unsupported`)
 - [ ] `deterministic`
 - **Gate:** identical trees on fixed seeds; training as fast as upstream

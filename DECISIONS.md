@@ -558,3 +558,84 @@ Entry format:
   Stochastic RNG streams, integer histogram accumulation/search, leaf renewal and
   integration into SerialTreeLearner remain pending. T2.7 must not be checked off.
 - Status: active
+
+## D-022: Nearest-rounding quantization foundation (T2.7, slice 1)
+
+- Date: 2026-11-19
+- Choice: port the discretization primitive separately from learner integration.
+  treelearner::gradient_discretizer mirrors upstream's packed per-row layout: low
+  byte Hessian, signed high byte gradient, held in i16. Inputs remain score_t/f32;
+  maxima, scales and inverse scales are double/f64. Odd bin counts deliberately
+  use integer division by two in the gradient scale. The buffer is allocated once
+  and reused, including when the next tree has different derivative maxima.
+- Source: src/treelearner/gradient_discretizer.{cpp,hpp} (v4.7.0), DiscretizeGradients
+  (stochastic_rounding=false), and SetNumBitsInHistogramBin. The width helper uses
+  the strict rows*bins <256 / <65536 boundaries, widening to 32 bits otherwise.
+- Undefined input handling: the primitive rejects nonfinite derivatives, negative
+  Hessians, empty/mismatched input, and bin counts outside 2..=127. At 128 or more
+  bins the variable-Hessian int8 conversion may overflow upstream. Zero gradient
+  maxima, or zero variable-Hessian maxima, lead to NaN-to-int8 conversion upstream;
+  refuse those cases (SPEC-NUM-10) instead of choosing platform-specific results.
+  Constant Hessians are always integer one, so zero constant Hessians need no cast
+  and retain a zero reconstruction scale. Validation errors preserve prior output.
+  These limits belong to the new low-level primitive; Python training is unchanged.
+- TDD: acceptance tests first failed on the missing module; the native-oracle
+  correction is the separate Harness commit (D-021). Zero-maxima refusal first
+  failed because the initial implementation returned success; after fixing it, the
+  constant-zero-Hessian test first failed because the refusal was too broad. All
+  six tests now pass with their original assertions. The oracle checks both leaves'
+  outputs and weights within 1e-12 and the native score_t gain after f32 conversion.
+- Performance: Criterion cases quantify nearest rounding over 200,000 rows with
+  constant and variable Hessians and reuse the output buffer. The training path is
+  not connected to this module. Before/after results and final gates follow below.
+- Remaining T2.7 work: stochastic rounding and its upstream std::mt19937/distribution
+  streams; integer histogram accumulation/subtraction and split searches; integer
+  leaf-sum propagation, leaf renewal, reset semantics and full training parity.
+- Status: active
+
+- Validation: cargo check --workspace and scripts/check.sh passed (2404 Python
+  tests passed, 9 skipped, 13 xfailed, 4 xpassed); maturin develop -r followed by
+  pytest tests/parity tests/python_package_test passed 2398 tests with the same
+  skips/xfails/xpasses. All six new native tests passed in debug and release.
+- Local benchmark: Apple M1, 8 logical CPUs, release/bench profile, one thread,
+  base 4533261f4146b905e1c655737d3c57caba8aa9fb versus this implementation (final
+  head SHA recorded in the PR). Pinned upstream v4.7.0; no upstream process runs
+  in this Rust benchmark, so OMP_WAIT_POLICY is not applicable. Seven interleaved
+  base/candidate rounds, warm-up 0.2s, measurement 0.6s, sample size 20. Each
+  number is the median of seven Criterion median point estimates (ns).
+
+  | Kernel | Base ns | Candidate ns | Ratio |
+  | --- | ---: | ---: | ---: |
+  | histogram/all_rows/16 | 165915.76 | 165661.01 | 0.9985x |
+  | histogram/all_rows/255 | 118734.95 | 118703.86 | 0.9997x |
+  | histogram/all_rows/4096 | 114792.12 | 120039.61 | 1.0457x |
+  | histogram/leaf_subset/16 | 61934.49 | 62151.65 | 1.0035x |
+  | histogram/leaf_subset/255 | 47193.00 | 47548.25 | 1.0075x |
+  | histogram/leaf_subset/4096 | 50468.99 | 49239.36 | 0.9756x |
+  | partition/numerical/200k | 421467.10 | 422015.23 | 1.0013x |
+  | prediction/dense/4096x16x20 | 420031.67 | 401414.92 | 0.9557x |
+  | split_finding/numerical/255_bins | 509.98 | 510.25 | 1.0005x |
+  | training/row_wise_dense_mixed/4096x12 | 2832454.60 | 2835737.28 | 1.0012x |
+  | training/row_wise_mixed/4096x12 | 2595524.25 | 2586720.29 | 0.9966x |
+
+  Histograms use 200k rows; subsets select every third row. Prediction is
+  4096x16 over 20 trees, numerical search 255 bins, mixed training 4096x12
+  over 8 trees. These existing code paths are unchanged by the new module.
+  All kernels remain within the 5% gate; no speedup claim is made.
+  New standalone quantization/nearest_constant/200k: 500655.39 ns (0.501 ms), 200k f32 rows, 4 bins.
+  New standalone quantization/nearest_variable/200k: 609040.04 ns (0.609 ms), 200k f32 rows, 4 bins.
+  New-case times have no base equivalent and are not an end-to-end training
+  comparison against upstream. They exclude setup allocation and reuse storage.
+- Artifact verification: an initial shared-target build reused the base binary;
+  that entire comparison was discarded. The package benchmark artifacts were
+  cleaned and the candidate recompiled. Both new benchmark names were verified,
+  as were distinct binary hashes before repeating all seven rounds. Valid logs:
+  target/t27-final-N-{base,candidate}.log; results: target/t27-final-benchmark-results.json.
+  base executable SHA256: 12dedfac940d4e90d6842e6141e4bf124c98b441f2f98259c4ab08335ba33371.
+  candidate executable SHA256: e722b1433a45efb1a01249c661d3917682358ca7dafb1d4b20c4fe393e1ede11.
+- Profile: samply record --save-only --duration 3 --output
+  target/t27-final-quantizer-profile.json -- target/t27-candidate-kernels --bench
+  quantization/nearest_variable --profile-time 3. Of 2149 main-thread samples,
+  the leading sampled addresses resolve with atos to the inlined discretization
+  benchmark loop. This change adds the primitive; it does not optimize a training
+  path or claim that T3.1/T3.2 performance targets are closed.

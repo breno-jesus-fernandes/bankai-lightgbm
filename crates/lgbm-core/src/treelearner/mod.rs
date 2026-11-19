@@ -4,6 +4,7 @@ pub mod cegb;
 pub mod col_sampler;
 pub mod data_partition;
 pub mod feature_histogram;
+pub mod gradient_discretizer;
 #[allow(unsafe_code)]
 pub mod histogram;
 pub mod monotone_constraints;

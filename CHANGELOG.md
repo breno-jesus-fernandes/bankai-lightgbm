@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Rust core: added nearest-rounding gradient/Hessian discretization primitives with packed int8 derivatives, reusable storage, f64 scales and upstream histogram width selection. Native leaf statistics match `lightgbm==4.7.0` over 16 cases. This is the foundation of T2.7; quantized Python training is not implemented by this change.
+
 - Positive `histogram_pool_size` budgets (and alias `hist_pool_size`) now use an LRU histogram cache instead of raising `Unsupported`. Capacity follows upstream's raw per-feature bin counts, with at least two buckets. Evicted parents are rebuilt when subtraction cannot reuse them. Budget-only resets keep the existing capacity and sampling streams; capacity is recalculated when `num_leaves` changes, matching upstream.
 - `force_row_wise=true` builds a single row-wise bin view across dense single-value bundles and multi-value sub-features, using upstream's combined-density storage choice, histogram offsets and shared row blocks. Sparse single-value groups are also accepted in this path instead of raising `Unsupported`. Parity covers mixed/all-sparse data, dense/CSR/CSC inputs, bagging, feature sampling, weights, categories and 1/2/3 threads.
 - Dense histogram accumulation uses independent gradient/Hessian SIMD lanes (NEON on aarch64, SSE2 on x86_64), with runtime detection and a tested scalar fallback. Numerical split search also evaluates the unconstrained left/right gains in SIMD when L1, output clipping and smoothing are disabled. Row accumulation, threshold traversal and tie order are unchanged; native tests compare scalar and SIMD results bit for bit, and deterministic training matches upstream model text.

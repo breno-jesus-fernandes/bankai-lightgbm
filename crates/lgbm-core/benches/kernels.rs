@@ -13,6 +13,7 @@ use lgbm_core::treelearner::data_partition::{DataPartition, SplitRule};
 use lgbm_core::treelearner::feature_histogram::{
     FeatureMeta, Mc, SplitParams, find_best_threshold_numerical,
 };
+use lgbm_core::treelearner::gradient_discretizer::GradientDiscretizer;
 use lgbm_core::treelearner::histogram::{CheckedBins, CheckedRows, construct, construct_scalar};
 use lgbm_core::treelearner::split_info::SplitInfo;
 use lgbm_core::utils::random::Random;
@@ -213,6 +214,35 @@ fn row_wise_training(c: &mut Criterion) {
     }
 }
 
+/// Nearest quantization with a reused packed buffer, excluding setup allocation.
+fn gradient_discretization(c: &mut Criterion) {
+    let gradients: Vec<f32> = (0..N).map(|i| (i % 101) as f32 * 0.37 - 18.5).collect();
+    for constant in [false, true] {
+        let hessians: Vec<f32> = (0..N)
+            .map(|i| {
+                if constant {
+                    1.0
+                } else {
+                    0.13 + (i % 17) as f32 * 0.19
+                }
+            })
+            .collect();
+        let mut q = GradientDiscretizer::new(N, 4, constant).unwrap();
+        let name = if constant {
+            "quantization/nearest_constant/200k"
+        } else {
+            "quantization/nearest_variable/200k"
+        };
+        c.bench_function(name, |b| {
+            b.iter(|| {
+                q.discretize_nearest(black_box(&gradients), black_box(&hessians))
+                    .unwrap();
+                black_box(q.packed_gradients_hessians());
+            });
+        });
+    }
+}
+
 criterion_group!(
     benches,
     histogram,
@@ -220,6 +250,7 @@ criterion_group!(
     partition,
     split_finding,
     prediction,
-    row_wise_training
+    row_wise_training,
+    gradient_discretization
 );
 criterion_main!(benches);
