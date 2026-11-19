@@ -40,6 +40,16 @@ def _data(seed: int = 5, n: int = 1200, f: int = 5) -> tuple[np.ndarray, np.ndar
     return X, y
 
 
+def _binary_data(seed: int = 5, n: int = 1200, f: int = 5) -> tuple[np.ndarray, np.ndarray]:
+    """A binary-classification target, so the objective's Hessian varies per row."""
+    rng = np.random.default_rng(seed)
+    X = rng.normal(size=(n, f))
+    logit = X[:, 0] - 0.5 * X[:, 1] + X[:, 2] * X[:, 3]
+    prob = 1.0 / (1.0 + np.exp(-logit))
+    y = (rng.uniform(size=n) < prob).astype(np.float64)
+    return X, y
+
+
 def _trees(model_text: str) -> str:
     """The tree section only; the trailing parameters block echoes the flags."""
     return model_text.split("\nparameters:")[0]
@@ -49,6 +59,18 @@ def _trees(model_text: str) -> str:
 def test_quantized_regression_matches_upstream(bins: int) -> None:
     X, y = _data()
     params = {**BASE, "num_grad_quant_bins": bins}
+    theirs = lightgbm.train(params, lightgbm.Dataset(X, y), num_boost_round=10)
+    ours = lgb.train(params, lgb.Dataset(X, y), num_boost_round=10)
+    assert _trees(ours.model_to_string()) == _trees(theirs.model_to_string())
+
+
+@pytest.mark.parametrize("bins", [4, 8, 16])
+def test_quantized_binary_matches_upstream(bins: int) -> None:
+    """A variable-Hessian objective: the row count of a side is estimated from the integer
+    Hessian sum (`cnt_factor != 1`), not counted, so this exercises a path the constant-Hessian
+    regression case does not."""
+    X, y = _binary_data()
+    params = {**BASE, "objective": "binary", "num_grad_quant_bins": bins}
     theirs = lightgbm.train(params, lightgbm.Dataset(X, y), num_boost_round=10)
     ours = lgb.train(params, lgb.Dataset(X, y), num_boost_round=10)
     assert _trees(ours.model_to_string()) == _trees(theirs.model_to_string())
