@@ -58,7 +58,14 @@ jobs:
       # makes placement deterministic. Base and candidate are both built with it, so the comparison
       # stays fair; the product build is unchanged. (The 32-byte branch-boundary flag used before
       # left a ~4% gap in local measurements and did not clear the CI gate.)
-      RUSTFLAGS: "-C llvm-args=-align-all-functions=6"
+      #
+      # codegen-units=1 removes the other half of the problem: with the default 16 units, adding
+      # unrelated code to a crate re-partitions it and changes an untouched hot function's codegen
+      # (e.g. wiring quantized training shifted quantization/nearest_* by ~7% on byte-identical
+      # discretizer code). A single unit makes each crate's codegen a deterministic function of its
+      # own source, so an unrelated change no longer moves a benchmark. Both revisions use it, so
+      # the comparison stays fair; the product build is unchanged.
+      RUSTFLAGS: "-C llvm-args=-align-all-functions=6 -C codegen-units=1"
     steps:
       - uses: actions/checkout@v4
         with:

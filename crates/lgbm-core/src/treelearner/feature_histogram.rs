@@ -1132,6 +1132,10 @@ fn sequential_int<
         output.right_count = right_count;
         output.right_sum_gradient = sum_right_gradient;
         output.right_sum_hessian = sum_right_hessian;
+        // Packed integer child sums propagate to the children's leaf splits (upstream stores
+        // `left/right_sum_gradient_and_hessian`): gradient in the high 32 bits, Hessian low.
+        output.left_int_sum = (best_int_left_grad << 32) | (best_int_left_hess & 0xffff_ffff);
+        output.right_int_sum = (int_right_grad << 32) | (int_right_hess & 0xffff_ffff);
         output.gain = best_gain - min_gain_shift;
         output.default_left = REVERSE;
     }

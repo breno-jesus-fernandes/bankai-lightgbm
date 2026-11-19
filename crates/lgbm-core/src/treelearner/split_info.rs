@@ -20,6 +20,11 @@ pub struct SplitInfo {
     pub left_sum_hessian: f64,
     pub right_sum_gradient: f64,
     pub right_sum_hessian: f64,
+    /// Quantized path: packed integer `(gradient_sum << 32) | Hessian_sum` of each child,
+    /// propagated to the child leaf's integer sum after the split (upstream
+    /// `SplitInfo::left/right_sum_gradient_and_hessian`). `0` on the full-precision path.
+    pub left_int_sum: i64,
+    pub right_int_sum: i64,
     pub cat_threshold: Vec<u32>,
     pub default_left: bool,
     pub monotone_type: i8,
@@ -40,6 +45,8 @@ impl Default for SplitInfo {
             left_sum_hessian: 0.0,
             right_sum_gradient: 0.0,
             right_sum_hessian: 0.0,
+            left_int_sum: 0,
+            right_int_sum: 0,
             cat_threshold: Vec::new(),
             default_left: true,
             monotone_type: 0,

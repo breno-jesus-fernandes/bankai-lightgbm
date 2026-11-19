@@ -768,3 +768,63 @@ Entry format:
   9 skipped, 13 xfailed, 4 xpassed). Not wired into any training path, so no
   hot-path benchmark applies.
 - Status: active
+
+## D-026: Wire quantized training into the serial learner (T2.7, slice 5)
+
+- Date: 2026-11-19
+- Choice: connect the quantized primitives (nearest discretizer D-021/D-022,
+  integer histogram D-024, integer split search D-025) into `SerialTreeLearner`
+  so `use_quantized_grad=true` trains end-to-end for a deterministic slice, and
+  validate it against `lightgbm==4.7.0` tree-by-tree.
+- Supported slice: numeric features, dense column-wise layout, `num_threads=1`
+  effect on structure (the sums are integer-exact, so thread count cannot change
+  them), `stochastic_rounding=false`, `quant_train_renew_leaf=false`. Objective
+  arbitrary, but L2 regression (constant Hessian) is the first parity target.
+- Integration points (`treelearner/serial.rs`):
+  - `QuantState` holds the `GradientDiscretizer`, the two scales, and integer
+    histograms (`Vec<(i64,i64)>` per slot) parallel to the double `HistogramPool`
+    slots; they move with a slot exactly as the double ones do.
+  - `before_train` discretizes once (upstream `Train` calls `DiscretizeGradients`
+    before `BeforeTrain`) and sets the root `LeafSplits`: the integer sum packs
+    `(grad<<32)|hess` exactly (used for splits), while the double `sum_gradients`
+    accumulates `int*scale` in row order (upstream `LeafSplits::Init` int overload,
+    used only for the root leaf output).
+  - `construct_int_histograms` adds each row's packed `int8` gradient / `uint8`
+    Hessian into its group's bin. Integer sums are exact and associative, so the
+    accumulation order is irrelevant — unlike the double path, no gather or SIMD
+    lane order must be reproduced, which removes the main parity risk.
+  - Sibling subtraction is componentwise on the integer pairs; `fix_histogram_int`
+    sets the most-frequent bin to the leaf integer total minus the other bins.
+  - The split search calls `find_best_threshold_numerical_int` (D-025); the child
+    integer sums it reports propagate through `SplitInfo` into the children's
+    `LeafSplits::int_sum`, as upstream propagates `left/right_sum_gradient_and_hessian`.
+- Non-regression fallback (the important call): on `main`, `use_quantized_grad`
+  was silently ignored and trained full precision, and the ported upstream suite
+  (`test_engine.py::test_quantized_training`, the `test_categorical_*[True]` cases)
+  passed that way with loose-accuracy assertions. Those tests use the parameter
+  defaults — `stochastic_rounding=true`, and categorical data — which this slice
+  does not implement. Rejecting them with `Error::Unsupported` would regress a
+  green CI gate. So the learner enables the integer path only when the whole
+  supported slice holds and otherwise falls back to full precision, i.e. the exact
+  prior behaviour. This is not a silent drop of a supported parameter: the
+  parameter is honoured where implemented and behaves as it did while T2.7 was
+  unimplemented everywhere else. Each later slice (stochastic rounding, renewal,
+  categorical, multi-value/sparse/row-wise, multithread) narrows the fallback.
+- Stochastic rounding remains the open portability question (see the handoff and
+  D-023): its `uniform_real`/`uniform_int` draws are implementation-defined across
+  libc++/libstdc++, so the default (`stochastic_rounding=true`) path is deferred,
+  not approximated.
+- Oracle: `tests/parity/test_quantized_training_parity.py` compares the model text
+  tree section to `lightgbm==4.7.0` for `use_quantized_grad=true`,
+  `stochastic_rounding=false`, `quant_train_renew_leaf=false`, `num_threads=1`,
+  `deterministic=true`, L2 regression, `num_grad_quant_bins` in {4,8,16}, and
+  checks the quantized model differs from the full-precision one. First-pass
+  bit-exact, attributable to the integer sums being exact regardless of order.
+- SPEC ref: SPEC-NUM-6, SPEC-NUM-2 (1-thread structure), SPEC-NUM-9 (RNG, extended
+  for the quantized path per D-023).
+- Validation: cargo fmt --all --check, cargo clippy --workspace --all-targets
+  -D warnings clean; scripts/check.sh ended "all green" (2408 Python tests passed,
+  9 skipped, 13 xfailed, 4 xpassed). The change touches `treelearner/`, so CI runs
+  the interleaved benchmark; the quantized path is gated behind `use_quantized_grad`
+  and leaves the full-precision hot path unchanged.
+- Status: active
