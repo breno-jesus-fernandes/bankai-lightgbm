@@ -4,8 +4,9 @@
 //! `PushDataToMultiValBin`), src/io/train_share_states.cpp (`CalcBinOffsets`,
 //! `MultiValBinWrapper`), all v4.7.0.
 
+use crate::error::{Error, Result};
 use crate::io::bin_data::BinData;
-use crate::io::dataset::FeatureGroupLayout;
+use crate::io::dataset::{FeatureGroupLayout, GroupData};
 use crate::meta::K_ZERO_THRESHOLD;
 
 /// upstream `kAlignedSize` (bytes of alignment used by `SIZE_ALIGNED`).
@@ -33,6 +34,171 @@ pub enum MultiValBin {
         offsets: Vec<u32>,
         num_bin: usize,
     },
+}
+
+/// Unified row-wise view of single-value bundles and every multi-value sub-feature.
+/// upstream: Dataset::GetMultiBinFromAllFeatures / TrainingShareStates::CalcBinOffsets(false)
+/// (src/io/dataset.cpp and src/io/train_share_states.cpp, v4.7.0).
+#[derive(Debug, Clone)]
+pub struct AllFeatureBins {
+    /// One dense or sparse row-wise bin buffer covering the whole dataset.
+    pub bins: MultiValBin,
+    /// Start of each used feature's histogram (excluding bin zero when most frequent).
+    pub feature_hist_offsets: Vec<usize>,
+}
+
+impl AllFeatureBins {
+    /// Build upstream's all-group offsets and row storage without changing dataset columns.
+    pub fn from_groups(
+        groups: &[FeatureGroupLayout],
+        data: &[GroupData],
+        num_data: usize,
+    ) -> Result<Self> {
+        if groups.len() != data.len() {
+            return Err(Error::Parse(
+                "row-wise group layout/data length mismatch".into(),
+            ));
+        }
+        let ncol: usize = groups
+            .iter()
+            .map(|g| {
+                if g.is_multi_val {
+                    g.bin_mappers.len()
+                } else {
+                    1
+                }
+            })
+            .sum();
+        if ncol == 0 {
+            return Err(Error::Parse("row-wise bins require a feature group".into()));
+        }
+        let sum_dense_ratio: f64 = groups
+            .iter()
+            .flat_map(|g| &g.bin_mappers)
+            .map(|m| 1.0 - m.sparse_rate)
+            .sum();
+        let sparse_rate = 1.0 - sum_dense_ratio / ncol as f64;
+        let sparse = sparse_rate >= 0.25f32 as f64;
+        let mut cur = usize::from(sparse);
+        let mut offsets = Vec::with_capacity(ncol);
+        let mut columns = Vec::with_capacity(ncol);
+        let mut feature_hist_offsets = Vec::new();
+        for (gi, (g, stored)) in groups.iter().zip(data).enumerate() {
+            match stored {
+                GroupData::Multi(cols) if g.is_multi_val && cols.len() == g.bin_mappers.len() => {
+                    for (j, (m, col)) in g.bin_mappers.iter().zip(cols).enumerate() {
+                        if !sparse && gi == 0 && j == 0 && m.most_freq_bin > 0 {
+                            cur += 1;
+                        }
+                        offsets.push(cur as u32);
+                        feature_hist_offsets
+                            .push(cur + usize::from(!sparse && m.most_freq_bin == 0));
+                        cur += m.num_bin as usize - usize::from(sparse && m.most_freq_bin == 0);
+                        columns.push((col, m.most_freq_bin, true));
+                    }
+                }
+                GroupData::Single(col) if !g.is_multi_val => {
+                    offsets.push(cur as u32);
+                    for &b in &g.bin_offsets[..g.bin_mappers.len()] {
+                        feature_hist_offsets.push(cur + b as usize - usize::from(sparse));
+                    }
+                    cur += g.num_total_bin as usize - usize::from(sparse);
+                    columns.push((col, 0, false));
+                }
+                _ => {
+                    return Err(Error::Parse(
+                        "row-wise group layout does not match stored columns".into(),
+                    ));
+                }
+            }
+        }
+        if cur > u32::MAX as usize {
+            return Err(Error::Parse("row-wise bin offsets exceed u32".into()));
+        }
+        let raw = |v: u32, mfb: u32, multi: bool| {
+            if multi {
+                v - 1 + u32::from(mfb == 0)
+            } else {
+                v
+            }
+        };
+        let bins = if sparse {
+            // Two column scans build CSR in feature-group order, with no dense temporary.
+            let mut row_ptr = vec![0usize; num_data + 1];
+            for &(col, mfb, multi) in &columns {
+                visit_nonzero(col, num_data, &mut |r, v| {
+                    if raw(v, mfb, multi) != mfb {
+                        row_ptr[r + 1] += 1;
+                    }
+                })?;
+            }
+            for r in 0..num_data {
+                row_ptr[r + 1] += row_ptr[r];
+            }
+            let mut next = row_ptr[..num_data].to_vec();
+            let mut values = vec![0u32; row_ptr[num_data]];
+            for (j, &(col, mfb, multi)) in columns.iter().enumerate() {
+                visit_nonzero(col, num_data, &mut |r, v| {
+                    let b = raw(v, mfb, multi);
+                    if b != mfb {
+                        values[next[r]] = b + offsets[j] - u32::from(mfb == 0);
+                        next[r] += 1;
+                    }
+                })?;
+            }
+            MultiValBin::Sparse {
+                row_ptr,
+                data: values,
+                num_bin: cur,
+                estimate_element_per_row: (1.0 - sparse_rate) * ncol as f64,
+            }
+        } else {
+            let mut values = vec![0u32; num_data * ncol];
+            for (j, &(col, mfb, multi)) in columns.iter().enumerate() {
+                for r in 0..num_data {
+                    values[r * ncol + j] = mfb;
+                }
+                visit_nonzero(col, num_data, &mut |r, v| {
+                    values[r * ncol + j] = raw(v, mfb, multi);
+                })?;
+            }
+            MultiValBin::Dense {
+                num_feature: ncol,
+                data: values,
+                offsets,
+                num_bin: cur,
+            }
+        };
+        Ok(Self {
+            bins,
+            feature_hist_offsets,
+        })
+    }
+}
+
+/// Scan encoded non-default values in column order. Sparse columns stay sparse.
+fn visit_nonzero(col: &BinData, num_data: usize, visit: &mut impl FnMut(usize, u32)) -> Result<()> {
+    match col {
+        BinData::Dense(d) if d.num_rows() >= num_data => {
+            for r in 0..num_data {
+                let v = d.get(r);
+                if v != 0 {
+                    visit(r, v);
+                }
+            }
+        }
+        BinData::Sparse(s) if s.num_data >= num_data => s.for_each_nonzero(|r, v| {
+            if r < num_data {
+                visit(r, v);
+            }
+        }),
+        _ => {
+            return Err(Error::Parse(
+                "row-wise column is shorter than the dataset".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl MultiValBin {

@@ -156,3 +156,52 @@ def test_multi_value_training_is_exact_with_two_threads() -> None:
     x, y = _very_sparse(6000)
     ours, theirs = _models(x, y, {"num_threads": 2})
     assert ours == theirs
+
+
+@pytest.mark.parametrize("fmt", ["dense", "csr", "csc"])
+@pytest.mark.parametrize("threads", [1, 2, 3])
+@pytest.mark.parametrize("sparse_only", [False, True])
+def test_row_wise_all_groups_match_upstream(fmt: str, threads: int, sparse_only: bool) -> None:
+    x, y = _very_sparse(6001) if sparse_only else _mixed(6001)
+    ours, theirs = _models(
+        _as(fmt, x),
+        y,
+        {
+            "force_col_wise": False,
+            "force_row_wise": True,
+            "num_threads": threads,
+            "bagging_fraction": 0.73,
+            "bagging_freq": 1,
+            "feature_fraction": 0.8,
+        },
+    )
+    assert ours == theirs
+
+
+@pytest.mark.parametrize("threads", [1, 2, 3])
+def test_row_wise_dense_all_groups_with_weights_and_categories(threads: int) -> None:
+    x, y = _mixed(5001)
+    rng = np.random.default_rng(67)
+    # Ten dense columns plus sparse sub-features force the all-feature view to be dense.
+    x[:, :10] = rng.normal(size=(len(y), 10))
+    x[:, 11] = rng.integers(0, 7, len(y)) * (rng.random(len(y)) < 0.3)
+    weights = rng.uniform(0.2, 3.0, len(y))
+    ours, theirs = _models(
+        x,
+        y,
+        {"force_col_wise": False, "force_row_wise": True, "num_threads": threads},
+        weight=weights,
+        categorical_feature=[11],
+    )
+    assert ours == theirs
+
+
+def test_row_wise_all_groups_are_thread_invariant() -> None:
+    x, y = _mixed(6001)
+    trees = []
+    for threads in (1, 2, 3):
+        ours, _ = _models(
+            x, y, {"force_col_wise": False, "force_row_wise": True, "num_threads": threads}
+        )
+        trees.append(ours.split("\nparameters:")[0])
+    assert trees[0] == trees[1] == trees[2]

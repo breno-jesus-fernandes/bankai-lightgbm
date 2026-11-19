@@ -97,7 +97,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - **Gate:** identical bin upper bounds and feature groups ✅
 
 ## P3: Serial tree learner + GBDT
-- [ ] Histogram construction: col-wise and row-wise, `force_col_wise`/`force_row_wise` auto-choice (auto-choice is settled; multi-value row-wise construction remains T2.3)
+- [x] Histogram construction: col-wise and row-wise, `force_col_wise`/`force_row_wise` auto-choice (T2.3 unifies all groups in a row-wise view with upstream offsets, dense/sparse choice and row blocks, including sparse single-value groups; dense-only row-major and column-wise paths are preserved)
 - [x] SIMD dense histogram updates and common numerical split-gain arithmetic (T2.6): runtime NEON/SSE2 detection, bit-exact scalar fallback, unchanged row/threshold order; Criterion split search 0.9474x base, all kernels within 5% (D-018)
 - [ ] Histogram pool + subtraction trick, `histogram_pool_size`
 - [x] Leaf-wise growth, `num_leaves`, `max_depth`, `min_data_in_leaf`, `min_sum_hessian_in_leaf`

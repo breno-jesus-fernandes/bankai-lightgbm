@@ -27,7 +27,7 @@ use crate::io::bin::BinType;
 use crate::io::bin_data::{BinData, DenseBin};
 use crate::io::dataset::{Dataset, GroupData};
 use crate::tree::Tree;
-use crate::treelearner::multi_val::MultiValBin;
+use crate::treelearner::multi_val::{AllFeatureBins, MultiValBin};
 use crate::utils::common::construct_bitset;
 use crate::utils::random::Random;
 
@@ -142,6 +142,8 @@ pub struct SerialTreeLearner {
     multi_val: Option<(usize, MultiValBin)>,
     /// Per-block histograms of the multi-value group, reused across leaves.
     multi_val_scratch: Vec<f64>,
+    /// Full row-wise view when the layout contains a multi-value group.
+    all_feature_bins: Option<MultiValBin>,
     /// `force_row_wise`: the dense single-value groups are built in one row-major pass.
     row_wise: bool,
     /// Row-major copy of the dense single-value groups, built for `force_row_wise` (`row_major`).
@@ -205,9 +207,17 @@ impl SerialTreeLearner {
             ));
         }
         let row_wise = cfg.force_row_wise;
+        let has_multi_val = l.groups.iter().any(|g| g.is_multi_val);
+        let all_row_wise = row_wise
+            && (has_multi_val
+                || ds
+                    .data
+                    .iter()
+                    .any(|g| matches!(g, GroupData::Single(BinData::Sparse(_)))));
+        let dense_row_wise = row_wise && !all_row_wise;
         let mut row_major_col: Vec<Option<usize>> = vec![None; ds.data.len()];
         let mut dense_cols: Vec<&DenseBin> = Vec::new();
-        if row_wise {
+        if dense_row_wise {
             for (gi, g) in ds.data.iter().enumerate() {
                 if let GroupData::Single(BinData::Dense(bin)) = g {
                     row_major_col[gi] = Some(dense_cols.len());
@@ -215,7 +225,7 @@ impl SerialTreeLearner {
                 }
             }
         }
-        let row_major = if row_wise {
+        let row_major = if dense_row_wise {
             RowMajorBins::from_columns(&dense_cols, ds.num_data())
         } else {
             None
@@ -230,6 +240,7 @@ impl SerialTreeLearner {
         }
         let mut checked_bins = Vec::with_capacity(l.groups.len());
         let mut multi_val = None;
+        let mut seen_multi_val = false;
         for (gi, g) in l.groups.iter().enumerate() {
             if g.is_multi_val {
                 // upstream: GetMultiBinFromSparseFeatures ("There should be only one
@@ -239,12 +250,19 @@ impl SerialTreeLearner {
                         "feature group {gi} is multi-value but has no per-feature columns"
                     )));
                 };
-                if multi_val.is_some() {
+                if seen_multi_val {
                     return Err(Error::Parse(
                         "more than one multi-value feature group".into(),
                     ));
                 }
-                multi_val = Some((gi, MultiValBin::from_group(g, cols, ds.num_data())));
+                seen_multi_val = true;
+                if !row_wise {
+                    multi_val = Some((gi, MultiValBin::from_group(g, cols, ds.num_data())));
+                }
+                checked_bins.push(None);
+                continue;
+            }
+            if all_row_wise && matches!(&ds.data[gi], GroupData::Single(BinData::Sparse(_))) {
                 checked_bins.push(None);
                 continue;
             }
@@ -259,6 +277,15 @@ impl SerialTreeLearner {
             };
             checked_bins.push(Some(checked));
         }
+        let all_feature = if all_row_wise {
+            Some(AllFeatureBins::from_groups(
+                &l.groups,
+                &ds.data,
+                ds.num_data(),
+            )?)
+        } else {
+            None
+        };
         let num_features = l.num_features;
         // upstream: SerialTreeLearner::Init and FeatureHistogram::DynamicChangeSize (v4.7.0)
         log::info!(
@@ -296,6 +323,10 @@ impl SerialTreeLearner {
                 feature_hist_offsets.push(hist_cur_num_bin + g.bin_offsets[i] as usize + skip_zero);
             }
             hist_cur_num_bin += *g.bin_offsets.last().unwrap_or(&0) as usize;
+        }
+        if let Some(all) = all_feature.as_ref() {
+            feature_hist_offsets.clone_from(&all.feature_hist_offsets);
+            hist_cur_num_bin = all.bins.num_bin();
         }
         for f in 0..num_features {
             let g = &l.groups[l.feature2group[f] as usize];
@@ -371,6 +402,7 @@ impl SerialTreeLearner {
             checked_bins,
             multi_val,
             multi_val_scratch: Vec::new(),
+            all_feature_bins: all_feature.map(|a| a.bins),
             row_wise,
             row_major,
             row_major_col,
@@ -661,6 +693,23 @@ impl SerialTreeLearner {
             }
             None => (&gradients[..leaf_cnt], &hessians[..leaf_cnt]),
         };
+        if let Some(all) = self.all_feature_bins.as_ref() {
+            // upstream: ConstructHistogramsMultiVal over GetMultiBinFromAllFeatures.
+            // All groups share the same row blocks; constant Hessians are accumulated as
+            // actual derivatives, not counts multiplied after the reduction.
+            let h0 = hessians.first().copied().unwrap_or(0.0);
+            all.construct(
+                indices,
+                leaf_cnt,
+                self.num_threads,
+                self.spin.as_ref(),
+                &|i, _row| og[i],
+                &|i, _row| if const_hess { h0 } else { oh[i] },
+                &mut self.pool.slots[slot],
+                &mut self.multi_val_scratch,
+            );
+            return;
+        }
         let rows = indices.and_then(|ix| histogram::CheckedRows::new(ix, self.num_data));
         assert!(
             indices.is_none() || rows.is_some(),
