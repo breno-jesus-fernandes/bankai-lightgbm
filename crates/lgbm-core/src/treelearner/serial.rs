@@ -13,8 +13,10 @@ use super::col_sampler::ColSampler;
 use super::data_partition::{DataPartition, SplitRule};
 use super::feature_histogram::{
     CatParams, FeatureMeta, Mc, SplitParams, calculate_splitted_leaf_output,
-    find_best_threshold_categorical, find_best_threshold_numerical, leaf_output_root,
+    find_best_threshold_categorical, find_best_threshold_numerical,
+    find_best_threshold_numerical_int, leaf_output_root,
 };
+use super::gradient_discretizer::GradientDiscretizer;
 use super::histogram;
 use super::split_info::{K_MIN_SCORE, SplitInfo, argmax_split};
 use crate::utils::worker_pool::WorkerPool;
@@ -31,6 +33,22 @@ use crate::treelearner::multi_val::{AllFeatureBins, MultiValBin};
 use crate::utils::common::construct_bitset;
 use crate::utils::random::Random;
 
+/// One leaf's integer histogram: `(gradient_sum, Hessian_sum)` per bin.
+type IntHistogram = Vec<(i64, i64)>;
+
+/// State of the quantized (`use_quantized_grad`) training path.
+///
+/// upstream: `GradientDiscretizer` plus the integer histograms the serial learner keeps
+/// alongside the double ones. The integer histograms are exact, so a slot holds one
+/// `(gradient_sum, Hessian_sum)` pair per bin and sibling subtraction is componentwise.
+struct QuantState {
+    discretizer: GradientDiscretizer,
+    grad_scale: f64,
+    hess_scale: f64,
+    /// Integer histograms parallel to `HistogramPool::slots`, one pair per bin.
+    int_slots: Vec<IntHistogram>,
+}
+
 /// upstream: `LeafSplits` (sums for one leaf being split)
 #[derive(Debug, Clone, Copy)]
 struct LeafSplits {
@@ -39,6 +57,9 @@ struct LeafSplits {
     sum_gradients: f64,
     sum_hessians: f64,
     weight: f64,
+    /// Quantized path: packed integer `(gradient_sum << 32) | Hessian_sum` of the leaf
+    /// (upstream `LeafSplits::int_sum_gradients_and_hessians_`). `0` on the full-precision path.
+    int_sum: i64,
 }
 
 impl LeafSplits {
@@ -49,6 +70,7 @@ impl LeafSplits {
             sum_gradients: 0.0,
             sum_hessians: 0.0,
             weight: 0.0,
+            int_sum: 0,
         }
     }
 }
@@ -219,6 +241,8 @@ pub struct SerialTreeLearner {
     num_threads: usize,
     /// Persistent spinning workers for the parallel regions of one tree (`None` when serial).
     spin: Option<WorkerPool>,
+    /// Quantized training state (`use_quantized_grad`); `None` on the full-precision path.
+    quant: Option<QuantState>,
 }
 
 impl SerialTreeLearner {
@@ -459,6 +483,33 @@ impl SerialTreeLearner {
             num_leaves,
             num_data,
         )?;
+        // The quantized integer path is wired for the deterministic nearest-rounding slice only:
+        // numeric features, the dense column-wise layout, no leaf renewal. Configs it does not
+        // cover yet (stochastic rounding — its distributions are implementation-defined across
+        // libc++/libstdc++; `quant_train_renew_leaf`; categorical, multi-value, sparse or
+        // row-wise layouts) fall back to full-precision training, as before this slice. This is
+        // not a silent drop of the parameter: `use_quantized_grad` is honoured where it is
+        // implemented and otherwise behaves as it did while T2.7 was unimplemented. See D-026.
+        let bins = cfg.num_grad_quant_bins;
+        let quant_supported = cfg.use_quantized_grad
+            && !cfg.stochastic_rounding
+            && !cfg.quant_train_renew_leaf
+            && (2..=127).contains(&bins)
+            && !row_wise
+            && all_feature.is_none()
+            && multi_val.is_none()
+            && metas.iter().all(|m| m.bin_type != BinType::Categorical);
+        let quant = if quant_supported {
+            let discretizer = GradientDiscretizer::new(num_data, bins as u8, is_constant_hessian)?;
+            Some(QuantState {
+                discretizer,
+                grad_scale: 0.0,
+                hess_scale: 0.0,
+                int_slots: vec![vec![(0i64, 0i64); hist_cur_num_bin.max(1)]; cache_size],
+            })
+        } else {
+            None
+        };
         Ok(SerialTreeLearner {
             cfg,
             params,
@@ -506,6 +557,7 @@ impl SerialTreeLearner {
             leaf_depth: vec![0; num_leaves],
             num_threads,
             spin,
+            quant,
         })
     }
 
@@ -596,24 +648,76 @@ impl SerialTreeLearner {
         for s in &mut self.best_split_per_leaf {
             s.reset();
         }
+        // upstream: `SerialTreeLearner::Train` calls `DiscretizeGradients` before `BeforeTrain`.
+        if let Some(q) = self.quant.as_mut() {
+            // Nearest rounding only; stochastic rounding is refused in `new`. Degenerate
+            // gradients (nonfinite, or a zero maximum) are an unsupported edge upstream turns
+            // into undefined float-to-int casts (SPEC-NUM-10); warn and keep the previous
+            // discretization rather than panic in library code.
+            match q.discretizer.discretize_nearest(gradients, hessians) {
+                Ok(()) => {
+                    q.grad_scale = q.discretizer.gradient_scale();
+                    q.hess_scale = q.discretizer.hessian_scale();
+                }
+                Err(e) => log::warn!("quantized gradient discretization skipped: {e}"),
+            }
+        }
         // upstream LeafSplits::Init(gradients, hessians): sequential double sums, over the
         // bagged rows when a subset is used (`LeafSplits::Init(leaf, partition, ...)`).
-        let mut sg = 0.0f64;
-        let mut sh = 0.0f64;
-        let count = match rows {
-            Some(r) => {
-                for &i in r {
-                    sg += f64::from(gradients[i as usize]);
-                    sh += f64::from(hessians[i as usize]);
-                }
-                r.len()
+        let (sg, sh, int_sum, count) = match &self.quant {
+            // upstream: `LeafSplits::Init(int_gradients_and_hessians, grad_scale, hess_scale)`.
+            // The double sums accumulate `int * scale` in row order (used only for the root
+            // output); the integer sum packs `(grad << 32) | hess` exactly (used for splits).
+            Some(q) => {
+                let packed = q.discretizer.packed_gradients_hessians();
+                let (gs, hs) = (q.grad_scale, q.hess_scale);
+                let mut sg = 0.0f64;
+                let mut sh = 0.0f64;
+                let mut int_sum: i64 = 0;
+                let mut accumulate = |i: usize| {
+                    let p = packed[i];
+                    let grad = (p >> 8) as i8;
+                    let hess = (p & 0xff) as u8;
+                    sg += f64::from(grad) * gs;
+                    sh += f64::from(hess) * hs;
+                    int_sum += (i64::from(grad) << 32) | i64::from(hess);
+                };
+                let count = match rows {
+                    Some(r) => {
+                        for &i in r {
+                            accumulate(i as usize);
+                        }
+                        r.len()
+                    }
+                    None => {
+                        for i in 0..self.num_data {
+                            accumulate(i);
+                        }
+                        self.num_data
+                    }
+                };
+                (sg, sh, int_sum, count)
             }
             None => {
-                for i in 0..self.num_data {
-                    sg += f64::from(gradients[i]);
-                    sh += f64::from(hessians[i]);
-                }
-                self.num_data
+                let mut sg = 0.0f64;
+                let mut sh = 0.0f64;
+                let count = match rows {
+                    Some(r) => {
+                        for &i in r {
+                            sg += f64::from(gradients[i as usize]);
+                            sh += f64::from(hessians[i as usize]);
+                        }
+                        r.len()
+                    }
+                    None => {
+                        for i in 0..self.num_data {
+                            sg += f64::from(gradients[i]);
+                            sh += f64::from(hessians[i]);
+                        }
+                        self.num_data
+                    }
+                };
+                (sg, sh, 0i64, count)
             }
         };
         // upstream: `LeafSplits::Init(gradients, hessians)` (src/treelearner/leaf_splits.hpp, v4.7.0)
@@ -626,6 +730,7 @@ impl SerialTreeLearner {
             sum_gradients: sg,
             sum_hessians: sh,
             weight: carried,
+            int_sum,
         };
         self.larger = LeafSplits::empty();
     }
@@ -709,19 +814,34 @@ impl SerialTreeLearner {
         let use_subtract = self.parent_slot.is_some();
         // smaller leaf histogram
         let smaller_leaf = self.smaller.leaf_index as usize;
-        self.construct_histograms(
-            &is_feature_used,
-            Some(smaller_leaf),
-            self.smaller_slot,
-            gradients,
-            hessians,
-        );
+        let quantized = self.quant.is_some();
+        if quantized {
+            self.construct_int_histograms(&is_feature_used, Some(smaller_leaf), self.smaller_slot);
+        } else {
+            self.construct_histograms(
+                &is_feature_used,
+                Some(smaller_leaf),
+                self.smaller_slot,
+                gradients,
+                hessians,
+            );
+        }
         if let Some(ls) = self.larger_slot
             && !use_subtract
             && self.larger.leaf_index >= 0
         {
             let larger_leaf = self.larger.leaf_index as usize;
-            self.construct_histograms(&is_feature_used, Some(larger_leaf), ls, gradients, hessians);
+            if quantized {
+                self.construct_int_histograms(&is_feature_used, Some(larger_leaf), ls);
+            } else {
+                self.construct_histograms(
+                    &is_feature_used,
+                    Some(larger_leaf),
+                    ls,
+                    gradients,
+                    hessians,
+                );
+            }
         }
         self.find_best_splits_from_histograms(&is_feature_used, use_subtract, tree);
     }
@@ -904,6 +1024,70 @@ impl SerialTreeLearner {
         }
     }
 
+    /// Build the integer gradient/Hessian histograms for one leaf (quantized path).
+    ///
+    /// upstream: `Dataset::ConstructHistograms` on the discretized derivatives (dense
+    /// column-wise groups only). Each row adds its packed `int8` gradient and `uint8` Hessian
+    /// into its group's bin; integer sums are exact and order-independent, so no gather or
+    /// SIMD lane ordering is needed. The buffer layout mirrors the double histogram, so the
+    /// split search reads the same per-feature bin ranges.
+    fn construct_int_histograms(
+        &mut self,
+        is_feature_used: &[bool],
+        leaf: Option<usize>,
+        slot: usize,
+    ) {
+        let ds = Arc::clone(&self.ds);
+        let l = &ds.layout;
+        let leaf_cnt = leaf
+            .map(|lf| self.partition.leaf_count(lf))
+            .unwrap_or(self.num_data);
+        // Gather the leaf's rows (owned) before borrowing the quantized state.
+        let indices: Option<Vec<i32>> = match leaf {
+            Some(lf) if leaf_cnt < self.num_data => {
+                Some(self.partition.indices_on_leaf(lf).to_vec())
+            }
+            _ => None,
+        };
+        // Group start bin of each used dense single-value group (same layout as the double pool).
+        let mut jobs: Vec<(usize, usize, usize)> = Vec::new(); // (group, start bin, num_bin)
+        let mut group_start = 0usize;
+        for (gi, g) in l.groups.iter().enumerate() {
+            let num_bin = *g.bin_offsets.last().unwrap_or(&0) as usize;
+            let fs = l.group_feature_start[gi] as usize;
+            let fc = l.group_feature_cnt[gi] as usize;
+            if (fs..fs + fc).any(|f| is_feature_used[f]) {
+                jobs.push((gi, group_start, num_bin));
+            }
+            group_start += num_bin;
+        }
+        let Some(q) = self.quant.as_mut() else {
+            unreachable!("construct_int_histograms is only called on the quantized path")
+        };
+        let packed = q.discretizer.packed_gradients_hessians();
+        let int = &mut q.int_slots[slot];
+        for &(gi, gs, num_bin) in &jobs {
+            for cell in &mut int[gs..gs + num_bin] {
+                *cell = (0, 0);
+            }
+            let GroupData::Single(BinData::Dense(bin)) = &ds.data[gi] else {
+                unreachable!("quantized path refused non-dense layouts in new()")
+            };
+            let mut add = |row: usize| {
+                let p = packed[row];
+                let grad = i64::from((p >> 8) as i8);
+                let hess = i64::from((p & 0xff) as u8);
+                let cell = &mut int[gs + bin.get(row) as usize];
+                cell.0 += grad;
+                cell.1 += hess;
+            };
+            match &indices {
+                Some(ix) => ix.iter().for_each(|&r| add(r as usize)),
+                None => (0..leaf_cnt).for_each(&mut add),
+            }
+        }
+    }
+
     /// upstream: `Dataset::FixHistogram`
     fn fix_histogram(&mut self, slot: usize, feature: usize, sum_gradient: f64, sum_hessian: f64) {
         let l = &self.ds.layout;
@@ -918,6 +1102,126 @@ impl SerialTreeLearner {
             let data = &mut self.pool.slots[slot][start..start + num_bin * 2];
             fix_slice(data, mfb, num_bin, sum_gradient, sum_hessian);
         }
+    }
+
+    /// upstream: `Dataset::FixHistogram` on the integer histogram of one feature.
+    fn fix_histogram_int(
+        &mut self,
+        slot: usize,
+        feature: usize,
+        int_total_grad: i64,
+        int_total_hess: i64,
+    ) {
+        let (mfb, num_bin, start) = {
+            let l = &self.ds.layout;
+            let g = &l.groups[l.feature2group[feature] as usize];
+            let m = &g.bin_mappers[l.feature2subfeature[feature] as usize];
+            (
+                m.most_freq_bin as usize,
+                m.num_bin as usize,
+                self.feature_hist_offsets[feature],
+            )
+        };
+        if mfb > 0 {
+            let Some(q) = self.quant.as_mut() else {
+                unreachable!("fix_histogram_int is only called on the quantized path")
+            };
+            let data = &mut q.int_slots[slot][start..start + num_bin];
+            fix_slice_int(data, mfb, num_bin, int_total_grad, int_total_hess);
+        }
+    }
+
+    /// Phase 1 + 2 of `FindBestSplitsFromHistograms` for the quantized (integer) path. Mirrors
+    /// the sequential double path: fix the smaller leaf, derive the larger (subtraction or its
+    /// own fix), then search both leaves on the integer histograms.
+    fn find_best_splits_int(&mut self, inp: &SearchInputs<'_>) -> Vec<Option<FeatureOutcome>> {
+        let is_feature_used = inp.is_feature_used;
+        let smaller_slot = inp.smaller_slot;
+        let smaller = inp.smaller;
+        let larger = inp.larger.map(|(slot, _)| slot);
+        let larger_leaf = inp.larger.map(|(_, leaf)| leaf);
+        // Phase 1 (sequential): fix and subtract, feature by feature.
+        let (s_g, s_h) = (smaller.int_sum >> 32, smaller.int_sum & 0xffff_ffff);
+        for f in 0..self.num_features {
+            if !is_feature_used[f] {
+                continue;
+            }
+            self.fix_histogram_int(smaller_slot, f, s_g, s_h);
+            if let Some(ls) = larger {
+                if inp.use_subtract {
+                    let start = self.feature_hist_offsets[f];
+                    let len = self.feature_hist_len[f];
+                    let Some(q) = self.quant.as_mut() else {
+                        unreachable!("find_best_splits_int is only called on the quantized path")
+                    };
+                    let (small, large) = two_int_slots(&mut q.int_slots, smaller_slot, ls);
+                    for i in start..start + len {
+                        large[i].0 -= small[i].0;
+                        large[i].1 -= small[i].1;
+                    }
+                } else if let Some(leaf) = larger_leaf {
+                    let (l_g, l_h) = (leaf.int_sum >> 32, leaf.int_sum & 0xffff_ffff);
+                    self.fix_histogram_int(ls, f, l_g, l_h);
+                }
+            }
+        }
+        // Phase 2 (sequential): threshold search on the integer histograms.
+        let ctx = SearchCtx {
+            params: &self.params,
+            cat_params: &self.cat_params,
+            monotone_active: self.monotone_active,
+            monotone_penalization: self.monotone_penalization,
+            leaf_depth: &self.leaf_depth,
+        };
+        let Some(q) = self.quant.as_ref() else {
+            unreachable!("find_best_splits_int is only called on the quantized path")
+        };
+        let (grad_scale, hess_scale) = (q.grad_scale, q.hess_scale);
+        let int_slots = &q.int_slots;
+        let offsets = &self.feature_hist_offsets;
+        let lens = &self.feature_hist_len;
+        let real_idx = &self.ds.layout.real_feature_idx;
+        let mc = inp.mc;
+        self.metas
+            .iter_mut()
+            .enumerate()
+            .map(|(f, meta)| {
+                if !is_feature_used[f] {
+                    return None;
+                }
+                let range = |slot: usize| {
+                    let start = offsets[f];
+                    &int_slots[slot][start..start + lens[f]]
+                };
+                let real = real_idx[f];
+                let small = search_feature_int(
+                    &ctx,
+                    range(smaller_slot),
+                    meta,
+                    real,
+                    &smaller,
+                    grad_scale,
+                    hess_scale,
+                    inp.smaller_parent_output,
+                    mc.for_leaf(smaller.leaf_index as usize, f),
+                );
+                let large = match (larger, larger_leaf) {
+                    (Some(ls), Some(leaf)) => Some(search_feature_int(
+                        &ctx,
+                        range(ls),
+                        meta,
+                        real,
+                        &leaf,
+                        grad_scale,
+                        hess_scale,
+                        inp.larger_parent_output,
+                        mc.for_leaf(leaf.leaf_index as usize, f),
+                    )),
+                    _ => None,
+                };
+                Some(FeatureOutcome { small, large })
+            })
+            .collect()
     }
 
     /// Bin counts of every inner feature (the advanced lists are sized by them).
@@ -1013,14 +1317,16 @@ impl SerialTreeLearner {
             larger_parent_output,
         };
         // Parallel: fused per-feature phases (see `fused_search`). Otherwise, or when the
-        // histogram extents overlap, the two sequential phases below.
-        let fused = if parallel {
+        // histogram extents overlap, the two sequential phases below. The quantized path has
+        // its own integer phases and never uses the (double) fused search.
+        let fused = if parallel && self.quant.is_none() {
             self.fused_search(&inp)
         } else {
             None
         };
         let outcomes: Vec<Option<FeatureOutcome>> = match fused {
             Some(outcomes) => outcomes,
+            None if self.quant.is_some() => self.find_best_splits_int(&inp),
             None => {
                 // Phase 1 (sequential).
                 for f in 0..self.num_features {
@@ -1466,6 +1772,7 @@ impl SerialTreeLearner {
             sum_gradients: info.left_sum_gradient,
             sum_hessians: info.left_sum_hessian,
             weight: info.left_output,
+            int_sum: info.left_int_sum,
         };
         let right_ls = LeafSplits {
             leaf_index: right as i32,
@@ -1473,6 +1780,7 @@ impl SerialTreeLearner {
             sum_gradients: info.right_sum_gradient,
             sum_hessians: info.right_sum_hessian,
             weight: info.right_output,
+            int_sum: info.right_int_sum,
         };
         if info.left_count < info.right_count {
             self.smaller = left_ls;
@@ -1509,6 +1817,7 @@ impl SerialTreeLearner {
             sum_gradients,
             sum_hessians,
             weight: 0.0,
+            int_sum: split.left_int_sum + split.right_int_sum,
         };
         // upstream: the parent output of a smoothed split, from the leaf's totals
         let parent_output = if self.params.path_smooth > f64::from(crate::meta::K_EPSILON) {
@@ -1829,6 +2138,43 @@ fn fix_slice(data: &mut [f64], mfb: usize, num_bin: usize, sum_gradient: f64, su
     }
 }
 
+/// upstream: `Dataset::FixHistogram` on the integer histogram: the most frequent bin takes the
+/// leaf's integer totals minus the other bins. Integer subtraction is exact.
+fn fix_slice_int(
+    data: &mut [(i64, i64)],
+    mfb: usize,
+    num_bin: usize,
+    int_total_grad: i64,
+    int_total_hess: i64,
+) {
+    if mfb > 0 {
+        let data = &mut data[..num_bin];
+        data[mfb] = (int_total_grad, int_total_hess);
+        for i in 0..num_bin {
+            if i != mfb {
+                data[mfb].0 -= data[i].0;
+                data[mfb].1 -= data[i].1;
+            }
+        }
+    }
+}
+
+/// Two distinct integer slots: `a` read-only, `b` mutable (for sibling subtraction).
+fn two_int_slots(
+    slots: &mut [IntHistogram],
+    a: usize,
+    b: usize,
+) -> (&IntHistogram, &mut IntHistogram) {
+    assert_ne!(a, b);
+    if a < b {
+        let (x, y) = slots.split_at_mut(b);
+        (&x[a], &mut y[0])
+    } else {
+        let (x, y) = slots.split_at_mut(a);
+        (&y[0], &mut x[b])
+    }
+}
+
 /// Splits `buf` into the given ascending, disjoint `(start, len)` spans, in order. Spans are
 /// validated by the caller, so the splits cannot go out of range.
 fn carve_mut(mut buf: &mut [f64], spans: impl Iterator<Item = (usize, usize)>) -> Vec<&mut [f64]> {
@@ -1945,6 +2291,44 @@ fn search_feature(
         )
     };
     // upstream: ComputeBestSplitForFeature, monotone_penalty (applied even at 0)
+    if ctx.monotone_active && meta.monotone_type != 0 {
+        let depth = ctx.leaf_depth[ls.leaf_index as usize];
+        new_split.gain *= monotone_split_gain_penalty(depth, ctx.monotone_penalization);
+    }
+    new_split.feature = real_fidx;
+    (splittable, new_split)
+}
+
+/// upstream: `SerialTreeLearner::ComputeBestSplitForFeature` on the integer histogram
+/// (`FindBestThresholdInt`). Numeric features only (the quantized slice refuses categorical).
+#[allow(clippy::too_many_arguments)]
+fn search_feature_int(
+    ctx: &SearchCtx<'_>,
+    hist: &[(i64, i64)],
+    meta: &mut FeatureMeta,
+    real_fidx: i32,
+    ls: &LeafSplits,
+    grad_scale: f64,
+    hess_scale: f64,
+    parent_output: f64,
+    mc: Mc<'_>,
+) -> (bool, SplitInfo) {
+    let mut new_split = SplitInfo::default();
+    let int_sum_gradient = ls.int_sum >> 32;
+    let int_sum_hessian = ls.int_sum & 0xffff_ffff;
+    let splittable = find_best_threshold_numerical_int(
+        hist,
+        meta,
+        ctx.params,
+        int_sum_gradient,
+        int_sum_hessian,
+        grad_scale,
+        hess_scale,
+        ls.num_data_in_leaf,
+        parent_output,
+        mc,
+        &mut new_split,
+    );
     if ctx.monotone_active && meta.monotone_type != 0 {
         let depth = ctx.leaf_depth[ls.leaf_index as usize];
         new_split.gain *= monotone_split_gain_penalty(depth, ctx.monotone_penalization);
