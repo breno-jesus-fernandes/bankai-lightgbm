@@ -828,3 +828,40 @@ Entry format:
   the interleaved benchmark; the quantized path is gated behind `use_quantized_grad`
   and leaves the full-precision hot path unchanged.
 - Status: active
+
+## D-027: Leaf renewal for quantized training (T2.7, slice 6)
+
+- Date: 2026-11-19
+- Choice: implement `quant_train_renew_leaf` (upstream
+  `GradientDiscretizer::RenewIntGradTreeOutput`, the non-`data` tree-learner branch)
+  in `SerialTreeLearner::renew_int_grad_tree_output`, called once after a quantized
+  tree is grown. The quantized split structure is kept; each leaf output is replaced
+  by the full-precision value computed from the original (non-discretized) gradients
+  and Hessians summed over the leaf's rows.
+- Formula: upstream hardcodes `CalculateSplittedLeafOutput<USE_L1=true,
+  USE_MAX_OUTPUT=true, USE_SMOOTHING=false>(sum_grad, sum_hess, lambda_l1, lambda_l2,
+  max_delta_step, path_smooth, leaf_cnt, parent_output=0)`. `USE_L1=true` with
+  `lambda_l1=0` is identical to `USE_L1=false` (`threshold_l1(s, 0) == s`), so the
+  fixed template matches every parameterization. Smoothing is off and the parent
+  output is zero here regardless of `path_smooth`, so renewal deliberately ignores
+  both — unlike the split-time outputs.
+- Summation order: upstream's loop has no `deterministic_` guard, so at
+  `num_threads>1` its OpenMP reduction order differs; bankai sums in leaf-index order,
+  which matches upstream at `num_threads=1` (the validated slice). Multithread renewal
+  is part of the later multithread slice.
+- Fallback removed: `quant_train_renew_leaf=true` no longer forces the full-precision
+  fallback; it now trains the quantized path with renewal. The remaining fallback
+  cases (stochastic rounding, categorical, multi-value/sparse/row-wise) are unchanged
+  (D-026).
+- Oracle: `tests/parity/test_quantized_training_parity.py::
+  test_quantized_renew_leaf_matches_upstream` for regression and binary at
+  `num_grad_quant_bins=8`, tree-by-tree against `lightgbm==4.7.0`. Red first (the
+  fallback model differed), green after.
+- SPEC ref: SPEC-NUM-6, SPEC-NUM-2.
+- Validation: cargo fmt --all --check, cargo clippy --workspace --all-targets
+  -D warnings clean; scripts/check.sh ended "all green" (2413 Python tests passed).
+  Touches `treelearner/`, so CI runs the interleaved benchmark (built with
+  codegen-units=1 per D-026's follow-up); renewal is gated behind
+  use_quantized_grad + quant_train_renew_leaf and leaves the full-precision path
+  unchanged.
+- Status: active
