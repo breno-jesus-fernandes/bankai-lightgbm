@@ -723,3 +723,48 @@ Entry format:
   9 skipped, 13 xfailed, 4 xpassed). The primitive is not wired into any training
   path, so no hot-path benchmark applies.
 - Status: active
+
+## D-025: Integer numerical split search (T2.7, slice 4)
+
+- Date: 2026-11-19
+- Choice: port upstream's `FindBestThresholdSequentiallyInt` / `BeforeNumericalInt`
+  (`feature_histogram.rs::find_best_threshold_numerical_int`) over the unpacked
+  integer `(gradient_sum, Hessian_sum)` histogram from D-024, as a standalone
+  primitive before wiring it into the serial learner. The function mirrors the
+  full-precision `find_best_threshold_numerical` structure (same RAND/L1/MAX_OUT/
+  SMOOTH/REVERSE/SKIP/NA/MC template matrix) and reuses the same f64 gain and
+  leaf-output helpers (`calculate_splitted_leaf_output`, `leaf_gain`,
+  `leaf_gain_given_output`, `simd::split_gain`); only the sum accumulation differs.
+- Integer exactness: gradient and Hessian prefix sums are accumulated as `i64`
+  (exact, order-independent), and the double sums are recovered by one multiply by
+  `grad_scale` / `hess_scale` per prefix point, as upstream does. The row count of a
+  side is estimated from its integer Hessian sum: `cnt_factor = num_data /
+  int_total_hessian`, `count = RoundInt(int_side_hessian * cnt_factor)`. For a
+  constant Hessian (e.g. L2 regression) the integer Hessian sums are the exact row
+  counts and `cnt_factor == 1`.
+- kEpsilon placement (the subtle part, differs from the f64 path): upstream's
+  integer path does NOT add `kEpsilon` to the leaf totals (unlike
+  `FindBestThreshold`, which adds `2*kEpsilon` to its Hessian) and does NOT store it
+  in the split sums. `kEpsilon` is added to the child Hessians ONLY inside the gain
+  (`GetSplitGains(..., sum_left_hessian + kEpsilon, sum_right_hessian + kEpsilon)`).
+  The leaf-total gain shift (`BeforeNumericalInt`) and the final leaf outputs use the
+  raw (epsilon-free) scaled Hessians. The tail recomputes both child counts with
+  `RoundInt` from the best integer sums, matching upstream lines 1324-1325.
+- Oracle: an independent brute-force reference over all thresholds for the L2-only
+  path (no L1/max-delta-step/smoothing/monotone constraints, no missing bin, so a
+  single reverse scan), recomputing the gain with the documented formula, exact
+  integer prefix sums, the same count estimation and the same epsilon placement. It
+  shares none of the implementation's loop/break/best-tracking logic. Tests cover
+  constant Hessian (exact counts), variable Hessian (estimated counts) with
+  non-trivial scales, and an unsplittable feature. The full learner parity oracle
+  (tree-by-tree vs `lightgbm==4.7.0`) applies when the function is wired in.
+- Not wired: the serial learner still trains the full-precision path; this primitive
+  is unreachable from Python until the integer histogram pool, sibling subtraction,
+  leaf-splits integer sums and leaf-output wiring land (next slice).
+- SPEC ref: SPEC-NUM-6 (integer accumulation has no rounding); the quantized path
+  extends SPEC-NUM-9 for RNG as noted in D-023.
+- Validation: cargo fmt --all --check and cargo clippy --workspace --all-targets
+  -D warnings clean; scripts/check.sh ended "all green" (2404 Python tests passed,
+  9 skipped, 13 xfailed, 4 xpassed). Not wired into any training path, so no
+  hot-path benchmark applies.
+- Status: active
