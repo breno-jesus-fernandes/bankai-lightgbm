@@ -942,11 +942,13 @@ impl Dataset {
     ) -> Result<Dataset> {
         let mappers = sample.find_bins(cfg, categorical)?;
         let layout = DatasetLayout::construct(mappers, &sample, cfg);
-        let group_data: Vec<GroupData> = layout
-            .groups
-            .par_iter()
-            .map(|g| g.fill_dense(data, nrow, ncol))
-            .collect();
+        // Miri exercises the same group-filling code without rayon worker threads,
+        // consistent with the persistent worker pool's serial Miri backend.
+        #[cfg(not(miri))]
+        let groups = layout.groups.par_iter();
+        #[cfg(miri)]
+        let groups = layout.groups.iter();
+        let group_data: Vec<GroupData> = groups.map(|g| g.fill_dense(data, nrow, ncol)).collect();
         let numeric_feature_map = numeric_feature_map(&layout);
         let raw_data = if cfg.linear_tree {
             (0..layout.num_features)

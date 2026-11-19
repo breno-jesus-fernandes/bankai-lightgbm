@@ -431,3 +431,101 @@ Entry format:
   the unified view; they remain T3.1/T3.2. T2.3 verifies the row-wise representation and parity,
   with no regression against main. No CI gate, tolerance or required check was changed.
 - Status: active
+
+
+## D-020: Bounded LRU histogram cache and reset semantics (T2.5)
+
+- Date: 2026-11-19
+- Question: positive histogram_pool_size was rejected even though the learner already had
+  the parent-minus-smaller-child subtraction and the fallback that rebuilds an uncached parent.
+- Choice: bound physical histogram buckets, keep the existing leaf/slot mapping, and evict
+  the least recently used bucket (first slot on equal timestamps). Both Get hits/misses and
+  Move refresh recency; maps and timestamps reset per tree. The unlimited/default path has
+  no LRU timestamp vector. Per-slot splittable flags and histogram buffers stay together.
+- Source: src/treelearner/serial_tree_learner.cpp (v4.7.0), Init / ResetConfig, and
+  src/treelearner/feature_histogram.hpp, HistogramPool::Get / Move / Reset. The MB-to-bucket
+  conversion uses 16 bytes times the sum of raw per-feature bin counts, not the compacted
+  histogram layout's total bins. The result is clamped to at least two and at most num_leaves.
+- Reset quirk: upstream resizes the cache only when num_leaves changes. A budget-only reset
+  still echoes the new MB value, while keeping the old capacity. The trainer's normal learner
+  rebuild now preserves the actual capacity when num_leaves stays equal. A budget-only
+  update instead keeps the learner and bagging sampler, resets split-threshold RNG metadata
+  and consumes ColSampler::SetConfig's one by-tree draw from the continuing feature RNG.
+  This preserves bagging and feature sampling, including extra_trees, rather than reseeding
+  them through construction. Bagging::ResetSampleConfig and ColSampler::SetConfig at the
+  same upstream tag were read to confirm those state transitions.
+- Red evidence: the new Python test first raised Unsupported for a positive budget. A native
+  reset regression then observed 7 buckets where upstream requires the previous 2. The
+  sampling-reset parity test separately reproduced divergent leaf assignments starting at
+  the first tree after reset. All three failures were fixed without changing their assertions.
+- Tests: 36 new parity cases cover minimum/intermediate/full budgets, both layouts,
+  regression/binary, missing values, bagging, feature sampling, alias spelling, 1/2/3 threads,
+  all monotone methods, and pool-only resets with/without extra_trees. Native tests check
+  bounded allocation, LRU hit/eviction order, Move recency and data preservation, map reset,
+  the unlimited path, and resize-on-num_leaves-only behavior.
+- Harness: benches/bench_train_interleaved.py now accepts --histogram-pool-size so bounded
+  runs can be reproduced with the same existing upstream/data/thread setup. The command
+  first failed on the unknown CLI argument; its default parameters remain unchanged.
+- Profile: `samply record --save-only --duration 3 --output <profile.json> -- <base-kernels>
+  --bench training/row_wise_mixed --profile-time 3`. Of 1836 base samples, 447 land in
+  multi-value accumulation, 383 in numerical split search, 338 in routing, 255 in sparse
+  partition and 107 in split orchestration; pool bookkeeping is not a leading self-time site.
+- SPEC ref: SPEC-MEM-4, SPEC-CONC-2, SPEC-NUM-2, SPEC-NUM-6, SPEC-PY-5
+- Validation: scripts/check.sh ended "all green" (2404 Python tests), with cargo check,
+  clippy, cargo test, fmt, config generation, ruff and mypy passed. The rebuilt release
+  extension passed 2398 parity/upstream tests. No assertions or tolerances were weakened,
+  and no fixture, skip or known-gap entry was changed.
+- Criterion: release/bench, Apple M1 (8 logical CPUs), one thread, base 0fb1d93 versus this
+  diff (final candidate hash in PR), seven interleaved rounds, 0.2 s warm-up, 0.6 s measurement,
+  20 samples. Default/unlimited pool on both revisions. Pinned upstream is 4.7.0; no upstream
+  process runs in this Rust-only comparison, OMP_WAIT_POLICY n/a.
+
+  | Kernel | Base | Candidate | Ratio |
+  | --- | ---: | ---: | ---: |
+  | Histogram all rows, 16 bins | 163.35 us | 163.38 us | 1.0002 |
+  | Histogram all rows, 255 bins | 115.74 us | 114.99 us | 0.9935 |
+  | Histogram all rows, 4096 bins | 113.82 us | 113.48 us | 0.9970 |
+  | Histogram subset, 16 bins | 61.63 us | 61.67 us | 1.0007 |
+  | Histogram subset, 255 bins | 46.92 us | 46.98 us | 1.0011 |
+  | Histogram subset, 4096 bins | 48.91 us | 48.84 us | 0.9987 |
+  | Partition, 200k rows | 420.09 us | 420.44 us | 1.0008 |
+  | Prediction, 4096 x 16 x 20 trees | 370.29 us | 385.45 us | 1.0409 |
+  | Numerical split search, 255 bins | 507.94 ns | 508.52 ns | 1.0011 |
+  | Row-wise mixed / sparse view, 4096 x 12 | 2.621 ms | 2.586 ms | 0.9864 |
+  | Row-wise mixed / dense view, 4096 x 12 | 2.818 ms | 2.823 ms | 1.0020 |
+
+  Histograms use 200k rows, subsets every third row. Mixed training uses 8 trees, max_bin=63,
+  2 or 9 dense columns and 80% zeros in the remaining columns. Build both kernels binaries,
+  then alternate them seven times with `--bench
+  '^(histogram/|partition/|split_finding/|prediction/|training/)' --warm-up-time 0.2
+  --measurement-time 0.6 --sample-size 20`. Every case remains below the 5% regression limit;
+  the prediction kernel itself is unchanged.
+- End-to-end training: installed release build newer than debug, same session/venv/data/params
+  as lightgbm==4.7.0, OMP_WAIT_POLICY=PASSIVE, auto layout, 50 boosting rounds, seven
+  interleaved rounds. Dense: 50k x 20. CSR: 50k x 200, density .03. Candidate is this diff over
+  0fb1d93; the PR records its exact hash. Budget 0.000001 MB exercises the minimum 2 buckets.
+
+  | Pool | Case / threads | bankai | upstream | Ratio |
+  | --- | --- | ---: | ---: | ---: |
+  | default | dense / 1 | 0.222 s | 0.282 s | 0.788 |
+  | default | dense / 2 | 0.148 s | 0.225 s | 0.659 |
+  | default | sparse / 1 | 0.411 s | 0.369 s | 1.112 |
+  | default | sparse / 2 | 0.250 s | 0.276 s | 0.904 |
+  | 0.000001 MB | dense / 1 | 0.295 s | 0.347 s | 0.848 |
+  | 0.000001 MB | dense / 2 | 0.205 s | 0.281 s | 0.730 |
+  | 0.000001 MB | sparse / 1 | 0.548 s | 0.516 s | 1.061 |
+  | 0.000001 MB | sparse / 2 | 0.342 s | 0.361 s | 0.946 |
+
+  Command: `OMP_WAIT_POLICY=PASSIVE .venv/bin/python benches/bench_train_interleaved.py
+  --rounds 7 --threads 1 2`, then repeat with `--histogram-pool-size 0.000001`.
+  Both commands exit 1 on the remaining sparse single-thread upstream gap (T3.1/T3.2).
+  The default-path before/after Criterion gate passed. No CI threshold or required check
+  was changed; the bounded path is compared with upstream at the same budget.
+- Miri follow-up: CI selected the new cache-reset unit test through its existing histogram
+  filter. Dataset construction entered rayon's global worker deque, where Miri reported a
+  Stacked Borrows violation inside Crossbeam. Dense sample bin-mapper construction and dense
+  group filling now use standard sequential iterators under cfg(miri), matching WorkerPool's
+  existing serial Miri backend. Native builds keep the Rayon iterators, and both backends
+  execute the same mapping/group-filling closures. No test assertion, filter, Miri flag or CI
+  check changed. scripts/miri.sh passed all 10 selected tests, including the reset regression.
+- Status: active

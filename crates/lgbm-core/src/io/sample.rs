@@ -2,6 +2,7 @@
 //! upstream: src/c_api.cpp (`CreateSampleIndices`, `LGBM_DatasetCreateFromMats`),
 //! src/io/dataset_loader.cpp (`ConstructFromSampleData`)
 
+#[cfg(not(miri))]
 use rayon::prelude::*;
 
 use super::bin::{BinMapper, BinType, FindBinParams};
@@ -152,8 +153,13 @@ impl SampleSet {
         let categorical_set: std::collections::HashSet<i32> = categorical.iter().copied().collect();
         let forced =
             super::forced_bins::get_forced_bins(&cfg.forcedbins_filename, ncol, &categorical_set)?;
-        self.values
-            .par_iter_mut()
+        // Like WorkerPool, Miri runs the real algorithm serially: rayon's global
+        // worker deque depends on Crossbeam internals outside its supported borrow model.
+        #[cfg(not(miri))]
+        let columns = self.values.par_iter_mut();
+        #[cfg(miri)]
+        let columns = self.values.iter_mut();
+        columns
             .enumerate()
             .map(|(i, values)| {
                 let is_cat = categorical.contains(&(i as i32));

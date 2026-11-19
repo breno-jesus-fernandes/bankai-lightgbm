@@ -56,6 +56,9 @@ def main() -> int:
     ap.add_argument("--tolerance", type=float, default=0.03, help="allowed slowdown (noise)")
     ap.add_argument("--threads", type=int, nargs="+", default=[1, 2])
     ap.add_argument("--layout", choices=["auto", "col", "row"], default="auto")
+    ap.add_argument(
+        "--histogram-pool-size", type=float, default=None, help="histogram cache budget in MB"
+    )
     args = ap.parse_args()
 
     layout = {"auto": {}, "col": {"force_col_wise": True}, "row": {"force_row_wise": True}}
@@ -69,6 +72,11 @@ def main() -> int:
                 "verbose": -1,
                 "num_threads": threads,
                 **layout[args.layout],
+                **(
+                    {"histogram_pool_size": args.histogram_pool_size}
+                    if args.histogram_pool_size is not None
+                    else {}
+                ),
             }
             # One untimed warm-up per side, then alternate.
             _train(lightgbm, x, y, params, 2)

@@ -99,7 +99,7 @@ checkbox open until every behavior it names and its applicable performance gates
 ## P3: Serial tree learner + GBDT
 - [x] Histogram construction: col-wise and row-wise, `force_col_wise`/`force_row_wise` auto-choice (T2.3 unifies all groups in a row-wise view with upstream offsets, dense/sparse choice and row blocks, including sparse single-value groups; dense-only row-major and column-wise paths are preserved)
 - [x] SIMD dense histogram updates and common numerical split-gain arithmetic (T2.6): runtime NEON/SSE2 detection, bit-exact scalar fallback, unchanged row/threshold order; Criterion split search 0.9474x base, all kernels within 5% (D-018)
-- [ ] Histogram pool + subtraction trick, `histogram_pool_size`
+- [x] Histogram pool + subtraction trick, `histogram_pool_size` (T2.5: bounded LRU, upstream raw-bin budget sizing and minimum two buckets, parent rebuild on cache miss, and upstream reset capacity/sampling semantics; D-020)
 - [x] Leaf-wise growth, `num_leaves`, `max_depth`, `min_data_in_leaf`, `min_sum_hessian_in_leaf`
 - [x] Regularization: `lambda_l1`, `lambda_l2`, `min_gain_to_split`, `max_delta_step`, `path_smooth`
 - [x] Categorical splits (`max_cat_threshold`, `cat_l2`, `cat_smooth`, `max_cat_to_onehot`, `min_data_per_group`; byte-identical, one-hot and sorted search, NaN categories, bagging; monotone + categorical still unsupported)
