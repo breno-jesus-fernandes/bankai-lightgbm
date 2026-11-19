@@ -53,24 +53,32 @@ impl LeafSplits {
     }
 }
 
-/// Per-leaf histogram storage. upstream: `HistogramPool` with a full cache
-/// (`histogram_pool_size <= 0`): every leaf keeps its histogram.
+/// Per-leaf histogram storage, bounded by an LRU cache when requested.
+/// upstream: src/treelearner/feature_histogram.hpp (v4.7.0), HistogramPool::{Get, Move}.
 struct HistogramPool {
     slots: Vec<Vec<f64>>,
     splittable: Vec<Vec<bool>>,
     leaf_to_slot: Vec<Option<usize>>,
     slot_to_leaf: Vec<Option<usize>>,
     next_free: usize,
+    last_used: Vec<u64>,
+    clock: u64,
 }
 
 impl HistogramPool {
-    fn new(num_leaves: usize, total_bins: usize, num_features: usize) -> Self {
+    fn new(num_leaves: usize, total_bins: usize, num_features: usize, cache_size: usize) -> Self {
         HistogramPool {
-            slots: vec![vec![0.0; total_bins * 2]; num_leaves],
-            splittable: vec![vec![true; num_features]; num_leaves],
+            slots: vec![vec![0.0; total_bins * 2]; cache_size],
+            splittable: vec![vec![true; num_features]; cache_size],
             leaf_to_slot: vec![None; num_leaves],
-            slot_to_leaf: vec![None; num_leaves],
+            slot_to_leaf: vec![None; cache_size],
             next_free: 0,
+            last_used: if cache_size < num_leaves {
+                vec![0; cache_size]
+            } else {
+                Vec::new()
+            },
+            clock: 0,
         }
     }
 
@@ -78,18 +86,44 @@ impl HistogramPool {
         self.leaf_to_slot.fill(None);
         self.slot_to_leaf.fill(None);
         self.next_free = 0;
+        self.last_used.fill(0);
+        self.clock = 0;
     }
 
     /// Returns `(slot, had_data)` like upstream `HistogramPool::Get`.
     fn get(&mut self, leaf: usize) -> (usize, bool) {
         if let Some(s) = self.leaf_to_slot[leaf] {
+            self.touch(s);
             return (s, true);
         }
-        let s = self.next_free;
-        self.next_free += 1;
+        let s = if self.next_free < self.slots.len() {
+            let s = self.next_free;
+            self.next_free += 1;
+            s
+        } else {
+            // ArgMin: ties choose the first slot, like upstream ArrayArgs::ArgMin.
+            let mut oldest = 0;
+            for i in 1..self.last_used.len() {
+                if self.last_used[i] < self.last_used[oldest] {
+                    oldest = i;
+                }
+            }
+            if let Some(evicted) = self.slot_to_leaf[oldest] {
+                self.leaf_to_slot[evicted] = None;
+            }
+            oldest
+        };
+        self.touch(s);
         self.leaf_to_slot[leaf] = Some(s);
         self.slot_to_leaf[s] = Some(leaf);
         (s, false)
+    }
+
+    fn touch(&mut self, slot: usize) {
+        if !self.last_used.is_empty() {
+            self.clock += 1;
+            self.last_used[slot] = self.clock;
+        }
     }
 
     /// upstream: `HistogramPool::Move`
@@ -100,6 +134,7 @@ impl HistogramPool {
             }
             self.leaf_to_slot[dst] = Some(s);
             self.slot_to_leaf[s] = Some(dst);
+            self.touch(s);
         }
     }
 }
@@ -187,6 +222,23 @@ pub struct SerialTreeLearner {
 }
 
 impl SerialTreeLearner {
+    /// Number of histogram buckets retained by the current learner.
+    pub(crate) fn histogram_cache_capacity(&self) -> usize {
+        self.pool.slots.len()
+    }
+
+    /// Apply a budget-only reset without discarding row/column sampling state or cache.
+    /// upstream: SerialTreeLearner::ResetConfig / ColSampler::SetConfig (v4.7.0).
+    pub(crate) fn reset_histogram_pool_config(&mut self, cfg: Arc<Config>) {
+        // SetFeatureInfo<false, true> reseeds the split-threshold RNGs; SetConfig draws
+        // a by-tree feature sample from its continuing stream, without reseeding it.
+        for (f, meta) in self.metas.iter_mut().enumerate() {
+            meta.rand = Random::new(cfg.extra_seed + f as i32);
+        }
+        self.col_sampler.reset_by_tree();
+        self.cfg = cfg;
+    }
+
     /// upstream: SerialTreeLearner::ResetIsConstantHessian after objective reset.
     pub fn reset_constant_hessian(&mut self, value: bool) {
         self.is_constant_hessian = value;
@@ -194,6 +246,16 @@ impl SerialTreeLearner {
 
     /// upstream: `SerialTreeLearner::Init` (col-wise histogram layout).
     pub fn new(cfg: Arc<Config>, ds: Arc<Dataset>, is_constant_hessian: bool) -> Result<Self> {
+        Self::new_with_cache_capacity(cfg, ds, is_constant_hessian, None)
+    }
+
+    /// Rebuild settings while preserving upstream's cache capacity on same-leaf-count resets.
+    pub(crate) fn new_with_cache_capacity(
+        cfg: Arc<Config>,
+        ds: Arc<Dataset>,
+        is_constant_hessian: bool,
+        cache_capacity: Option<usize>,
+    ) -> Result<Self> {
         let l = &ds.layout;
         // upstream: `Dataset::GetShareStates` (v4.7.0) rejects both force flags at once. The
         // layout choice is otherwise a performance-only decision (both layouts build identical
@@ -232,11 +294,6 @@ impl SerialTreeLearner {
         };
         if row_major.is_none() {
             row_major_col.fill(None);
-        }
-        if cfg.histogram_pool_size > 0.0 {
-            return Err(Error::Unsupported(
-                "histogram_pool_size > 0 (LRU histogram cache)".into(),
-            ));
         }
         let mut checked_bins = Vec::with_capacity(l.groups.len());
         let mut multi_val = None;
@@ -357,6 +414,19 @@ impl SerialTreeLearner {
             )));
         }
         let num_leaves = cfg.num_leaves as usize;
+        // upstream: SerialTreeLearner::Init (v4.7.0): budget uses the sum of raw
+        // per-feature bin counts, not the packed row/column histogram buffer length.
+        let cache_size = if let Some(capacity) = cache_capacity {
+            capacity
+        } else if cfg.histogram_pool_size > 0.0 {
+            let bytes: usize = metas.iter().map(|m| m.num_bin as usize * 16).sum();
+            ((cfg.histogram_pool_size * 1024.0 * 1024.0 / bytes as f64) as usize)
+                .max(2)
+                .min(num_leaves)
+        } else {
+            num_leaves
+        };
+
         let params = SplitParams::from_config(&cfg);
         let cat_params = CatParams::from_config(&cfg);
         let col_sampler = ColSampler::new(&cfg, &ds)?;
@@ -398,7 +468,12 @@ impl SerialTreeLearner {
             metas,
             feature_hist_offsets,
             feature_hist_len,
-            pool: HistogramPool::new(num_leaves, hist_cur_num_bin.max(1), num_features),
+            pool: HistogramPool::new(
+                num_leaves,
+                hist_cur_num_bin.max(1),
+                num_features,
+                cache_size,
+            ),
             checked_bins,
             multi_val,
             multi_val_scratch: Vec::new(),
@@ -1876,4 +1951,55 @@ fn search_feature(
     }
     new_split.feature = real_fidx;
     (splittable, new_split)
+}
+
+#[cfg(test)]
+mod histogram_pool_tests {
+    use super::HistogramPool;
+
+    #[test]
+    fn bounded_pool_evicts_the_least_recently_used_leaf() {
+        let mut pool = HistogramPool::new(8, 3, 2, 2);
+        assert_eq!(pool.slots.len(), 2);
+        assert_eq!(pool.splittable.len(), 2);
+        assert_eq!(pool.get(0), (0, false));
+        assert_eq!(pool.get(1), (1, false));
+        assert_eq!(pool.get(0), (0, true));
+        assert_eq!(pool.get(2), (1, false));
+        assert_eq!(pool.leaf_to_slot[1], None);
+        assert_eq!(pool.get(0), (0, true));
+        assert_eq!(pool.get(1), (1, false));
+        assert_eq!(pool.leaf_to_slot[2], None);
+        assert_eq!(pool.slots.len(), 2);
+    }
+
+    #[test]
+    fn moving_a_leaf_preserves_data_and_refreshes_recency() {
+        let mut pool = HistogramPool::new(8, 3, 2, 2);
+        let (slot, _) = pool.get(0);
+        pool.slots[slot][0] = 123.0;
+        pool.get(1);
+        pool.move_leaf(0, 2);
+        assert_eq!(pool.leaf_to_slot[0], None);
+        assert_eq!(pool.get(3), (1, false)); // Leaf 1, not the moved leaf, is oldest.
+        assert_eq!(pool.get(2), (slot, true));
+        assert_eq!(pool.slots[slot][0].to_bits(), 123.0f64.to_bits());
+        pool.reset_map();
+        assert_eq!(pool.get(2), (0, false));
+        assert_eq!(pool.get(3), (1, false));
+    }
+
+    #[test]
+    fn unlimited_pool_retains_every_leaf_without_lru_bookkeeping() {
+        let mut pool = HistogramPool::new(4, 3, 2, 4);
+        assert!(pool.last_used.is_empty());
+        for leaf in 0..4 {
+            assert_eq!(pool.get(leaf), (leaf, false));
+        }
+        for leaf in 0..4 {
+            assert_eq!(pool.get(leaf), (leaf, true));
+        }
+        pool.reset_map();
+        assert_eq!(pool.get(0), (0, false));
+    }
 }

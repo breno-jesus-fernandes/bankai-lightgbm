@@ -842,15 +842,30 @@ impl Trainer {
                 .map(|k| self.objective.class_need_train(k))
                 .collect();
         }
-        if changed
+        let only_pool_budget = changed.iter().any(|name| name == "histogram_pool_size")
+            && changed.iter().all(|name| {
+                name == "histogram_pool_size" || NON_TRAINING_PARAMETERS.contains(&name.as_str())
+            });
+        if only_pool_budget {
+            // Upstream keeps bagging RNGs and column-sampler RNGs on a budget-only reset.
+            self.learner.reset_histogram_pool_config(Arc::clone(&cfg));
+        } else if changed
             .iter()
             .any(|name| !NON_TRAINING_PARAMETERS.contains(&name.as_str()))
         {
             let sampler = SampleStrategy::new(&cfg, &self.ds.metadata, ntpi)?;
             let constant_hessian =
                 self.objective.is_constant_hessian() && !sampler.changes_hessians();
-            self.learner =
-                SerialTreeLearner::new(Arc::clone(&cfg), Arc::clone(&self.ds), constant_hessian)?;
+            // upstream: SerialTreeLearner::ResetConfig (v4.7.0) only resizes the pool
+            // when num_leaves changes. The config may still echo a newly supplied MB value.
+            let cache_capacity = (cfg.num_leaves == self.cfg.num_leaves)
+                .then(|| self.learner.histogram_cache_capacity());
+            self.learner = SerialTreeLearner::new_with_cache_capacity(
+                Arc::clone(&cfg),
+                Arc::clone(&self.ds),
+                constant_hessian,
+                cache_capacity,
+            )?;
             self.sampler = sampler;
         }
         if changed.iter().any(|name| name == "learning_rate") {
@@ -1322,5 +1337,52 @@ mod refit_tests {
             .err()
             .unwrap();
         assert!(matches!(err, crate::Error::InvalidParameter(_)));
+    }
+}
+
+#[cfg(test)]
+mod histogram_pool_reset_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::GbdtTrainer;
+    use crate::config::Config;
+    use crate::io::dataset::Dataset;
+    use std::{collections::HashMap, sync::Arc};
+
+    #[test]
+    fn histogram_pool_reset_changes_capacity_only_with_num_leaves() {
+        // upstream: SerialTreeLearner::ResetConfig (v4.7.0) resizes the cache only
+        // in its num_leaves branch, even when the new config echoes a different MB budget.
+        let mut params: HashMap<String, String> = [
+            ("histogram_pool_size", "0.000001"),
+            ("num_leaves", "7"),
+            ("min_data_in_leaf", "1"),
+            ("min_data_in_bin", "1"),
+            ("max_bin", "15"),
+            ("num_threads", "1"),
+            ("verbose", "-1"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+        let cfg = Arc::new(Config::from_params(&params).unwrap());
+        let x: Vec<f64> = (0..129).map(|r| (r % 17) as f64).collect();
+        let ds = Arc::new(Dataset::from_dense(&x, 129, 1, &x, &cfg, &[]).unwrap());
+        let mut trainer = GbdtTrainer::new(cfg, ds).unwrap();
+        assert_eq!(trainer.trainer.learner.histogram_cache_capacity(), 2);
+        params.insert("histogram_pool_size".into(), "100".into());
+        trainer.reset_parameter(&params).unwrap();
+        assert_eq!(trainer.trainer.learner.histogram_cache_capacity(), 2);
+        params.insert("feature_fraction".into(), "0.8".into());
+        trainer.reset_parameter(&params).unwrap();
+        assert_eq!(trainer.trainer.learner.histogram_cache_capacity(), 2);
+        params.insert("num_leaves".into(), "9".into());
+        trainer.reset_parameter(&params).unwrap();
+        assert_eq!(trainer.trainer.learner.histogram_cache_capacity(), 9);
+        params.insert("histogram_pool_size".into(), "0.000001".into());
+        trainer.reset_parameter(&params).unwrap();
+        assert_eq!(trainer.trainer.learner.histogram_cache_capacity(), 9);
+        params.insert("num_leaves".into(), "11".into());
+        trainer.reset_parameter(&params).unwrap();
+        assert_eq!(trainer.trainer.learner.histogram_cache_capacity(), 2);
     }
 }
