@@ -17,7 +17,7 @@ use super::feature_histogram::{
 };
 use super::histogram;
 use super::split_info::{K_MIN_SCORE, SplitInfo, argmax_split};
-use crate::utils::spin_pool::SpinPool;
+use crate::utils::worker_pool::WorkerPool;
 use std::sync::Arc;
 
 use super::row_major::RowMajorBins;
@@ -181,7 +181,7 @@ pub struct SerialTreeLearner {
     /// Threads for the split search and the multi-value histograms (upstream `num_threads_`).
     num_threads: usize,
     /// Persistent spinning workers for the parallel regions of one tree (`None` when serial).
-    spin: Option<SpinPool>,
+    spin: Option<WorkerPool>,
 }
 
 impl SerialTreeLearner {
@@ -278,7 +278,7 @@ impl SerialTreeLearner {
             rayon::current_num_threads()
         };
         let spin = if num_threads > 1 {
-            Some(SpinPool::new(num_threads)?)
+            Some(WorkerPool::new(num_threads)?)
         } else {
             None
         };
@@ -405,7 +405,12 @@ impl SerialTreeLearner {
     /// upstream: `SerialTreeLearner::Train`
     /// `rows` restricts the tree to a bagged subset (ascending row ids); `None` uses all rows.
     pub fn train(&mut self, gradients: &[f32], hessians: &[f32], rows: Option<&[i32]>) -> Tree {
-        self.grow_tree(gradients, hessians, rows)
+        // Run the whole tree inside one `install` on the Booster's pool, so the per-region
+        // parallel primitives nest on the same pool instead of re-entering it each time.
+        match self.spin.as_ref().and_then(|wp| wp.handle()) {
+            Some(pool) => pool.install(|| self.grow_tree(gradients, hessians, rows)),
+            None => self.grow_tree(gradients, hessians, rows),
+        }
     }
 
     fn grow_tree(&mut self, gradients: &[f32], hessians: &[f32], rows: Option<&[i32]>) -> Tree {

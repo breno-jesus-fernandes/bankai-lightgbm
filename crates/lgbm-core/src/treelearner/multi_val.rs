@@ -194,7 +194,7 @@ impl MultiValBin {
         rows: Option<&[i32]>,
         num_rows: usize,
         num_threads: usize,
-        pool: Option<&crate::utils::spin_pool::SpinPool>,
+        pool: Option<&crate::utils::worker_pool::WorkerPool>,
         grad_at: &(impl Fn(usize, usize) -> f32 + Sync),
         hess_at: &(impl Fn(usize, usize) -> f32 + Sync),
         out: &mut [f64],
@@ -398,7 +398,7 @@ mod tests {
                 );
                 assert_eq!(got, want, "dense_multi_val={dense_multi_val} single block");
                 let mut blocked = vec![f64::NAN; num_bin * 2];
-                let pool = crate::utils::spin_pool::SpinPool::new(4).unwrap();
+                let pool = crate::utils::worker_pool::WorkerPool::new(4).unwrap();
                 mv.construct(
                     subset,
                     n,

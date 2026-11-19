@@ -6,7 +6,7 @@ use crate::io::bin_data::{BinData, DenseBin, SparseBin};
 use crate::io::dataset::{Dataset, GroupData};
 use crate::meta::MissingType;
 use crate::utils::common::find_in_bitset;
-use crate::utils::spin_pool::SpinPool;
+use crate::utils::worker_pool::WorkerPool;
 
 /// Rows a split must cover before it is routed in parallel blocks; below this the fork/join
 /// costs more than the routing.
@@ -126,7 +126,7 @@ impl DataPartition {
         leaf: usize,
         rule: &SplitRule<'_>,
         right_leaf: usize,
-        pool: Option<&SpinPool>,
+        pool: Option<&WorkerPool>,
     ) {
         let begin = self.leaf_begin[leaf];
         let cnt = self.leaf_count[leaf];
