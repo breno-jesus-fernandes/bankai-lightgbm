@@ -203,7 +203,14 @@ fn constant_hessian_counts_are_exact() {
 #[test]
 fn variable_hessian_estimates_counts() {
     // Hessian varies per bin, so the row count of a side is estimated from its Hessian sum.
-    let hist = [(12i64, 7i64), (-9, 31), (4, 12), (-15, 44), (20, 19), (-1, 8)];
+    let hist = [
+        (12i64, 7i64),
+        (-9, 31),
+        (4, 12),
+        (-15, 44),
+        (20, 19),
+        (-1, 8),
+    ];
     check(&hist, 0.25, 0.125, 0.0, 1);
     check(&hist, 2.0, 0.5, 1.0, 10);
 }

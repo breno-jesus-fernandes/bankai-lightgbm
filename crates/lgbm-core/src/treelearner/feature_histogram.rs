@@ -663,6 +663,481 @@ fn sequential<
     is_splittable
 }
 
+/// upstream: `FeatureHistogram::FindBestThresholdInt` for numerical features (quantized).
+///
+/// `hist` holds the exact integer `(gradient_sum, Hessian_sum)` of each bin (as produced by
+/// [`super::gradient_discretizer::int_histogram::construct_int_histogram`]). `int_sum_gradient`
+/// and `int_sum_hessian` are the leaf's exact integer totals; the double sums are recovered by
+/// multiplying by `grad_scale` / `hess_scale`. Unlike the full-precision path, the leaf totals
+/// carry no `kEpsilon`: it is added only to the child Hessians inside the gain.
+#[allow(clippy::too_many_arguments)]
+pub fn find_best_threshold_numerical_int(
+    hist: &[(i64, i64)],
+    meta: &mut FeatureMeta,
+    p: &SplitParams,
+    int_sum_gradient: i64,
+    int_sum_hessian: i64,
+    grad_scale: f64,
+    hess_scale: f64,
+    num_data: i32,
+    parent_output: f64,
+    mc: Mc<'_>,
+    output: &mut SplitInfo,
+) -> bool {
+    output.default_left = true;
+    output.gain = K_MIN_SCORE;
+    // upstream: BeforeNumericalInt recovers the leaf sums from the integer totals, without the
+    // `2 * kEpsilon` that the full-precision `FindBestThreshold` adds to its Hessian.
+    let sum_gradient = int_sum_gradient as f64 * grad_scale;
+    let sum_hessian = int_sum_hessian as f64 * hess_scale;
+    let use_l1 = p.lambda_l1 > 0.0;
+    let use_max = p.max_delta_step > 0.0;
+    let use_smooth = p.path_smooth > EPS;
+    let mc_on = !matches!(mc, Mc::Off);
+    macro_rules! go {
+        ($r:literal, $l1:literal, $mx:literal, $sm:literal) => {
+            if mc_on {
+                numerical_int::<$r, $l1, $mx, $sm, true>(
+                    hist,
+                    meta,
+                    p,
+                    int_sum_gradient,
+                    int_sum_hessian,
+                    grad_scale,
+                    hess_scale,
+                    sum_gradient,
+                    sum_hessian,
+                    num_data,
+                    parent_output,
+                    mc,
+                    output,
+                )
+            } else {
+                numerical_int::<$r, $l1, $mx, $sm, false>(
+                    hist,
+                    meta,
+                    p,
+                    int_sum_gradient,
+                    int_sum_hessian,
+                    grad_scale,
+                    hess_scale,
+                    sum_gradient,
+                    sum_hessian,
+                    num_data,
+                    parent_output,
+                    mc,
+                    output,
+                )
+            }
+        };
+    }
+    let splittable = match (p.extra_trees, use_l1, use_max, use_smooth) {
+        (false, false, false, false) => go!(false, false, false, false),
+        (false, false, false, true) => go!(false, false, false, true),
+        (false, false, true, false) => go!(false, false, true, false),
+        (false, false, true, true) => go!(false, false, true, true),
+        (false, true, false, false) => go!(false, true, false, false),
+        (false, true, false, true) => go!(false, true, false, true),
+        (false, true, true, false) => go!(false, true, true, false),
+        (false, true, true, true) => go!(false, true, true, true),
+        (true, false, false, false) => go!(true, false, false, false),
+        (true, false, false, true) => go!(true, false, false, true),
+        (true, false, true, false) => go!(true, false, true, false),
+        (true, false, true, true) => go!(true, false, true, true),
+        (true, true, false, false) => go!(true, true, false, false),
+        (true, true, false, true) => go!(true, true, false, true),
+        (true, true, true, false) => go!(true, true, true, false),
+        (true, true, true, true) => go!(true, true, true, true),
+    };
+    output.gain *= meta.penalty;
+    splittable
+}
+
+/// upstream: the `int_find_best_threshold_fun_` lambdas built by `FuncForNumricalL3`.
+#[allow(clippy::too_many_arguments)]
+fn numerical_int<
+    const RAND: bool,
+    const L1: bool,
+    const MAX_OUT: bool,
+    const SMOOTH: bool,
+    const MC: bool,
+>(
+    hist: &[(i64, i64)],
+    meta: &mut FeatureMeta,
+    p: &SplitParams,
+    int_sum_gradient: i64,
+    int_sum_hessian: i64,
+    grad_scale: f64,
+    hess_scale: f64,
+    sum_gradient: f64,
+    sum_hessian: f64,
+    num_data: i32,
+    parent_output: f64,
+    mc: Mc<'_>,
+    output: &mut SplitInfo,
+) -> bool {
+    // upstream: BeforeNumericalInt — the gain shift uses the epsilon-free leaf totals.
+    output.monotone_type = meta.monotone_type;
+    let gain_shift = leaf_gain::<L1, MAX_OUT, SMOOTH>(
+        sum_gradient,
+        sum_hessian,
+        p.lambda_l1,
+        p.lambda_l2,
+        p.max_delta_step,
+        p.path_smooth,
+        num_data,
+        parent_output,
+    );
+    let mut rand_threshold = 0;
+    if RAND && meta.num_bin - 2 > 0 {
+        rand_threshold = meta.rand.next_int(0, meta.num_bin - 2);
+    }
+    let min_gain_shift = gain_shift + p.min_gain_to_split;
+    let mut splittable = false;
+    macro_rules! seq {
+        ($rev:literal, $skip:literal, $na:literal) => {
+            splittable |= sequential_int::<RAND, L1, MAX_OUT, SMOOTH, $rev, $skip, $na, MC>(
+                hist,
+                meta,
+                p,
+                int_sum_gradient,
+                int_sum_hessian,
+                grad_scale,
+                hess_scale,
+                num_data,
+                min_gain_shift,
+                rand_threshold,
+                parent_output,
+                mc,
+                output,
+            )
+        };
+    }
+    if meta.num_bin > 2 && meta.missing_type != MissingType::None {
+        if meta.missing_type == MissingType::Zero {
+            seq!(true, true, false);
+            seq!(false, true, false);
+        } else {
+            seq!(true, false, true);
+            seq!(false, false, true);
+        }
+    } else {
+        seq!(true, false, false);
+        if meta.missing_type == MissingType::NaN {
+            output.default_left = false;
+        }
+    }
+    splittable
+}
+
+/// upstream: `FeatureHistogram::FindBestThresholdSequentiallyInt`.
+///
+/// Integer prefix sums are exact, so the accumulation order does not matter. The row count of a
+/// side is estimated from its integer Hessian sum (`cnt_factor`), and `kEpsilon` is added to the
+/// child Hessians only inside the gain, never to the stored sums or the leaf-total gain shift.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn sequential_int<
+    const RAND: bool,
+    const L1: bool,
+    const MAX_OUT: bool,
+    const SMOOTH: bool,
+    const REVERSE: bool,
+    const SKIP_DEFAULT_BIN: bool,
+    const NA_AS_MISSING: bool,
+    const MC: bool,
+>(
+    hist: &[(i64, i64)],
+    meta: &FeatureMeta,
+    p: &SplitParams,
+    int_total_grad: i64,
+    int_total_hess: i64,
+    grad_scale: f64,
+    hess_scale: f64,
+    num_data: i32,
+    min_gain_shift: f64,
+    rand_threshold: i32,
+    parent_output: f64,
+    mc: Mc<'_>,
+    output: &mut SplitInfo,
+) -> bool {
+    let offset = meta.offset;
+    let mut is_splittable = false;
+    let mut best_int_left_grad: i64 = 0;
+    let mut best_int_left_hess: i64 = 0;
+    let mut best_gain = K_MIN_SCORE;
+    let mut best_threshold = meta.num_bin as u32;
+    let cnt_factor = f64::from(num_data) / int_total_hess as f64;
+    let grad = |t: i32| hist[t as usize].0;
+    let hess = |t: i32| hist[t as usize].1;
+    let mono = meta.monotone_type;
+    let mut cum: Option<Cumulative> = match mc {
+        Mc::Cumulative(feature) if MC => Some(Cumulative::new(feature, REVERSE)),
+        _ => None,
+    };
+    let varies = MC && matches!(mc, Mc::Cumulative(feature) if feature.varies_by_threshold());
+    let mut best_bounds: Option<ChildBounds> = None;
+    // `slh` / `srh` arrive without `kEpsilon`; the gain adds it, matching upstream's
+    // `GetSplitGains(..., sum_left_hessian + kEpsilon, sum_right_hessian + kEpsilon, ...)`.
+    let gains =
+        |slg: f64, slh: f64, srg: f64, srh: f64, lc: i32, rc: i32, b: Option<ChildBounds>| {
+            let slh = slh + EPS;
+            let srh = srh + EPS;
+            if let Some(((lmin, lmax), (rmin, rmax))) = b {
+                let lo = clamp_to(
+                    calculate_splitted_leaf_output::<L1, MAX_OUT, SMOOTH>(
+                        slg,
+                        slh,
+                        p.lambda_l1,
+                        p.lambda_l2,
+                        p.max_delta_step,
+                        p.path_smooth,
+                        lc,
+                        parent_output,
+                    ),
+                    lmin,
+                    lmax,
+                );
+                let ro = clamp_to(
+                    calculate_splitted_leaf_output::<L1, MAX_OUT, SMOOTH>(
+                        srg,
+                        srh,
+                        p.lambda_l1,
+                        p.lambda_l2,
+                        p.max_delta_step,
+                        p.path_smooth,
+                        rc,
+                        parent_output,
+                    ),
+                    rmin,
+                    rmax,
+                );
+                if (mono > 0 && lo > ro) || (mono < 0 && lo < ro) {
+                    return 0.0;
+                }
+                return leaf_gain_given_output::<L1>(slg, slh, p.lambda_l1, p.lambda_l2, lo)
+                    + leaf_gain_given_output::<L1>(srg, srh, p.lambda_l1, p.lambda_l2, ro);
+            }
+            if !L1 && !MAX_OUT && !SMOOTH {
+                return super::simd::split_gain(slg, slh, srg, srh, p.lambda_l2);
+            }
+            leaf_gain::<L1, MAX_OUT, SMOOTH>(
+                slg,
+                slh,
+                p.lambda_l1,
+                p.lambda_l2,
+                p.max_delta_step,
+                p.path_smooth,
+                lc,
+                parent_output,
+            ) + leaf_gain::<L1, MAX_OUT, SMOOTH>(
+                srg,
+                srh,
+                p.lambda_l1,
+                p.lambda_l2,
+                p.max_delta_step,
+                p.path_smooth,
+                rc,
+                parent_output,
+            )
+        };
+
+    if REVERSE {
+        let mut int_right_grad: i64 = 0;
+        let mut int_right_hess: i64 = 0;
+        let mut t = meta.num_bin - 1 - offset - i32::from(NA_AS_MISSING);
+        let t_end = 1 - offset;
+        while t >= t_end {
+            if SKIP_DEFAULT_BIN && (t + offset) == meta.default_bin as i32 {
+                t -= 1;
+                continue;
+            }
+            int_right_grad += grad(t);
+            int_right_hess += hess(t);
+            let right_count = round_int(int_right_hess as f64 * cnt_factor);
+            let sum_right_hessian = int_right_hess as f64 * hess_scale;
+            if right_count < p.min_data_in_leaf || sum_right_hessian < p.min_sum_hessian_in_leaf {
+                t -= 1;
+                continue;
+            }
+            let left_count = num_data - right_count;
+            if left_count < p.min_data_in_leaf {
+                break;
+            }
+            let int_left_hess = int_total_hess - int_right_hess;
+            let sum_left_hessian = int_left_hess as f64 * hess_scale;
+            if sum_left_hessian < p.min_sum_hessian_in_leaf {
+                break;
+            }
+            let int_left_grad = int_total_grad - int_right_grad;
+            let sum_left_gradient = int_left_grad as f64 * grad_scale;
+            let sum_right_gradient = int_right_grad as f64 * grad_scale;
+            if RAND && t - 1 + offset != rand_threshold {
+                t -= 1;
+                continue;
+            }
+            if let Some(c) = cum.as_mut().filter(|_| varies) {
+                c.update(t + offset);
+            }
+            let bounds = if MC {
+                child_bounds(mc, cum.as_ref())
+            } else {
+                None
+            };
+            let current_gain = gains(
+                sum_left_gradient,
+                sum_left_hessian,
+                sum_right_gradient,
+                sum_right_hessian,
+                left_count,
+                right_count,
+                bounds,
+            );
+            if current_gain <= min_gain_shift {
+                t -= 1;
+                continue;
+            }
+            is_splittable = true;
+            if current_gain > best_gain {
+                best_bounds = bounds;
+                let valid = bounds.is_none_or(|(l, r)| l.0 <= l.1 && r.0 <= r.1);
+                if valid {
+                    best_int_left_grad = int_left_grad;
+                    best_int_left_hess = int_left_hess;
+                    best_threshold = (t - 1 + offset) as u32;
+                    best_gain = current_gain;
+                }
+            }
+            t -= 1;
+        }
+    } else {
+        let mut int_left_grad: i64 = 0;
+        let mut int_left_hess: i64 = 0;
+        let mut t: i32 = 0;
+        let t_end = meta.num_bin - 2 - offset;
+        if NA_AS_MISSING && offset == 1 {
+            int_left_grad = int_total_grad;
+            int_left_hess = int_total_hess;
+            for i in 0..meta.num_bin - offset {
+                int_left_grad -= grad(i);
+                int_left_hess -= hess(i);
+            }
+            t = -1;
+        }
+        while t <= t_end {
+            if SKIP_DEFAULT_BIN && (t + offset) == meta.default_bin as i32 {
+                t += 1;
+                continue;
+            }
+            if t >= 0 {
+                int_left_grad += grad(t);
+                int_left_hess += hess(t);
+            }
+            let left_count = round_int(int_left_hess as f64 * cnt_factor);
+            let sum_left_hessian = int_left_hess as f64 * hess_scale;
+            if left_count < p.min_data_in_leaf || sum_left_hessian < p.min_sum_hessian_in_leaf {
+                t += 1;
+                continue;
+            }
+            let right_count = num_data - left_count;
+            if right_count < p.min_data_in_leaf {
+                break;
+            }
+            let int_right_hess = int_total_hess - int_left_hess;
+            let sum_right_hessian = int_right_hess as f64 * hess_scale;
+            if sum_right_hessian < p.min_sum_hessian_in_leaf {
+                break;
+            }
+            let int_right_grad = int_total_grad - int_left_grad;
+            let sum_left_gradient = int_left_grad as f64 * grad_scale;
+            let sum_right_gradient = int_right_grad as f64 * grad_scale;
+            if RAND && t + offset != rand_threshold {
+                t += 1;
+                continue;
+            }
+            if let Some(c) = cum.as_mut().filter(|_| varies) {
+                c.update(t + offset);
+            }
+            let bounds = if MC {
+                child_bounds(mc, cum.as_ref())
+            } else {
+                None
+            };
+            let current_gain = gains(
+                sum_left_gradient,
+                sum_left_hessian,
+                sum_right_gradient,
+                sum_right_hessian,
+                left_count,
+                right_count,
+                bounds,
+            );
+            if current_gain <= min_gain_shift {
+                t += 1;
+                continue;
+            }
+            is_splittable = true;
+            if current_gain > best_gain {
+                best_bounds = bounds;
+                let valid = bounds.is_none_or(|(l, r)| l.0 <= l.1 && r.0 <= r.1);
+                if valid {
+                    best_int_left_grad = int_left_grad;
+                    best_int_left_hess = int_left_hess;
+                    best_threshold = (t + offset) as u32;
+                    best_gain = current_gain;
+                }
+            }
+            t += 1;
+        }
+    }
+
+    if is_splittable && best_gain > output.gain + min_gain_shift {
+        let int_right_grad = int_total_grad - best_int_left_grad;
+        let int_right_hess = int_total_hess - best_int_left_hess;
+        let sum_left_gradient = best_int_left_grad as f64 * grad_scale;
+        let sum_left_hessian = best_int_left_hess as f64 * hess_scale;
+        let sum_right_gradient = int_right_grad as f64 * grad_scale;
+        let sum_right_hessian = int_right_hess as f64 * hess_scale;
+        let left_count = round_int(best_int_left_hess as f64 * cnt_factor);
+        let right_count = round_int(int_right_hess as f64 * cnt_factor);
+        let out = |sg: f64, sh: f64, n: i32, side: Option<(f64, f64)>| {
+            let v = calculate_splitted_leaf_output::<L1, MAX_OUT, SMOOTH>(
+                sg,
+                sh,
+                p.lambda_l1,
+                p.lambda_l2,
+                p.max_delta_step,
+                p.path_smooth,
+                n,
+                parent_output,
+            );
+            clamp_opt(v, side)
+        };
+        output.threshold = best_threshold;
+        output.left_output = out(
+            sum_left_gradient,
+            sum_left_hessian,
+            left_count,
+            best_bounds.map(|b| b.0),
+        );
+        output.left_count = left_count;
+        output.left_sum_gradient = sum_left_gradient;
+        output.left_sum_hessian = sum_left_hessian;
+        output.right_output = out(
+            sum_right_gradient,
+            sum_right_hessian,
+            right_count,
+            best_bounds.map(|b| b.1),
+        );
+        output.right_count = right_count;
+        output.right_sum_gradient = sum_right_gradient;
+        output.right_sum_hessian = sum_right_hessian;
+        output.gain = best_gain - min_gain_shift;
+        output.default_left = REVERSE;
+    }
+    is_splittable
+}
+
 /// Categorical split parameters (upstream: `Config::cat_*`, `max_cat_*`, `min_data_per_group`).
 #[derive(Debug, Clone, Copy)]
 pub struct CatParams {
