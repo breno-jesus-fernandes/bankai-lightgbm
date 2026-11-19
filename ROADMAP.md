@@ -110,7 +110,8 @@ checkbox open until every behavior it names and its applicable performance gates
 - [x] `linear_tree` (`linear_lambda`): training and model text/JSON match upstream (parity-tested over several rounds, `tests/parity/test_linear_tree_parity.py`); binary datasets keep raw data, and the upstream linear tests pass. Refit with linear trees stays `Unsupported`
 - [ ] Quantized training (`use_quantized_grad`, `num_grad_quant_bins`, ...)
   - [x] Nearest-rounding gradient/Hessian discretization primitives, verified against native upstream leaf statistics.
-  - [ ] Stochastic rounding, integer histograms/split search, leaf renewal and learner integration.
+  - [x] `std::mt19937` engine port for stochastic rounding, pinned to the C++ standard's predefined conformance vector.
+  - [ ] Stochastic rounding (`uniform_real`/`uniform_int` distributions over the engine), integer histograms/split search, leaf renewal and learner integration.
 - [x] `refit` (byte-identical leaves vs upstream on upstream models, decay 0/0.9/1; `validate_features`; categorical reconciliation; `linear_tree` and `boosting=rf|dart` raise `Unsupported`)
 - [ ] `deterministic`
 - **Gate:** identical trees on fixed seeds; training as fast as upstream
