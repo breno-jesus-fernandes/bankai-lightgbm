@@ -50,6 +50,20 @@ def _binary_data(seed: int = 5, n: int = 1200, f: int = 5) -> tuple[np.ndarray, 
     return X, y
 
 
+def _categorical_data(
+    seed: int = 5, n: int = 1500, cats: int = 2, nums: int = 3
+) -> tuple[np.ndarray, np.ndarray, list[int]]:
+    """Mixed numeric + integer-coded categorical features, with a categorical-driven target."""
+    rng = np.random.default_rng(seed)
+    num = rng.normal(size=(n, nums))
+    cat = np.column_stack([rng.integers(0, 6 + 4 * k, size=n) for k in range(cats)]).astype(float)
+    X = np.column_stack([num, cat])
+    cat_idx = list(range(nums, nums + cats))
+    effect = sum((cat[:, k] % 3 - 1) for k in range(cats))
+    y = num[:, 0] + 0.7 * effect + rng.normal(scale=0.2, size=n)
+    return X, y, cat_idx
+
+
 def _trees(model_text: str) -> str:
     """The tree section only; the trailing parameters block echoes the flags."""
     return model_text.split("\nparameters:")[0]
@@ -89,6 +103,19 @@ def test_quantized_renew_leaf_matches_upstream(objective: str) -> None:
     }
     theirs = lightgbm.train(params, lightgbm.Dataset(X, y), num_boost_round=10)
     ours = lgb.train(params, lgb.Dataset(X, y), num_boost_round=10)
+    assert _trees(ours.model_to_string()) == _trees(theirs.model_to_string())
+
+
+@pytest.mark.parametrize("bins", [4, 8, 16])
+def test_quantized_categorical_matches_upstream(bins: int) -> None:
+    """Categorical features use the integer categorical split (one-hot and many-vs-many by the
+    gradient/Hessian ratio). Trees must match upstream tree-by-tree."""
+    X, y, cat_idx = _categorical_data()
+    params = {**BASE, "num_grad_quant_bins": bins, "min_data_in_leaf": 20}
+    theirs = lightgbm.train(
+        params, lightgbm.Dataset(X, y, categorical_feature=cat_idx), num_boost_round=10
+    )
+    ours = lgb.train(params, lgb.Dataset(X, y, categorical_feature=cat_idx), num_boost_round=10)
     assert _trees(ours.model_to_string()) == _trees(theirs.model_to_string())
 
 
