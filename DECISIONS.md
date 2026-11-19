@@ -521,4 +521,11 @@ Entry format:
   Both commands exit 1 on the remaining sparse single-thread upstream gap (T3.1/T3.2).
   The default-path before/after Criterion gate passed. No CI threshold or required check
   was changed; the bounded path is compared with upstream at the same budget.
+- Miri follow-up: CI selected the new cache-reset unit test through its existing histogram
+  filter. Dataset construction entered rayon's global worker deque, where Miri reported a
+  Stacked Borrows violation inside Crossbeam. Dense sample bin-mapper construction and dense
+  group filling now use standard sequential iterators under cfg(miri), matching WorkerPool's
+  existing serial Miri backend. Native builds keep the Rayon iterators, and both backends
+  execute the same mapping/group-filling closures. No test assertion, filter, Miri flag or CI
+  check changed. scripts/miri.sh passed all 10 selected tests, including the reset regression.
 - Status: active
