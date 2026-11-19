@@ -239,3 +239,28 @@ Entry format:
   the full parity suite is unchanged. The gate was met, not relaxed.
 - SPEC ref: SPEC-CONC-1 (rayon, one pool per Booster), SPEC-CONC-5 (migration gate)
 - Status: active
+
+## D-017: The sparse single-thread gap is the scalar threshold search (T2.6), not the partition (T3.1)
+
+- Date: 2026-11-18
+- Question: T3.1 ("sparse data partition and thread scaling", target sparse ≤1.0x upstream). The
+  interleaved benchmark shows sparse 1-thread at ~1.12x of upstream (2-thread already 0.91x, i.e.
+  faster). Where is the single-thread gap, and can optimising the sparse data partition close it?
+- Choice: do not optimise the partition — it is not the bottleneck. Record the finding and defer
+  the sparse single-thread target to the SIMD node (T2.6).
+- Rationale: measured with construction and training separated (release, 50k x 200 CSR, density
+  0.03, median of 11): Dataset construction is 0.93x of upstream (bankai faster, ~16 ms, not the
+  gap); single-thread *training* is ~1.33x. Profiling that training (macOS `sample`, debuginfo
+  build) splits it into the threshold search `find_best_threshold_numerical` (~42%, a scalar
+  per-bin scan shared with the dense path), `data_partition::partition_sparse` (~18%), and the
+  sparse histogram `MultiValBin::accumulate` (~10%). The partition already mirrors upstream's
+  forward delta-encoded `SparseBinIterator`, and making `accumulate` `unsafe` (unchecked writes)
+  gained only ~1.6% of training, so neither sparse-specific kernel has real headroom. The
+  dominant cost is the scalar threshold search: there is no SIMD anywhere in
+  `feature_histogram.rs`/`histogram.rs` (upstream vectorises it), and sparse data has ~200
+  features, so the scalar scan runs ~200x per node and dominates — the dense path is fast only
+  because it has far fewer features. So the lever for the sparse single-thread gap is T2.6 (SIMD
+  histogram/search kernels with a bit-exact scalar fallback), which benefits dense and sparse
+  alike; T3.1's own scope (the partition) is effectively already at upstream parity.
+- SPEC ref: none (performance finding; SPEC-CONC-6 covers the SIMD work that would close it)
+- Status: active
