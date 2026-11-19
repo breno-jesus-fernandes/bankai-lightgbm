@@ -122,6 +122,41 @@ pub fn construct(
     const_hess: bool,
     out: &mut [f64],
 ) {
+    // Dispatch once per column, never inside the row loop. Miri exercises the fallback.
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    if std::arch::is_aarch64_feature_detected!("neon") {
+        construct_impl::<true>(bins, rows, og, oh, const_hess, out);
+        return;
+    }
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    if std::arch::is_x86_feature_detected!("sse2") {
+        construct_impl::<true>(bins, rows, og, oh, const_hess, out);
+        return;
+    }
+    construct_scalar(bins, rows, og, oh, const_hess, out);
+}
+
+/// Scalar reference and fallback for [`construct`], with identical validation and row order.
+/// This entry point also allows bitwise checks independently of runtime SIMD detection.
+pub fn construct_scalar(
+    bins: &CheckedBins<'_>,
+    rows: Option<&CheckedRows<'_>>,
+    og: &[f32],
+    oh: &[f32],
+    const_hess: bool,
+    out: &mut [f64],
+) {
+    construct_impl::<false>(bins, rows, og, oh, const_hess, out);
+}
+
+fn construct_impl<const SIMD: bool>(
+    bins: &CheckedBins<'_>,
+    rows: Option<&CheckedRows<'_>>,
+    og: &[f32],
+    oh: &[f32],
+    const_hess: bool,
+    out: &mut [f64],
+) {
     assert!(out.len() >= bins.num_bin * 2, "histogram buffer too small");
     let indices = match rows {
         Some(r) => {
@@ -145,15 +180,15 @@ pub fn construct(
         "hessians shorter than gradients"
     );
     match bins.bin {
-        DenseBin::U4(d) => dispatch(&B4(d), indices, og, oh, const_hess, out),
-        DenseBin::U8(d) => dispatch(&B8(d), indices, og, oh, const_hess, out),
-        DenseBin::U16(d) => dispatch(&B16(d), indices, og, oh, const_hess, out),
-        DenseBin::U32(d) => dispatch(&B32(d), indices, og, oh, const_hess, out),
+        DenseBin::U4(d) => dispatch::<_, SIMD>(&B4(d), indices, og, oh, const_hess, out),
+        DenseBin::U8(d) => dispatch::<_, SIMD>(&B8(d), indices, og, oh, const_hess, out),
+        DenseBin::U16(d) => dispatch::<_, SIMD>(&B16(d), indices, og, oh, const_hess, out),
+        DenseBin::U32(d) => dispatch::<_, SIMD>(&B32(d), indices, og, oh, const_hess, out),
     }
 }
 
 #[inline(always)]
-fn dispatch<B: Bins>(
+fn dispatch<B: Bins, const SIMD: bool>(
     b: &B,
     indices: Option<&[i32]>,
     og: &[f32],
@@ -162,15 +197,15 @@ fn dispatch<B: Bins>(
     out: &mut [f64],
 ) {
     match (indices, const_hess) {
-        (Some(ix), true) => inner::<B, true, false>(b, ix, og, oh, out),
-        (Some(ix), false) => inner::<B, true, true>(b, ix, og, oh, out),
-        (None, true) => inner::<B, false, false>(b, &[], og, oh, out),
-        (None, false) => inner::<B, false, true>(b, &[], og, oh, out),
+        (Some(ix), true) => inner::<B, true, false, SIMD>(b, ix, og, oh, out),
+        (Some(ix), false) => inner::<B, true, true, SIMD>(b, ix, og, oh, out),
+        (None, true) => inner::<B, false, false, SIMD>(b, &[], og, oh, out),
+        (None, false) => inner::<B, false, true, SIMD>(b, &[], og, oh, out),
     }
 }
 
 #[inline(always)]
-fn inner<B: Bins, const USE_INDICES: bool, const USE_HESSIAN: bool>(
+fn inner<B: Bins, const USE_INDICES: bool, const USE_HESSIAN: bool, const SIMD: bool>(
     b: &B,
     indices: &[i32],
     og: &[f32],
@@ -193,13 +228,52 @@ fn inner<B: Bins, const USE_INDICES: bool, const USE_HESSIAN: bool>(
             };
             let ti = b.bin_unchecked(idx) << 1;
             debug_assert!(ti + 1 < out_len);
-            *out.add(ti) += f64::from(*og.get_unchecked(i));
-            if USE_HESSIAN {
-                *out.add(ti + 1) += f64::from(*oh.get_unchecked(i));
+            let g = f64::from(*og.get_unchecked(i));
+            let h = if USE_HESSIAN {
+                f64::from(*oh.get_unchecked(i))
             } else {
-                *out.add(ti + 1) += 1.0;
+                1.0
+            };
+            if SIMD {
+                add_pair(out.add(ti), g, h);
+            } else {
+                *out.add(ti) += g;
+                *out.add(ti + 1) += h;
             }
         }
+    }
+}
+
+/// Add one row's gradient and hessian in independent lanes; never reorder rows.
+/// upstream: src/io/dense_bin.hpp (v4.7.0), ConstructHistogramInner.
+///
+/// # Safety
+/// `out` must point to two writable f64s and the detected SIMD feature must be available.
+#[inline(always)]
+unsafe fn add_pair(out: *mut f64, g: f64, h: f64) {
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    {
+        use std::arch::aarch64::*;
+        // SAFETY: caller guarantees two writable doubles and runtime NEON detection.
+        unsafe {
+            let values = vsetq_lane_f64::<1>(h, vdupq_n_f64(g));
+            vst1q_f64(out, vaddq_f64(vld1q_f64(out), values));
+        }
+    }
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    {
+        use std::arch::x86_64::*;
+        // SAFETY: caller guarantees two writable doubles and runtime SSE2 detection.
+        // Unaligned accesses are intentional: no 16-byte alignment is required of out.
+        unsafe {
+            _mm_storeu_pd(out, _mm_add_pd(_mm_loadu_pd(out), _mm_set_pd(h, g)));
+        }
+    }
+    #[cfg(any(miri, not(any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    // SAFETY: caller guarantees two writable doubles; scalar fallback has no ISA requirement.
+    unsafe {
+        *out += g;
+        *out.add(1) += h;
     }
 }
 

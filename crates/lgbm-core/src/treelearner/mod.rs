@@ -10,4 +10,6 @@ pub mod monotone_constraints;
 pub mod multi_val;
 pub mod row_major;
 pub mod serial;
+#[allow(unsafe_code)]
+pub mod simd;
 pub mod split_info;

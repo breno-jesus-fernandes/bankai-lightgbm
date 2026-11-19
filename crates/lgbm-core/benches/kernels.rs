@@ -13,7 +13,7 @@ use lgbm_core::treelearner::data_partition::{DataPartition, SplitRule};
 use lgbm_core::treelearner::feature_histogram::{
     FeatureMeta, Mc, SplitParams, find_best_threshold_numerical,
 };
-use lgbm_core::treelearner::histogram::{CheckedBins, CheckedRows, construct};
+use lgbm_core::treelearner::histogram::{CheckedBins, CheckedRows, construct, construct_scalar};
 use lgbm_core::treelearner::split_info::SplitInfo;
 use lgbm_core::utils::random::Random;
 use std::collections::HashMap;
@@ -61,6 +61,34 @@ fn histogram(c: &mut Criterion) {
                 );
             });
         });
+    }
+    group.finish();
+}
+
+// Compare both implementations in the same process, including constant Hessians.
+fn simd_histogram(c: &mut Criterion) {
+    let g: Vec<f32> = (0..N).map(|i| (i % 17) as f32 - 8.0).collect();
+    let h = vec![1.0f32; N];
+    let mut group = c.benchmark_group("simd_histogram");
+    for num_bin in [16u32, 255, 4096] {
+        let bin = column(num_bin);
+        let checked = CheckedBins::new(&bin, N, num_bin as usize).unwrap();
+        let mut out = vec![0.0f64; num_bin as usize * 2];
+        for constant in [false, true] {
+            let mode = if constant { "constant" } else { "variable" };
+            for scalar in [true, false] {
+                let name = if scalar { "scalar" } else { "dispatch" };
+                group.bench_function(BenchmarkId::new(format!("{mode}/{name}"), num_bin), |b| {
+                    b.iter(|| {
+                        if scalar {
+                            construct_scalar(&checked, None, &g, &h, constant, black_box(&mut out));
+                        } else {
+                            construct(&checked, None, &g, &h, constant, black_box(&mut out));
+                        }
+                    });
+                });
+            }
+        }
     }
     group.finish();
 }
@@ -148,5 +176,12 @@ fn prediction(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, histogram, partition, split_finding, prediction);
+criterion_group!(
+    benches,
+    histogram,
+    simd_histogram,
+    partition,
+    split_finding,
+    prediction
+);
 criterion_main!(benches);
