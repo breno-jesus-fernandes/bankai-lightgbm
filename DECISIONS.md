@@ -865,3 +865,33 @@ Entry format:
   use_quantized_grad + quant_train_renew_leaf and leaves the full-precision path
   unchanged.
 - Status: active
+
+## D-028: Integer categorical split for quantized training (T2.7, slice 7)
+
+- Date: 2026-11-19
+- Choice: port upstream's `FindBestThresholdCategoricalIntInner`
+  (`feature_histogram.rs::find_best_threshold_categorical_int`) over the integer
+  `(gradient_sum, Hessian_sum)` histogram, mirroring the full-precision
+  `find_best_threshold_categorical`. Dispatched from `search_feature_int` by bin type;
+  categorical features are removed from the quantized full-precision fallback (D-026).
+- Both categorical modes are ported: one-hot (`num_bin <= max_cat_to_onehot`, each
+  category vs the rest) and many-vs-many (bins with `RoundInt(int_hess * cnt_factor)
+  >= cat_smooth` sorted by the gradient/Hessian ratio `g/(h + cat_smooth)`, scanned in
+  both directions with `l2 = lambda_l2 + cat_l2` and `min_data_per_group`). Counts are
+  estimated from the integer Hessian sums; the child integer sums propagate through
+  `SplitInfo` into the children's `LeafSplits`.
+- Epsilon: the integer categorical path adds no `kEpsilon` to any sum — neither the
+  leaf totals, the gain shift, nor the child Hessians — unlike the full-precision
+  categorical search (which adds `2*kEpsilon` to the leaf total and `kEpsilon` per
+  bin). The gain shift uses the original `lambda_l2`; `cat_l2` is added only after it,
+  for the many-vs-many sort and the final gains/outputs. Reuses the shared runtime-flag
+  gain/output helpers (`split_gains_rt`, `output_rt`, `leaf_gain_rt`).
+- Oracle: `tests/parity/test_quantized_training_parity.py::
+  test_quantized_categorical_matches_upstream` on mixed numeric + integer-coded
+  categorical data, tree-by-tree against `lightgbm==4.7.0` at `num_grad_quant_bins`
+  4/8/16. Red first (categorical fell back to full precision), green after.
+- SPEC ref: SPEC-NUM-6, SPEC-NUM-2.
+- Validation: cargo fmt --all --check, cargo clippy --workspace --all-targets
+  -D warnings clean; scripts/check.sh ended "all green" (2416 Python tests passed).
+  Touches `treelearner/`, so CI runs the interleaved benchmark (codegen-units=1).
+- Status: active
