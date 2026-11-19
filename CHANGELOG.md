@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Rust core: added the packed integer gradient/Hessian histogram construction for quantized training. The per-row discretized derivative (signed int8 gradient high byte, uint8 Hessian low byte) accumulates into one integer per bin, gradient in the high half and Hessian in the low half, at 8/16/32-bit width (upstream `ConstructHistogramIntInner`). Verified against the brute-force per-bin sums across all widths. Another T2.7 building block; not wired into training yet (integer split search, leaf renewal and learner integration follow).
 - Rust core: ported `std::mt19937` (the 32-bit Mersenne Twister engine) for the quantized stochastic-rounding path, which upstream seeds to draw per-row rounding noise. The engine's raw 32-bit output is standardized and platform-independent; it matches the C++ standard's predefined conformance vector (10000th draw of the default-seeded engine is `4123659995`). This is the next step of T2.7; stochastic rounding and its (implementation-defined) distributions are not wired up yet.
 - Rust core: added nearest-rounding gradient/Hessian discretization primitives with packed int8 derivatives, reusable storage, f64 scales and upstream histogram width selection. Native leaf statistics match `lightgbm==4.7.0` over 16 cases. This is the foundation of T2.7; quantized Python training is not implemented by this change.
 

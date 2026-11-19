@@ -677,3 +677,49 @@ Entry format:
   9 skipped, 13 xfailed, 4 xpassed). The engine is not wired into any training path,
   so no hot-path benchmark applies.
 - Status: active
+
+## D-024: Packed integer gradient/Hessian histogram construction (T2.7, slice 3)
+
+- Date: 2026-11-19
+- Choice: port upstream's integer histogram accumulation as a standalone,
+  platform-independent primitive (`treelearner::gradient_discretizer::int_histogram`)
+  before the integer split search and learner integration. The discretized per-row
+  derivative is a packed int16 (signed int8 gradient high byte, uint8 Hessian low
+  byte, produced by `GradientDiscretizer`). The histogram accumulates both halves
+  into one integer per bin: the Hessian occupies the low `HIST_BITS` bits and the
+  gradient the next `HIST_BITS` bits, so `out[bin] += packed` sums both in one add.
+  The three accumulator widths (int16/int32/int64 for HIST_BITS 8/16/32) mirror
+  upstream's three kernels. Output is unpacked to `(gradient_sum, Hessian_sum)` i64
+  pairs per bin; keeping the split search on packed values is a later slice.
+- Source: src/io/dense_bin.hpp (v4.7.0), `ConstructHistogramIntInner` and the
+  `ConstructHistogramInt8/Int16/Int32` entry points. The packing `(int8(grad_16>>8)
+  << HIST_BITS) | (grad_16 & 0xff)` is reproduced; for HIST_BITS==8 upstream adds
+  the raw packed int16, which equals this packing on valid discretized inputs.
+- Width validity: the gradient sum sits in the high half and the Hessian sum in the
+  low half, so a width holds a leaf only while |gradient_sum| < 2^(HIST_BITS-1) and
+  Hessian_sum < 2^HIST_BITS. Upstream guarantees this by choosing the width from
+  rows * num_grad_quant_bins (`SetNumBitsInHistogramBin`, mirrored by
+  `histogram_bits`): each row's |gradient| <= bins/2 and Hessian <= bins, so a leaf
+  of n rows has |gradient_sum| <= n*bins/2 and Hessian_sum <= n*bins, both bounded
+  by the same n*bins < 256 / 65536 / 2^32 cutoffs. A narrower width than the data
+  needs overflows exactly as upstream's fixed-width accumulator would.
+- Constant Hessian: upstream's bits16/32 kernels pack `| 1` for the constant case
+  instead of reading the low byte; on valid inputs the discretized low byte is
+  already 1, so the primitive's `constant_hessian` flag (force Hessian 1) produces
+  identical histograms. For bits8 upstream adds the raw packed value, equal to the
+  same result on valid data.
+- Oracle: the reference is the brute-force per-bin sum of the discretized
+  derivatives (an invariant the packing must reproduce), not a value synthesized
+  from the Rust packing. Tests cover all three widths agreeing within the 8-bit
+  range, sums that overflow the narrower widths, empty bins and negative gradients.
+- TDD: the invariant test first failed to compile (missing `int_histogram` module),
+  the TDD red recorded in its own Harness commit. The Harness commit was corrected
+  (still red) once, because the first draft asserted a 16-bit width could hold a
+  gradient sum of 100000, which exceeds the 16-bit half; the width-validity note
+  above is the fix. No assertion was weakened to pass.
+- SPEC ref: SPEC-NUM-6 (integer accumulation has no rounding), SPEC-CONC-3.
+- Validation: cargo fmt --all --check and cargo clippy --workspace --all-targets
+  -D warnings clean; scripts/check.sh ended "all green" (2404 Python tests passed,
+  9 skipped, 13 xfailed, 4 xpassed). The primitive is not wired into any training
+  path, so no hot-path benchmark applies.
+- Status: active
