@@ -111,7 +111,8 @@ checkbox open until every behavior it names and its applicable performance gates
 - [ ] Quantized training (`use_quantized_grad`, `num_grad_quant_bins`, ...)
   - [x] Nearest-rounding gradient/Hessian discretization primitives, verified against native upstream leaf statistics.
   - [x] `std::mt19937` engine port for stochastic rounding, pinned to the C++ standard's predefined conformance vector.
-  - [ ] Stochastic rounding (`uniform_real`/`uniform_int` distributions over the engine), integer histograms/split search, leaf renewal and learner integration.
+  - [x] Packed integer gradient/Hessian histogram construction (8/16/32-bit widths, upstream's single-add packing), verified against the brute-force per-bin sums.
+  - [ ] Integer histogram subtraction, integer split search, leaf renewal, learner integration, and stochastic rounding (`uniform_real`/`uniform_int` distributions over the engine).
 - [x] `refit` (byte-identical leaves vs upstream on upstream models, decay 0/0.9/1; `validate_features`; categorical reconciliation; `linear_tree` and `boosting=rf|dart` raise `Unsupported`)
 - [ ] `deterministic`
 - **Gate:** identical trees on fixed seeds; training as fast as upstream
