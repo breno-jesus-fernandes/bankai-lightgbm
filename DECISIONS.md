@@ -343,3 +343,91 @@ Entry format:
   library Miri suite passed, because interpreting the full four-width matrix was excessive.
 - SPEC ref: SPEC-CONC-6, SPEC-NUM-2, SPEC-NUM-7
 - Status: active
+
+
+## D-019: One row-wise bin view across mixed feature groups (T2.3)
+
+- Date: 2026-11-18
+- Question: force_row_wise previously processed dense single-value groups in one row-major
+  pass and the multi-value group in a separate pass, rather than upstream's all-feature view.
+- Choice: AllFeatureBins ports CalcBinOffsets(false), GetMultiBinFromAllFeatures and
+  PushDataToMultiValBin (v4.7.0). It selects dense/sparse storage from the combined density,
+  keeps single-value bundles as one column, expands multi-value groups into their raw
+  sub-feature columns, reserves upstream's initial bin and removes zero/default bins only
+  where upstream does. Sparse storage is assembled with two column scans and no dense
+  temporary. The learner uses that single view and the existing MultiValBin block/merge
+  kernel; it reuses the histogram scratch buffers and does not also build an unused dense
+  copy or a separate multi-value view. Column-wise and dense-only row-wise paths remain.
+- Acceptance: the native all-feature offset/storage tests failed first on the missing
+  AllFeatureBins API. A separate regression then failed with Unsupported("sparse single-value
+  group"); the same view now handles that representation in row-wise training. Native tests
+  cover both physical layouts, bundled groups, nonzero most-frequent bins and real datasets.
+  Twenty-two added parity cases cover dense/CSR/CSC, mixed/all-sparse data, bagging, feature
+  sampling, weights, categories and 1/2/3 threads, including cross-thread model identity.
+- Benchmark harness: the initial periodic sparse data accidentally formed only exclusive
+  single-value bundles, caught by the assertion requiring a multi-value group. The data
+  generator was corrected to independent seeded random values; both group assertions were
+  retained. Both sparse and dense all-feature views are benchmarked at 4096 x 12, 8 trees,
+  max_bin=63, one thread, with 2 or 9 dense features and 80% zeros in the remaining columns.
+- Profile: `samply record --save-only --duration 3 --output <profile.json> -- <base-kernels>
+  --bench training/row_wise_mixed --profile-time 3`. Of 2612 base samples, 522 land in
+  MultiValBin::accumulate, 487 in numerical split search, 472 in data routing, 362 in sparse
+  partition and 241 in construct_histograms. The existing accumulation kernel remains the
+  arithmetic implementation; this change unifies its inputs and histogram offsets.
+- SPEC ref: SPEC-MEM-1, SPEC-MEM-2, SPEC-MEM-4, SPEC-CONC-3, SPEC-NUM-2, SPEC-NUM-6
+- Final gates: cargo check, clippy, cargo test and scripts/check.sh passed; check.sh ended
+  "all green" with 2368 Python tests. A rebuilt release extension then passed 2362 parity /
+  upstream-suite tests. No existing assertion, tolerance, skip or gap-registry entry changed.
+- Criterion: release/bench profile, Apple M1 (8 logical CPUs), one thread, base af07e1f versus
+  this T2.3 diff (candidate hash recorded in the PR), seven interleaved rounds, 0.2 s warm-up,
+  0.6 s measurement, 20 samples. Both revisions used the same benchmark code; only the base's
+  two implementation modules were restored from af07e1f for its build. No upstream wheel
+  runs in these Rust-only comparisons (pinned version 4.7.0, OMP_WAIT_POLICY n/a).
+
+  | Kernel | Base | Candidate | Ratio |
+  | --- | ---: | ---: | ---: |
+  | Histogram all rows, 16 bins | 165.88 us | 168.21 us | 1.0140 |
+  | Histogram all rows, 255 bins | 116.80 us | 117.73 us | 1.0080 |
+  | Histogram all rows, 4096 bins | 116.50 us | 117.64 us | 1.0098 |
+  | Histogram subset, 16 bins | 62.51 us | 62.46 us | 0.9992 |
+  | Histogram subset, 255 bins | 47.50 us | 48.04 us | 1.0114 |
+  | Histogram subset, 4096 bins | 49.54 us | 50.20 us | 1.0134 |
+  | Partition, 200k rows | 425.50 us | 423.37 us | 0.9950 |
+  | Prediction, 4096 x 16 x 20 trees | 393.13 us | 382.90 us | 0.9740 |
+  | Numerical split search, 255 bins | 512.62 ns | 512.22 ns | 0.9992 |
+  | Row-wise mixed / sparse view, 4096 x 12 | 2.671 ms | 2.653 ms | 0.9934 |
+  | Row-wise mixed / dense view, 4096 x 12 | 3.004 ms | 2.857 ms | 0.9508 |
+
+  Histogram cases use 200k rows, subsets every third row. Reproduce by building the kernels
+  executable at each revision, then alternating them seven times with `--bench
+  '^(histogram/|partition/|split_finding/|prediction/|training/)' --warm-up-time 0.2
+  --measurement-time 0.6 --sample-size 20`. All cases stay within the 5% gate.
+- End-to-end upstream check: installed release build confirmed newer than debug; same venv,
+  lightgbm==4.7.0, OMP_WAIT_POLICY=PASSIVE, force_row_wise=true, 50 boosting rounds,
+  seven interleaved rounds. Dense: 50k x 20; CSR: 50k x 200, density 0.03.
+
+  | Case / threads | bankai | upstream | Ratio |
+  | --- | ---: | ---: | ---: |
+  | dense / 1 | 0.267 s | 0.280 s | 0.952 |
+  | dense / 2 | 0.241 s | 0.224 s | 1.074 |
+  | sparse / 1 | 0.413 s | 0.340 s | 1.213 |
+  | sparse / 2 | 0.249 s | 0.258 s | 0.964 |
+
+  Command: `OMP_WAIT_POLICY=PASSIVE .venv/bin/python benches/bench_train_interleaved.py
+  --layout row --rounds 7 --threads 1 2`. It exits 1 on the dense-2 / sparse-1 upstream gaps.
+  An initial run overlapping a short test build was discarded; the table is the isolated run.
+- Same-session control for both slow cases: built af07e1f and the candidate release extensions,
+  ran them in separate fresh processes, alternating base/candidate for seven rounds with the
+  same data and parameters above. Each timed block is the median of three full 50-round
+  training calls, after a 2-round warm-up; data generation and imports are outside the timer.
+  OMP_WAIT_POLICY=PASSIVE, upstream 4.7.0 imported but not invoked in this control:
+
+  | Case / threads | Base | Candidate | Ratio |
+  | --- | ---: | ---: | ---: |
+  | dense / 2 | 0.238751 s | 0.238648 s | 0.9996 |
+  | sparse / 1 | 0.414659 s | 0.412849 s | 0.9956 |
+
+  These differences are noise, not speedup claims. The upstream gaps are not introduced by
+  the unified view; they remain T3.1/T3.2. T2.3 verifies the row-wise representation and parity,
+  with no regression against main. No CI gate, tolerance or required check was changed.
+- Status: active

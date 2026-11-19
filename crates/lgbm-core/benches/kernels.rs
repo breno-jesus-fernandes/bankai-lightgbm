@@ -176,12 +176,50 @@ fn prediction(c: &mut Criterion) {
     });
 }
 
+/// Full mixed-group row-wise training, including building its per-learner bin view.
+fn row_wise_training(c: &mut Criterion) {
+    const ROWS: usize = 4096;
+    const FEATURES: usize = 12;
+    let config = Arc::new(Config::from_str_params(
+        "objective=regression num_iterations=8 num_leaves=15 min_data_in_leaf=5 min_data_in_bin=1 max_bin=63 force_row_wise=true num_threads=1 verbosity=-1"
+    ).unwrap());
+    for dense_features in [2, 9] {
+        let mut rng = Random::new(61);
+        let data: Vec<f64> = (0..ROWS * FEATURES)
+            .map(|i| {
+                let value = f64::from(rng.next_float()) * 2.0 - 1.0;
+                if i % FEATURES >= dense_features && rng.next_float() < 0.8 {
+                    0.0
+                } else {
+                    value
+                }
+            })
+            .collect();
+        let labels: Vec<f64> = (0..ROWS)
+            .map(|r| data[r * FEATURES] * 2.0 + data[r * FEATURES + 3])
+            .collect();
+        let ds =
+            Arc::new(Dataset::from_dense(&data, ROWS, FEATURES, &labels, &config, &[]).unwrap());
+        assert!(ds.layout.groups.iter().any(|g| g.is_multi_val));
+        assert!(ds.layout.groups.iter().any(|g| !g.is_multi_val));
+        let name = if dense_features == 2 {
+            "training/row_wise_mixed/4096x12"
+        } else {
+            "training/row_wise_dense_mixed/4096x12"
+        };
+        c.bench_function(name, |b| {
+            b.iter(|| black_box(Gbdt::train_shared(Arc::clone(&config), Arc::clone(&ds)).unwrap()));
+        });
+    }
+}
+
 criterion_group!(
     benches,
     histogram,
     simd_histogram,
     partition,
     split_finding,
-    prediction
+    prediction,
+    row_wise_training
 );
 criterion_main!(benches);
