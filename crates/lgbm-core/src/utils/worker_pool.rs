@@ -13,8 +13,12 @@ use rayon::prelude::*;
 use crate::error::{Error, Result};
 
 /// A fixed-size `rayon` pool. The learner only builds one when `num_threads > 1`.
+///
+/// Under Miri the pool is `None` and every primitive runs serially: Miri does not support
+/// rayon's worker threads, and the parallel and serial paths produce identical results (each
+/// task writes a disjoint piece), so the unsafe modules exercised under Miri still get covered.
 pub struct WorkerPool {
-    pool: std::sync::Arc<rayon::ThreadPool>,
+    pool: Option<std::sync::Arc<rayon::ThreadPool>>,
     threads: usize,
 }
 
@@ -22,15 +26,20 @@ impl WorkerPool {
     /// Builds a dedicated pool of `threads` workers (never the global rayon pool).
     pub fn new(threads: usize) -> Result<Self> {
         let threads = threads.max(1);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .thread_name(|k| format!("bankai-worker-{k}"))
-            .build()
-            .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
-        Ok(Self {
-            pool: std::sync::Arc::new(pool),
-            threads,
-        })
+        #[cfg(miri)]
+        let pool = {
+            let _ = threads;
+            None
+        };
+        #[cfg(not(miri))]
+        let pool = Some(std::sync::Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(|k| format!("bankai-worker-{k}"))
+                .build()
+                .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?,
+        ));
+        Ok(Self { pool, threads })
     }
 
     pub fn threads(&self) -> usize {
@@ -39,33 +48,46 @@ impl WorkerPool {
 
     /// A handle to the underlying pool, so the caller can run a whole tree inside one
     /// `install` (the per-region primitives below then nest cheaply on the same pool).
-    pub fn handle(&self) -> std::sync::Arc<rayon::ThreadPool> {
-        std::sync::Arc::clone(&self.pool)
+    /// `None` when there is no rayon pool (under Miri), so the caller runs serially.
+    pub fn handle(&self) -> Option<std::sync::Arc<rayon::ThreadPool>> {
+        self.pool.clone()
     }
 
     /// Runs `f(i)` for every `i < n` on this pool and returns when all have finished. A panic in
     /// any task is re-raised on the calling thread.
     pub fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        let Some(pool) = &self.pool else {
+            for i in 0..n {
+                f(i);
+            }
+            return;
+        };
         if self.threads == 1 || n <= 1 {
             for i in 0..n {
                 f(i);
             }
             return;
         }
-        self.pool.install(|| {
+        pool.install(|| {
             (0..n).into_par_iter().for_each(f);
         });
     }
 
     /// Calls `f(i, &mut items[i])` for every item, in parallel over disjoint elements.
     pub fn for_each_mut<T: Send>(&self, items: &mut [T], f: impl Fn(usize, &mut T) + Sync) {
+        let Some(pool) = &self.pool else {
+            for (i, x) in items.iter_mut().enumerate() {
+                f(i, x);
+            }
+            return;
+        };
         if self.threads == 1 || items.len() <= 1 {
             for (i, x) in items.iter_mut().enumerate() {
                 f(i, x);
             }
             return;
         }
-        self.pool.install(|| {
+        pool.install(|| {
             items.par_iter_mut().enumerate().for_each(|(i, x)| f(i, x));
         });
     }
@@ -78,13 +100,19 @@ impl WorkerPool {
         f: impl Fn(usize, &mut [T]) + Sync,
     ) {
         let chunk = chunk.max(1);
+        let Some(pool) = &self.pool else {
+            for (c, piece) in data.chunks_mut(chunk).enumerate() {
+                f(c, piece);
+            }
+            return;
+        };
         if self.threads == 1 {
             for (c, piece) in data.chunks_mut(chunk).enumerate() {
                 f(c, piece);
             }
             return;
         }
-        self.pool.install(|| {
+        pool.install(|| {
             data.par_chunks_mut(chunk)
                 .enumerate()
                 .for_each(|(c, piece)| f(c, piece));

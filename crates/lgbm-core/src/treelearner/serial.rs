@@ -407,7 +407,7 @@ impl SerialTreeLearner {
     pub fn train(&mut self, gradients: &[f32], hessians: &[f32], rows: Option<&[i32]>) -> Tree {
         // Run the whole tree inside one `install` on the Booster's pool, so the per-region
         // parallel primitives nest on the same pool instead of re-entering it each time.
-        match self.spin.as_ref().map(|wp| wp.handle()) {
+        match self.spin.as_ref().and_then(|wp| wp.handle()) {
             Some(pool) => pool.install(|| self.grow_tree(gradients, hessians, rows)),
             None => self.grow_tree(gradients, hessians, rows),
         }
