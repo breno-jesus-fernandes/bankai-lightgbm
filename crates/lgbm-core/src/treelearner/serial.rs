@@ -483,17 +483,17 @@ impl SerialTreeLearner {
             num_leaves,
             num_data,
         )?;
-        // The quantized integer path is wired for the deterministic nearest-rounding slice only:
-        // numeric features, the dense column-wise layout, no leaf renewal. Configs it does not
-        // cover yet (stochastic rounding — its distributions are implementation-defined across
-        // libc++/libstdc++; `quant_train_renew_leaf`; categorical, multi-value, sparse or
-        // row-wise layouts) fall back to full-precision training, as before this slice. This is
-        // not a silent drop of the parameter: `use_quantized_grad` is honoured where it is
-        // implemented and otherwise behaves as it did while T2.7 was unimplemented. See D-026.
+        // The quantized integer path is wired for the deterministic nearest-rounding slice:
+        // numeric features and the dense column-wise layout (leaf renewal is supported, see
+        // `renew_int_grad_tree_output`). Configs it does not cover yet (stochastic rounding — its
+        // distributions are implementation-defined across libc++/libstdc++; categorical,
+        // multi-value, sparse or row-wise layouts) fall back to full-precision training, as before
+        // this slice. This is not a silent drop of the parameter: `use_quantized_grad` is honoured
+        // where it is implemented and otherwise behaves as it did while T2.7 was unimplemented.
+        // See D-026.
         let bins = cfg.num_grad_quant_bins;
         let quant_supported = cfg.use_quantized_grad
             && !cfg.stochastic_rounding
-            && !cfg.quant_train_renew_leaf
             && (2..=127).contains(&bins)
             && !row_wise
             && all_feature.is_none()
@@ -616,7 +616,39 @@ impl SerialTreeLearner {
             left_leaf = l as i32;
             right_leaf = r as i32;
         }
+        // upstream: `SerialTreeLearner::Train` renews the leaf outputs of a finished quantized
+        // tree from the original (non-discretized) gradients when `quant_train_renew_leaf`.
+        if self.quant.is_some() && self.cfg.quant_train_renew_leaf {
+            self.renew_int_grad_tree_output(&mut tree, gradients, hessians);
+        }
         tree
+    }
+
+    /// upstream: `GradientDiscretizer::RenewIntGradTreeOutput` (the non-`data` tree-learner
+    /// branch). The quantized split structure is kept, but every leaf output is recomputed from
+    /// the full-precision gradients and Hessians summed over the leaf's rows — the unsmoothed
+    /// `CalculateSplittedLeafOutput<L1, MAX_OUTPUT, SMOOTHING=false>` with a zero parent output.
+    fn renew_int_grad_tree_output(&self, tree: &mut Tree, gradients: &[f32], hessians: &[f32]) {
+        for leaf in 0..tree.num_leaves {
+            let indices = self.partition.indices_on_leaf(leaf);
+            let mut sum_gradient = 0.0f64;
+            let mut sum_hessian = 0.0f64;
+            for &idx in indices {
+                sum_gradient += f64::from(gradients[idx as usize]);
+                sum_hessian += f64::from(hessians[idx as usize]);
+            }
+            let output = calculate_splitted_leaf_output::<true, true, false>(
+                sum_gradient,
+                sum_hessian,
+                self.params.lambda_l1,
+                self.params.lambda_l2,
+                self.params.max_delta_step,
+                self.params.path_smooth,
+                indices.len() as i32,
+                0.0,
+            );
+            tree.set_leaf_output(leaf, output);
+        }
     }
 
     /// upstream: `SerialTreeLearner::BeforeTrain` (no column sampling, no bagging)
