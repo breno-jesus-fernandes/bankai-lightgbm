@@ -4,6 +4,8 @@
 //! `DiscretizeGradients` and `SetNumBitsInHistogramBin`.
 //! These primitives are not yet connected to the serial tree learner (T2.7).
 
+pub mod mt19937;
+
 use crate::error::{Error, Result};
 use crate::utils::common::madd;
 

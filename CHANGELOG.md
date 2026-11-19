@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Rust core: ported `std::mt19937` (the 32-bit Mersenne Twister engine) for the quantized stochastic-rounding path, which upstream seeds to draw per-row rounding noise. The engine's raw 32-bit output is standardized and platform-independent; it matches the C++ standard's predefined conformance vector (10000th draw of the default-seeded engine is `4123659995`). This is the next step of T2.7; stochastic rounding and its (implementation-defined) distributions are not wired up yet.
 - Rust core: added nearest-rounding gradient/Hessian discretization primitives with packed int8 derivatives, reusable storage, f64 scales and upstream histogram width selection. Native leaf statistics match `lightgbm==4.7.0` over 16 cases. This is the foundation of T2.7; quantized Python training is not implemented by this change.
 
 - Positive `histogram_pool_size` budgets (and alias `hist_pool_size`) now use an LRU histogram cache instead of raising `Unsupported`. Capacity follows upstream's raw per-feature bin counts, with at least two buckets. Evicted parents are rebuilt when subtraction cannot reuse them. Budget-only resets keep the existing capacity and sampling streams; capacity is recalculated when `num_leaves` changes, matching upstream.

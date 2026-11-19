@@ -639,3 +639,41 @@ Entry format:
   the leading sampled addresses resolve with atos to the inlined discretization
   benchmark loop. This change adds the primitive; it does not optimize a training
   path or claim that T3.1/T3.2 performance targets are closed.
+
+## D-023: std::mt19937 engine for quantized stochastic rounding (T2.7, slice 2)
+
+- Date: 2026-11-19
+- Question: SPEC-NUM-9 states that all RNG comes from `utils::random` (upstream's
+  LCG) and that the `rand` crate is unused. Upstream's quantized stochastic
+  rounding does not use that LCG: `GradientDiscretizer::Init` seeds `std::mt19937`
+  (one engine per OpenMP block, plus one for the per-tree rotation start) and draws
+  the per-row rounding noise from `std::uniform_real_distribution<double>` and the
+  rotation start from `std::uniform_int_distribution<data_size_t>`
+  (src/treelearner/gradient_discretizer.cpp, v4.7.0). Parity therefore needs the
+  standard-library engine, not the LCG.
+- Choice: port `std::mt19937` as `treelearner::gradient_discretizer::mt19937`,
+  scoped next to the only path that uses it, rather than widening the general RNG.
+  This extends SPEC-NUM-9 for the quantized path only; the LCG remains the RNG for
+  every other training/prediction path, and `rand` is still unused. The engine uses
+  the standard's fixed parameters (`mersenne_twister_engine<uint32_t, 32, 624, 397,
+  31, 0x9908b0df, 11, 0xffffffff, 7, 0x9d2c5680, 15, 0xefc60000, 18, 1812433253>`).
+- Portability: the engine's raw 32-bit output sequence is defined by the C++
+  standard, so it is identical on every platform and standard library (libc++ on
+  the macOS fixture host, libstdc++ on the Linux CI runner). Only the *distributions*
+  layered on top are implementation defined; those are deferred to the next T2.7
+  slice, where the libc++/libstdc++ difference and the platform-portability of the
+  fixtures will be decided and recorded. This slice introduces no platform coupling.
+- Oracle: the C++ standard's own predefined test (ISO/IEC 14882 [rand.predef]) —
+  the 10000th consecutive invocation of a default-constructed `std::mt19937` is
+  `4123659995`. This single vector uniquely pins the seeding, the twist and the
+  tempering, so it validates the engine for every seed upstream derives from
+  `random_seed`. No expected value is synthesized from the Rust port.
+- TDD: the integration test first failed to compile (missing `mt19937` module), the
+  TDD red recorded in its own Harness commit. The implementation then made both the
+  integration test and the in-module unit test green, with the assertion unchanged.
+- SPEC ref: SPEC-NUM-9 (extended for the quantized path), SPEC-CONC-1.
+- Validation: cargo fmt --all --check and cargo clippy --workspace --all-targets
+  -D warnings clean; scripts/check.sh ended "all green" (2404 Python tests passed,
+  9 skipped, 13 xfailed, 4 xpassed). The engine is not wired into any training path,
+  so no hot-path benchmark applies.
+- Status: active
