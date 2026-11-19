@@ -264,3 +264,82 @@ Entry format:
   alike; T3.1's own scope (the partition) is effectively already at upstream parity.
 - SPEC ref: none (performance finding; SPEC-CONC-6 covers the SIMD work that would close it)
 - Status: active
+
+
+## D-018: SIMD across independent histogram and split-gain lanes (T2.6)
+
+- Date: 2026-11-18
+- Question: introduce SIMD without changing the prefix-sum rounding, row order or threshold
+  tie-breaking required by SPEC-CONC-6 and SPEC-NUM-7.
+- Choice: use two independent f64 lanes: gradient/Hessian for dense histogram updates, and
+  left/right child gain for the common numerical search (no L1, output clipping or smoothing).
+  Dispatch NEON on aarch64 and SSE2 on x86_64 with runtime detection; retain explicit scalar
+  reference functions and fall back to them on other targets and under Miri. Constrained,
+  clipped, smoothed and L1 gain calculations keep their existing implementations. There are
+  no reciprocal approximations, FMA changes, prefix-sum reassociations or allocations.
+- Evidence: the acceptance tests first failed to compile because the scalar histogram entry
+  point and SIMD split module did not exist. Both now compare every result bit against an
+  independent ordered scalar formula. Histogram cases cover all four bin widths, repeated
+  destinations, indexed rows, empty/odd lengths, constant Hessians, cancellation and an
+  unaligned output. Split-gain cases include extreme magnitudes and nonzero L2.
+- Criterion: release/bench profile, one thread, Apple M1 (8 logical CPUs), macOS/aarch64, base d564c4d versus this T2.6
+  diff, seven interleaved rounds, 0.2 s warm-up / 0.6 s measurement / 20 samples per case.
+  Reproduce with `cargo bench -p lgbm-core --bench kernels --no-run` at each revision, keep
+  each resulting executable, then alternate the binaries with `--bench
+  '^(histogram/|partition/|split_finding/|prediction/)' --warm-up-time 0.2
+  --measurement-time 0.6 --sample-size 20` seven times. Medians (base -> candidate):
+
+  | Kernel | Base | Candidate | Ratio |
+  | --- | ---: | ---: | ---: |
+  | Histogram all rows, 16 bins | 176.67 us | 172.16 us | 0.9745 |
+  | Histogram all rows, 255 bins | 124.96 us | 123.59 us | 0.9891 |
+  | Histogram all rows, 4096 bins | 124.43 us | 122.69 us | 0.9861 |
+  | Histogram subset, 16 bins | 65.21 us | 65.22 us | 1.0001 |
+  | Histogram subset, 255 bins | 49.78 us | 49.98 us | 1.0042 |
+  | Histogram subset, 4096 bins | 51.41 us | 51.48 us | 1.0015 |
+  | Partition, 200k rows | 423.52 us | 424.45 us | 1.0022 |
+  | Numerical split search, 255 bins | 540.21 ns | 511.80 ns | 0.9474 |
+  | Prediction, 4096 x 16 x 20 trees | 407.88 us | 421.04 us | 1.0323 |
+
+  Histograms use 200k rows (subset: every third row). No upstream process runs in this
+  Rust-only comparison; the pinned upstream is lightgbm==4.7.0 and OMP_WAIT_POLICY is n/a.
+  Every kernel is below the 5% regression gate. A first non-isolated measurement was
+  discarded because builds/Miri slowed even unchanged kernels; the table is from binaries
+  run with those jobs stopped. The observed split-search benefit is modest, so this does
+  not by itself establish the sparse end-to-end target in T3.1.
+- Profile: `samply record --save-only --duration 3 --output <profile.json> -- <base-kernels>
+  --bench split_finding --profile-time 3`, plus the training diagnosis in D-017. Of 2384
+  samples in the base microbenchmark, 750 land on the final scalar gain addition immediately
+  following the two scalar `fdiv` instructions (confirmed with `otool -tvV`); this motivates
+  pairing those independent divisions rather than changing the prefix sums. The paired
+  scalar/dispatch histogram benchmarks are retained in `benches/kernels.rs` for future work.
+- Full training check: release build verified newer than debug and installed immediately before
+  timing; `lightgbm==4.7.0`, same venv/data/params, 50 boosting rounds, seven interleaved rounds,
+  auto layout. Dense is 50k x 20; CSR is 50k x 200 at density 0.03. Candidate is this T2.6
+  diff over d564c4d (the PR records its final commit). These are end-to-end medians including
+  construction, not a before/after claim against main:
+
+  | OMP_WAIT_POLICY | Case / threads | bankai | upstream | Ratio |
+  | --- | --- | ---: | ---: | ---: |
+  | ACTIVE | dense / 1 | 0.228 s | 0.288 s | 0.792 |
+  | ACTIVE | dense / 2 | 0.178 s | 0.186 s | 0.959 |
+  | ACTIVE | sparse / 1 | 0.463 s | 0.413 s | 1.123 |
+  | ACTIVE | sparse / 2 | 0.281 s | 0.237 s | 1.186 |
+  | PASSIVE | dense / 1 | 0.222 s | 0.283 s | 0.784 |
+  | PASSIVE | dense / 2 | 0.155 s | 0.235 s | 0.660 |
+  | PASSIVE | sparse / 1 | 0.421 s | 0.381 s | 1.106 |
+  | PASSIVE | sparse / 2 | 0.256 s | 0.281 s | 0.910 |
+
+  Reproduce: `OMP_WAIT_POLICY=ACTIVE .venv/bin/python benches/bench_train_interleaved.py
+  --rounds 7 --threads 1 2`, then the same command with PASSIVE. The ACTIVE result prompted
+  the policy comparison; both are retained. Both commands exit 1 because the known sparse
+  single-thread gap exceeds the upstream target. T2.6's specified acceptance is the Criterion
+  no-regression gate, which passed; T3.1 remains blocked rather than claiming the overall
+  upstream target is met. No CI gate or required check was changed.
+- Validation: `scripts/check.sh` ended `all green` (2346 Python tests); release parity/upstream
+  suite passed 2340 tests. Native bitwise and 1/2/3-thread invariance tests passed; Miri passed
+  the histogram library tests and the split-gain integration test. The larger histogram
+  integration matrix was run natively; its additional Miri run was interrupted after the
+  library Miri suite passed, because interpreting the full four-width matrix was excessive.
+- SPEC ref: SPEC-CONC-6, SPEC-NUM-2, SPEC-NUM-7
+- Status: active

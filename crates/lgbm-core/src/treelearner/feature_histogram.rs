@@ -443,6 +443,9 @@ fn sequential<
                 return leaf_gain_given_output::<L1>(slg, slh, p.lambda_l1, p.lambda_l2, lo)
                     + leaf_gain_given_output::<L1>(srg, srh, p.lambda_l1, p.lambda_l2, ro);
             }
+            if !L1 && !MAX_OUT && !SMOOTH {
+                return super::simd::split_gain(slg, slh, srg, srh, p.lambda_l2);
+            }
             leaf_gain::<L1, MAX_OUT, SMOOTH>(
                 slg,
                 slh,
