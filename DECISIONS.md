@@ -529,3 +529,32 @@ Entry format:
   execute the same mapping/group-filling closures. No test assertion, filter, Miri flag or CI
   check changed. scripts/miri.sh passed all 10 selected tests, including the reset regression.
 - Status: active
+
+## D-021: Native oracle for nearest-rounded gradient discretization (T2.7, slice 1)
+
+- Date: 2026-11-19
+- Question: the new quantization acceptance fixture initially recorded a gain that
+  differed by two score_t ULPs despite identical leaf outputs and Hessian weights.
+- Harness correction: capture the native Booster with keep_training_booster=True.
+  Upstream python-package/lightgbm/engine.py train otherwise serializes and reloads
+  the model before returning. Tree::ToString uses the default six significant digits
+  for split_gain, and the reload uses Common::Atof. Those statistics are not the
+  native score_t split gain needed to validate the quantizer's integer sums.
+- Source: v4.7.0 src/treelearner/gradient_discretizer.cpp DiscretizeGradients;
+  src/treelearner/feature_histogram.hpp BeforeNumericalInt and
+  FindBestThresholdSequentiallyInt; src/io/tree.cpp Tree::ToString and NodeToJSON;
+  python-package/lightgbm/engine.py train. The local upstream source's
+  gradient_discretizer.cpp was checked against the pinned tag with no differences.
+- Oracle: scripts/gen_quantized_grad_fixtures.py records 16 upstream stumps, for
+  constant/nonconstant Hessians and 2/3/4/7/16/31/64/127 quantization bins. Inputs
+  are score_t values; expected leaf outputs, Hessian weights and native split gains
+  come only from lightgbm==4.7.0. No expected quantized integer is synthesized by
+  the generator. The fixture records its producing platform and version.
+- Test correction is isolated in the Harness commit. No assertion or tolerance was
+  changed. Initial red: missing gradient_discretizer module; subsequent red exposed
+  the serialized gain in the original oracle. After the native-oracle correction,
+  the same acceptance assertions pass.
+- Scope: this is the nearest-rounding foundation for T2.7, not quantized training.
+  Stochastic RNG streams, integer histogram accumulation/search, leaf renewal and
+  integration into SerialTreeLearner remain pending. T2.7 must not be checked off.
+- Status: active
