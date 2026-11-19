@@ -89,27 +89,16 @@ impl GradientDiscretizer {
         };
         let inverse_gradient = 1.0 / self.gradient_scale;
         let inverse_hessian = 1.0 / self.hessian_scale;
-        // Round one gradient to its signed int8, away from zero at the halfway point.
-        let quantize_gradient = |gradient: f32| -> i16 {
+        for ((packed, &gradient), &hessian) in self.packed.iter_mut().zip(gradients).zip(hessians) {
             let gradient = f64::from(gradient);
             let offset = if gradient >= 0.0 { 0.5 } else { -0.5 };
-            i16::from(madd(gradient, inverse_gradient, offset) as i8)
-        };
-        // The constant-Hessian branch is lifted out of the per-row loop: each row's Hessian is
-        // the integer one, so the loop body is a pure gradient quantization. This keeps the two
-        // cases in separate loops rather than a per-row test, which also stabilizes the hot
-        // loop's codegen against unrelated changes elsewhere in the crate.
-        if self.constant_hessian {
-            for (packed, &gradient) in self.packed.iter_mut().zip(gradients) {
-                *packed = (quantize_gradient(gradient) << 8) | 1;
-            }
-        } else {
-            for ((packed, &gradient), &hessian) in
-                self.packed.iter_mut().zip(gradients).zip(hessians)
-            {
-                let hessian = madd(f64::from(hessian), inverse_hessian, 0.5) as i8;
-                *packed = (quantize_gradient(gradient) << 8) | i16::from(hessian as u8);
-            }
+            let gradient = madd(gradient, inverse_gradient, offset) as i8;
+            let hessian = if self.constant_hessian {
+                1
+            } else {
+                madd(f64::from(hessian), inverse_hessian, 0.5) as i8
+            };
+            *packed = (i16::from(gradient) << 8) | i16::from(hessian as u8);
         }
         Ok(())
     }
