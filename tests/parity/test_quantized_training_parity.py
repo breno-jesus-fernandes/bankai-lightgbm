@@ -76,6 +76,22 @@ def test_quantized_binary_matches_upstream(bins: int) -> None:
     assert _trees(ours.model_to_string()) == _trees(theirs.model_to_string())
 
 
+@pytest.mark.parametrize("objective", ["regression", "binary"])
+def test_quantized_renew_leaf_matches_upstream(objective: str) -> None:
+    """`quant_train_renew_leaf` keeps the quantized split structure but recomputes every leaf
+    output from the full-precision gradients (upstream `RenewIntGradTreeOutput`)."""
+    X, y = _binary_data() if objective == "binary" else _data()
+    params = {
+        **BASE,
+        "objective": objective,
+        "num_grad_quant_bins": 8,
+        "quant_train_renew_leaf": True,
+    }
+    theirs = lightgbm.train(params, lightgbm.Dataset(X, y), num_boost_round=10)
+    ours = lgb.train(params, lgb.Dataset(X, y), num_boost_round=10)
+    assert _trees(ours.model_to_string()) == _trees(theirs.model_to_string())
+
+
 def test_quantized_changes_the_model() -> None:
     """Quantized training is a distinct path: it must not coincide with full precision."""
     X, y = _data()
