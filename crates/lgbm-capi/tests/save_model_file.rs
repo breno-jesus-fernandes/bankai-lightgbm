@@ -197,7 +197,13 @@ fn saved_file_round_trips_through_create_from_modelfile() {
     // SAFETY: live handle; valid C string filename.
     assert_eq!(
         unsafe {
-            LGBM_BoosterSaveModel(booster, 0, 0, C_API_FEATURE_IMPORTANCE_SPLIT, c_path.as_ptr())
+            LGBM_BoosterSaveModel(
+                booster,
+                0,
+                0,
+                C_API_FEATURE_IMPORTANCE_SPLIT,
+                c_path.as_ptr(),
+            )
         },
         0,
         "save model failed: {}",
@@ -208,8 +214,9 @@ fn saved_file_round_trips_through_create_from_modelfile() {
     let mut num_iterations: c_int = -1;
     let mut loaded: *mut c_void = ptr::null_mut();
     // SAFETY: valid C string and writable out-pointers.
-    let rc =
-        unsafe { LGBM_BoosterCreateFromModelfile(c_path.as_ptr(), &mut num_iterations, &mut loaded) };
+    let rc = unsafe {
+        LGBM_BoosterCreateFromModelfile(c_path.as_ptr(), &mut num_iterations, &mut loaded)
+    };
     assert_eq!(rc, 0, "load failed: {}", last_error());
     assert_eq!(save_to_string(loaded), save_to_string(booster));
 
@@ -239,7 +246,13 @@ fn save_model_works_on_a_loaded_model() {
     // SAFETY: live handle; valid C string filename.
     assert_eq!(
         unsafe {
-            LGBM_BoosterSaveModel(handle, 0, 0, C_API_FEATURE_IMPORTANCE_SPLIT, c_path.as_ptr())
+            LGBM_BoosterSaveModel(
+                handle,
+                0,
+                0,
+                C_API_FEATURE_IMPORTANCE_SPLIT,
+                c_path.as_ptr(),
+            )
         },
         0,
         "save model failed: {}",
