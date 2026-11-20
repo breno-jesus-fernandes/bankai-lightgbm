@@ -1428,6 +1428,100 @@ pub unsafe extern "C" fn LGBM_BoosterPredictForFile(
     })
 }
 
+/// Names of the training metrics a booster reports, in order. A booster loaded from a model has no
+/// training data and so reports none (upstream: `training_metrics_` is empty without `train_data_`).
+fn booster_eval_names(booster: &CBooster) -> Result<Vec<String>, String> {
+    match booster {
+        CBooster::Trainer(trainer) => trainer.eval_names().map_err(|e| e.to_string()),
+        CBooster::Model(_) => Ok(Vec::new()),
+    }
+}
+
+/// upstream: `LGBM_BoosterGetEvalCounts`. The number of metric values [`LGBM_BoosterGetEval`]
+/// reports for each dataset (the configured `metric` list, with multi-valued metrics expanded).
+///
+/// # Safety
+/// `handle` must be a live booster handle and `out_len` a valid writable pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LGBM_BoosterGetEvalCounts(
+    handle: *mut c_void,
+    out_len: *mut c_int,
+) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let booster = unsafe { booster_ref(handle) }?;
+        if out_len.is_null() {
+            return Err("out_len must not be null".into());
+        }
+        let count =
+            c_int::try_from(booster_eval_names(booster)?.len()).map_err(|_| "too many metrics")?;
+        // SAFETY: checked non-null above; writable per the contract.
+        unsafe { *out_len = count };
+        Ok(())
+    })
+}
+
+/// upstream: `LGBM_BoosterGetEvalNames`. Write the training metric names into the caller's buffers.
+/// `out_len` is always set to the number of names and `out_buffer_len` to the length of the longest
+/// name including its NUL terminator; the names themselves are written only for the first `len`
+/// buffers, each truncated to `buffer_len` bytes (NUL-terminated). Call once with `len = 0` to size
+/// the buffers, then again with them allocated.
+///
+/// # Safety
+/// `handle` must be a live booster handle; `out_len` and `out_buffer_len` valid writable pointers;
+/// when `len > 0`, `out_strs` must point to `len` writable `char*` slots, each with `buffer_len`
+/// writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LGBM_BoosterGetEvalNames(
+    handle: *mut c_void,
+    len: c_int,
+    out_len: *mut c_int,
+    buffer_len: usize,
+    out_buffer_len: *mut usize,
+    out_strs: *mut *mut c_char,
+) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let booster = unsafe { booster_ref(handle) }?;
+        if out_len.is_null() || out_buffer_len.is_null() {
+            return Err("out_len and out_buffer_len must not be null".into());
+        }
+        let names = booster_eval_names(booster)?;
+        let count = c_int::try_from(names.len()).map_err(|_| "too many metrics")?;
+        // The longest name including its NUL terminator.
+        let needed = names.iter().map(|n| n.len() + 1).max().unwrap_or(0);
+        // SAFETY: checked non-null above; writable per the contract.
+        unsafe {
+            *out_len = count;
+            *out_buffer_len = needed;
+        }
+        let writable = (len.max(0) as usize).min(names.len());
+        if writable == 0 {
+            return Ok(());
+        }
+        if out_strs.is_null() {
+            return Err("out_strs must not be null when len > 0".into());
+        }
+        if buffer_len == 0 {
+            return Err("buffer_len must be positive when writing names".into());
+        }
+        // SAFETY: the caller provides `len` writable `char*` slots; we touch the first `writable`.
+        let slots = unsafe { std::slice::from_raw_parts(out_strs, writable) };
+        for (name, &slot) in names.iter().zip(slots) {
+            if slot.is_null() {
+                return Err("out_strs entries must not be null".into());
+            }
+            let n = name.len().min(buffer_len - 1);
+            // SAFETY: `slot` is writable for `buffer_len` bytes; `n < buffer_len`, so the NUL fits.
+            unsafe {
+                std::ptr::copy_nonoverlapping(name.as_ptr().cast::<c_char>(), slot, n);
+                *slot.add(n) = 0;
+            }
+        }
+        Ok(())
+    })
+}
+
 /// upstream: `LGBM_BoosterSaveModelToString`. Serialize the model (loaded or in training) to its
 /// text form, following the two-call buffer protocol: `out_len` is always set to the length
 /// needed including the trailing NUL, and the text is written to `out_str` only when

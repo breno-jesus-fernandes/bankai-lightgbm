@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 use crate::io::bin::BinType;
 use crate::io::dataset::Dataset;
 use crate::meta::K_EPSILON;
+use crate::metric::create_metric;
 use crate::objective::LoadedObjective;
 use crate::objective::train::{Objective, create_objective};
 use crate::tree::Tree;
@@ -244,6 +245,21 @@ impl GbdtTrainer {
     /// Completed iterations.
     pub fn iteration(&self) -> usize {
         self.trainer.models.len() / self.trainer.num_tree_per_iteration.max(1)
+    }
+
+    /// Names of the per-metric values reported for the training data, in order, built from the
+    /// configured `metric` list (upstream `Booster::GetEvalNames` over `training_metrics_`).
+    /// A metric may expand to several names (e.g. `ndcg@1`, `ndcg@2`).
+    pub fn eval_names(&self) -> Result<Vec<String>> {
+        let cfg = &self.trainer.cfg;
+        let md = &self.trainer.ds.metadata;
+        let mut names = Vec::new();
+        for name in &cfg.metric {
+            if let Some(metric) = create_metric(name, cfg, md)? {
+                names.extend(metric.names().iter().cloned());
+            }
+        }
+        Ok(names)
     }
 
     /// The model trained so far (a copy; training can continue afterwards).
