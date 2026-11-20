@@ -12,6 +12,7 @@ use lgbm_core::boosting::Gbdt;
 use lgbm_core::config::{Config, TaskType};
 use lgbm_core::io::dataset::Dataset;
 use lgbm_core::io::text_loader::{TextLoadOptions, load_text};
+use lgbm_core::predictor::{PredictConfig, PredictKind, Predictor};
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
@@ -28,8 +29,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let cfg = Config::from_str_params(&params).map_err(|e| e.to_string())?;
     match cfg.task {
         TaskType::Train => train(&cfg),
+        TaskType::Predict => predict(&cfg),
         other => Err(format!(
-            "task {other:?} is not implemented yet (only task=train is supported)"
+            "task {other:?} is not implemented yet (only task=train and task=predict are supported)"
         )),
     }
 }
@@ -105,5 +107,83 @@ fn train(cfg: &Config) -> Result<(), String> {
     };
     std::fs::write(Path::new(output), text)
         .map_err(|e| format!("writing model to {output}: {e}"))?;
+    Ok(())
+}
+
+/// The predict type upstream derives from the boolean flags (leaf index, then contributions, then
+/// raw score, else the normal transformed output).
+fn predict_kind(cfg: &Config) -> PredictKind {
+    if cfg.predict_leaf_index {
+        PredictKind::LeafIndex
+    } else if cfg.predict_contrib {
+        PredictKind::Contrib
+    } else if cfg.predict_raw_score {
+        PredictKind::RawScore
+    } else {
+        PredictKind::Normal
+    }
+}
+
+/// Format predictions as one row per line, values tab-separated in shortest round-trippable form.
+fn format_predictions(preds: &[f64], per_row: usize, num_rows: usize) -> String {
+    if per_row == 0 {
+        return "\n".repeat(num_rows);
+    }
+    let mut out = String::with_capacity(preds.len() * 8);
+    for chunk in preds.chunks(per_row) {
+        out.push_str(
+            &chunk
+                .iter()
+                .map(f64::to_string)
+                .collect::<Vec<_>>()
+                .join("\t"),
+        );
+        out.push('\n');
+    }
+    out
+}
+
+fn predict(cfg: &Config) -> Result<(), String> {
+    if cfg.input_model.is_empty() {
+        return Err("no model to predict with: set input_model=<file>".into());
+    }
+    if cfg.data.is_empty() {
+        return Err("no data to predict: set data=<file>".into());
+    }
+    let model = Gbdt::from_model_file(Path::new(&cfg.input_model)).map_err(|e| e.to_string())?;
+    let content = std::fs::read_to_string(&cfg.data)
+        .map_err(|e| format!("reading data file {}: {e}", cfg.data))?;
+    let opts = TextLoadOptions {
+        header: cfg.header,
+        label_column: &cfg.label_column,
+        weight_column: &cfg.weight_column,
+        group_column: &cfg.group_column,
+        ignore_column: &cfg.ignore_column,
+        precise_float_parser: cfg.precise_float_parser,
+        // Prediction: the model's feature count tells the loader whether a leading label column is
+        // present (detected from the column count).
+        num_features: model.num_features(),
+    };
+    let loaded = load_text(&content, &opts).map_err(|e| e.to_string())?;
+    let pred_cfg = PredictConfig {
+        kind: predict_kind(cfg),
+        start_iteration: cfg.start_iteration_predict,
+        num_iteration: cfg.num_iteration_predict,
+        pred_early_stop: cfg.pred_early_stop,
+        num_threads: cfg.num_threads.max(0) as usize,
+        ..PredictConfig::default()
+    };
+    let predictor = Predictor::new(&model, &pred_cfg).map_err(|e| e.to_string())?;
+    let preds = predictor
+        .predict_dense(&loaded.features, loaded.num_data, loaded.num_features)
+        .map_err(|e| e.to_string())?;
+    let body = format_predictions(&preds, predictor.num_pred_one_row(), loaded.num_data);
+    let output = if cfg.output_result.is_empty() {
+        "LightGBM_predict_result.txt"
+    } else {
+        &cfg.output_result
+    };
+    std::fs::write(Path::new(output), body)
+        .map_err(|e| format!("writing predictions to {output}: {e}"))?;
     Ok(())
 }
