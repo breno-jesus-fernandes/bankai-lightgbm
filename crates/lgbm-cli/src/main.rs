@@ -3,15 +3,16 @@
 //! Parameters come from a config file (`config=<file>`) and/or `key=value` command-line arguments,
 //! merged into one parameter string with the command line taking precedence, then parsed by
 //! `lgbm_core::config::Config` (which resolves aliases and reports unknown keys). `task` selects the
-//! action; `task=train` is implemented.
+//! action; `train`, `predict`, `save_binary` and `refit` are implemented.
 
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use lgbm_core::boosting::Gbdt;
+use lgbm_core::boosting::{Gbdt, GbdtTrainer};
 use lgbm_core::config::{Config, TaskType};
 use lgbm_core::io::dataset::Dataset;
-use lgbm_core::io::text_loader::{TextLoadOptions, load_text};
+use lgbm_core::io::text_loader::{LoadedText, TextLoadOptions, load_text};
 use lgbm_core::predictor::{PredictConfig, PredictKind, Predictor};
 
 fn main() -> ExitCode {
@@ -31,8 +32,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
         TaskType::Train => train(&cfg),
         TaskType::Predict => predict(&cfg),
         TaskType::SaveBinary => save_binary(&cfg),
+        TaskType::RefitTree => refit(&cfg),
         other => Err(format!(
-            "task {other:?} is not implemented yet (supported: train, predict, save_binary)"
+            "task {other:?} is not implemented yet (supported: train, predict, save_binary, refit)"
         )),
     }
 }
@@ -72,8 +74,9 @@ fn config_tokens(text: &str) -> Vec<String> {
 }
 
 /// Load the `data` text file and bin it into a training `Dataset` (column 0 is the label unless
-/// `label_column` says otherwise). Shared by `task=train` and `task=save_binary`.
-fn build_training_dataset(cfg: &Config) -> Result<Dataset, String> {
+/// `label_column` says otherwise), returning the loaded dense rows alongside it. Shared by
+/// `task=train`, `task=save_binary` and `task=refit`.
+fn build_training_dataset(cfg: &Config) -> Result<(LoadedText, Dataset), String> {
     if cfg.data.is_empty() {
         return Err("no training data: set data=<file>".into());
     }
@@ -89,7 +92,7 @@ fn build_training_dataset(cfg: &Config) -> Result<Dataset, String> {
         num_features: 0,
     };
     let loaded = load_text(&content, &opts).map_err(|e| e.to_string())?;
-    Dataset::from_dense(
+    let dataset = Dataset::from_dense(
         &loaded.features,
         loaded.num_data,
         loaded.num_features,
@@ -97,11 +100,12 @@ fn build_training_dataset(cfg: &Config) -> Result<Dataset, String> {
         cfg,
         &[],
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    Ok((loaded, dataset))
 }
 
 fn train(cfg: &Config) -> Result<(), String> {
-    let dataset = build_training_dataset(cfg)?;
+    let (_loaded, dataset) = build_training_dataset(cfg)?;
     let model = Gbdt::train(cfg, &dataset).map_err(|e| e.to_string())?;
     let text = model
         .save_model_to_string(0, 0, cfg.saved_feature_importance_type)
@@ -117,7 +121,7 @@ fn train(cfg: &Config) -> Result<(), String> {
 }
 
 fn save_binary(cfg: &Config) -> Result<(), String> {
-    let dataset = build_training_dataset(cfg)?;
+    let (_loaded, dataset) = build_training_dataset(cfg)?;
     // Upstream writes the binary dataset next to the data file as `<data>.bin`.
     let output = format!("{}.bin", cfg.data);
     // The core writer refuses to overwrite (it warns and skips); fail loudly here so a silent
@@ -128,6 +132,48 @@ fn save_binary(cfg: &Config) -> Result<(), String> {
         ));
     }
     dataset.save_binary(&output).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn refit(cfg: &Config) -> Result<(), String> {
+    if cfg.input_model.is_empty() {
+        return Err("no model to refit: set input_model=<file>".into());
+    }
+    let init = Gbdt::from_model_file(Path::new(&cfg.input_model)).map_err(|e| e.to_string())?;
+    let (loaded, dataset) = build_training_dataset(cfg)?;
+    // Refit maps each new row to the leaf it falls into in every existing tree, then recomputes the
+    // leaf outputs from the new labels (upstream `Booster::Refit`). The leaf indices come from the
+    // existing model's leaf-index prediction over the new data.
+    let leaf_cfg = PredictConfig {
+        kind: PredictKind::LeafIndex,
+        num_threads: cfg.num_threads.max(0) as usize,
+        ..PredictConfig::default()
+    };
+    let predictor = Predictor::new(&init, &leaf_cfg).map_err(|e| e.to_string())?;
+    let leaves = predictor
+        .predict_dense(&loaded.features, loaded.num_data, loaded.num_features)
+        .map_err(|e| e.to_string())?;
+    let trees_per_row = predictor.num_pred_one_row();
+    let leaf_pred: Vec<i32> = leaves.iter().map(|&v| v as i32).collect();
+    let trainer = GbdtTrainer::refit(
+        Arc::new(cfg.clone()),
+        Arc::new(dataset),
+        &init,
+        &leaf_pred,
+        trees_per_row,
+    )
+    .map_err(|e| e.to_string())?;
+    let text = trainer
+        .snapshot()
+        .save_model_to_string(0, 0, cfg.saved_feature_importance_type)
+        .map_err(|e| e.to_string())?;
+    let output = if cfg.output_model.is_empty() {
+        "LightGBM_model.txt"
+    } else {
+        &cfg.output_model
+    };
+    std::fs::write(Path::new(output), text)
+        .map_err(|e| format!("writing model to {output}: {e}"))?;
     Ok(())
 }
 

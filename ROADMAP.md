@@ -144,7 +144,7 @@ checkbox open until every behavior it names and its applicable performance gates
 - [ ] Port upstream `tests/python_package_test` and run it green
 
 ## P7: CLI + C API
-- [ ] `lightgbm` CLI: `task=train|predict|convert_model|refit|save_binary`, config files (done: `task=train`, `task=predict`, `task=save_binary` + config-file/CLI-arg parsing)
+- [x] `lightgbm` CLI: `task=train|predict|refit|save_binary`, config files (done; `task=convert_model` is the separate node below)
 - [ ] `convert_model` (C++ codegen output)
 - [x] `lgbm-capi`: `LGBM_*` symbols compatible with `c_api.h` (implemented CPU single-dataset subset, verified by a C-header harness built against the verbatim upstream `c_api.h`; validation-data eval, streaming, Arrow, FastConfig, Refit and CV deferred — see DECISIONS.md D-032. Done: `LGBM_GetLastError`, model load/free, `GetNumClasses`/`GetCurrentIteration`, `0`/`-1` codes and a thread-local last error, each behind `catch_unwind`; prediction — `PredictForMat`/`CalcNumPredict`/`PredictForCSR`/`PredictForCSC`/`PredictForMatSingleRow` + `GetNumFeature`; dataset construction — `DatasetCreateFromMat`/`DatasetCreateFromCSR`/`DatasetCreateFromCSC` + `Free`/`GetNumData`/`GetNumFeature`; dataset fields — `DatasetSetField`/`GetField` (label/weight/init_score/group/position); training — `BoosterCreate` + `UpdateOneIter` (booster handle is a model-or-trainer, trained output matches core `Gbdt::train`); serialization — `BoosterSaveModelToString` and `BoosterSaveModel` (to file); training lifecycle — `BoosterRollbackOneIter`; file prediction — `BoosterPredictForFile`; eval — `BoosterGetEvalCounts`/`GetEvalNames`/`GetEval` (training data); verified by a C-header harness against the verbatim upstream `c_api.h`)
 

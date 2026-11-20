@@ -98,8 +98,7 @@ fn core_refit(model_path: &std::path::Path, new_csv: &str) -> String {
         .unwrap();
     let ncol = predictor.num_pred_one_row();
     let leaf_pred: Vec<i32> = leaf_f.iter().map(|&v| v as i32).collect();
-    let trainer =
-        GbdtTrainer::refit(Arc::new(cfg), Arc::new(ds), &init, &leaf_pred, ncol).unwrap();
+    let trainer = GbdtTrainer::refit(Arc::new(cfg), Arc::new(ds), &init, &leaf_pred, ncol).unwrap();
     trainer.snapshot().save_model_to_string(0, 0, 0).unwrap()
 }
 
@@ -138,7 +137,11 @@ fn refit_task_matches_core() {
 
     // Sanity: refit changed the leaves (the new model differs from the original).
     let original = std::fs::read_to_string(&model_path).unwrap();
-    assert_ne!(trees_only(&got), trees_only(&original), "refit should change the leaves");
+    assert_ne!(
+        trees_only(&got),
+        trees_only(&original),
+        "refit should change the leaves"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
