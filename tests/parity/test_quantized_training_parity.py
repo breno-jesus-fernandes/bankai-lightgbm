@@ -64,6 +64,15 @@ def _categorical_data(
     return X, y, cat_idx
 
 
+def _sparse_data(seed: int = 3, n: int = 2000, f: int = 12) -> tuple[np.ndarray, np.ndarray]:
+    """Mostly-zero columns, so Exclusive Feature Bundling packs them into a multi-value group."""
+    rng = np.random.default_rng(seed)
+    X = rng.normal(size=(n, f))
+    X[rng.random(X.shape) < 0.75] = 0.0  # 75% zeros -> sparse groups bundled by EFB
+    y = X[:, 0] + 2.0 * X[:, 1] - X[:, 2] * X[:, 3] + rng.normal(scale=0.2, size=n)
+    return X, y
+
+
 def _trees(model_text: str) -> str:
     """The tree section only; the trailing parameters block echoes the flags."""
     return model_text.split("\nparameters:")[0]
@@ -116,6 +125,17 @@ def test_quantized_categorical_matches_upstream(bins: int) -> None:
         params, lightgbm.Dataset(X, y, categorical_feature=cat_idx), num_boost_round=10
     )
     ours = lgb.train(params, lgb.Dataset(X, y, categorical_feature=cat_idx), num_boost_round=10)
+    assert _trees(ours.model_to_string()) == _trees(theirs.model_to_string())
+
+
+@pytest.mark.parametrize("bins", [4, 8, 16])
+def test_quantized_sparse_matches_upstream(bins: int) -> None:
+    """Sparse columns bundle into a multi-value feature group; the integer histogram is built
+    over its per-row bins (upstream `ConstructHistogramsMultiVal`). Trees must match upstream."""
+    X, y = _sparse_data()
+    params = {**BASE, "num_grad_quant_bins": bins}
+    theirs = lightgbm.train(params, lightgbm.Dataset(X, y), num_boost_round=10)
+    ours = lgb.train(params, lgb.Dataset(X, y), num_boost_round=10)
     assert _trees(ours.model_to_string()) == _trees(theirs.model_to_string())
 
 
