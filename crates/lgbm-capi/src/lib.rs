@@ -23,6 +23,8 @@ const C_API_ERROR: c_int = -1;
 // upstream: include/LightGBM/c_api.h `C_API_DTYPE_*` and `C_API_PREDICT_*`.
 const C_API_DTYPE_FLOAT32: c_int = 0;
 const C_API_DTYPE_FLOAT64: c_int = 1;
+const C_API_DTYPE_INT32: c_int = 2;
+const C_API_DTYPE_INT64: c_int = 3;
 const C_API_PREDICT_NORMAL: c_int = 0;
 const C_API_PREDICT_RAW_SCORE: c_int = 1;
 const C_API_PREDICT_LEAF_INDEX: c_int = 2;
@@ -376,6 +378,117 @@ pub unsafe extern "C" fn LGBM_BoosterPredictForMat(
             .map_err(|e| e.to_string())?;
         // SAFETY: the caller sized `out_result` by `LGBM_BoosterCalcNumPredict`, which returns
         // this same length for the same shape and predict type.
+        unsafe { std::ptr::copy_nonoverlapping(out.as_ptr(), out_result, out.len()) };
+        // SAFETY: checked non-null above; writable per the contract.
+        unsafe { *out_len = out.len() as i64 };
+        Ok(())
+    })
+}
+
+/// upstream: `LGBM_BoosterPredictForCSR`. Predict a CSR matrix (`nindptr` row pointers of
+/// `indptr_type`, `nelem` `int32` column indices and `data_type` values) and write
+/// `(nindptr - 1) * num_pred_one_row` doubles to `out_result`.
+///
+/// The prediction `parameter` string is parsed in a later slice; only empty/null is accepted.
+///
+/// # Safety
+/// `handle` must be a live booster handle. `indptr` must point to `nindptr` elements of
+/// `indptr_type`; `indices` and `data` to `nelem` elements each (`int32` and `data_type`).
+/// `out_result` must hold the length `LGBM_BoosterCalcNumPredict` reports for `nindptr - 1` rows,
+/// and `out_len` / `parameter` must be valid (`parameter` null or a C string).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn LGBM_BoosterPredictForCSR(
+    handle: *mut c_void,
+    indptr: *const c_void,
+    indptr_type: c_int,
+    indices: *const i32,
+    data: *const c_void,
+    data_type: c_int,
+    nindptr: i64,
+    nelem: i64,
+    num_col: i64,
+    predict_type: c_int,
+    start_iteration: c_int,
+    num_iteration: c_int,
+    parameter: *const c_char,
+    out_len: *mut i64,
+    out_result: *mut f64,
+) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let booster = unsafe { booster_ref(handle) }?;
+        if out_len.is_null() || out_result.is_null() {
+            return Err("out_len and out_result must not be null".into());
+        }
+        if nindptr < 1 {
+            return Err("nindptr must be at least 1".into());
+        }
+        if nelem < 0 || num_col < 0 {
+            return Err("nelem and num_col must not be negative".into());
+        }
+        if !parameter.is_null() {
+            // SAFETY: non-null per the branch; a valid C string per the contract.
+            let param = unsafe { cstr_to_str(parameter, "parameter") }?;
+            if !param.trim().is_empty() {
+                return Err("non-empty prediction parameter string is not supported yet".into());
+            }
+        }
+        let (nindptr, nelem) = (nindptr as usize, nelem as usize);
+        if indptr.is_null() {
+            return Err("indptr must not be null".into());
+        }
+        if nelem != 0 && (indices.is_null() || data.is_null()) {
+            return Err("indices and data must not be null when nelem != 0".into());
+        }
+        let indptr_vec: Vec<i64> = match indptr_type {
+            C_API_DTYPE_INT32 => {
+                // SAFETY: `indptr` points to `nindptr` i32 values (checked non-null).
+                unsafe { std::slice::from_raw_parts(indptr.cast::<i32>(), nindptr) }
+                    .iter()
+                    .map(|&x| i64::from(x))
+                    .collect()
+            }
+            C_API_DTYPE_INT64 => {
+                // SAFETY: `indptr` points to `nindptr` i64 values (checked non-null).
+                unsafe { std::slice::from_raw_parts(indptr.cast::<i64>(), nindptr) }.to_vec()
+            }
+            other => {
+                return Err(format!(
+                    "unsupported indptr_type {other} (only int32=2 and int64=3)"
+                ));
+            }
+        };
+        // SAFETY: `indices` points to `nelem` i32 values (checked non-null when `nelem != 0`).
+        let idx: &[i32] = if nelem == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(indices, nelem) }
+        };
+        let values: Vec<f64> = match data_type {
+            C_API_DTYPE_FLOAT64 => {
+                // SAFETY: `data` points to `nelem` f64 values (checked non-null when `nelem != 0`).
+                unsafe { std::slice::from_raw_parts(data.cast::<f64>(), nelem) }.to_vec()
+            }
+            C_API_DTYPE_FLOAT32 => {
+                // SAFETY: `data` points to `nelem` f32 values (checked non-null when `nelem != 0`).
+                unsafe { std::slice::from_raw_parts(data.cast::<f32>(), nelem) }
+                    .iter()
+                    .map(|&x| f64::from(x))
+                    .collect()
+            }
+            other => {
+                return Err(format!(
+                    "unsupported data_type {other} (only float32=0 and float64=1)"
+                ));
+            }
+        };
+        let cfg = predict_config(predict_type, start_iteration, num_iteration)?;
+        let predictor = Predictor::new(&booster.model, &cfg).map_err(|e| e.to_string())?;
+        let out = predictor
+            .predict_csr(&indptr_vec, idx, &values)
+            .map_err(|e| e.to_string())?;
+        // SAFETY: the caller sized `out_result` by `LGBM_BoosterCalcNumPredict` for these rows.
         unsafe { std::ptr::copy_nonoverlapping(out.as_ptr(), out_result, out.len()) };
         // SAFETY: checked non-null above; writable per the contract.
         unsafe { *out_len = out.len() as i64 };
