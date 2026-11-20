@@ -924,3 +924,31 @@ Entry format:
   -D warnings clean; scripts/check.sh ended "all green" (2419 Python tests passed).
   Touches `treelearner/`, so CI runs the interleaved benchmark (codegen-units=1).
 - Status: active
+
+## D-030: Row-wise layout in quantized training (T2.7, slice 9)
+
+- Date: 2026-11-19
+- Choice: support `force_row_wise` under `use_quantized_grad` by exploiting the
+  layout-independence of the integer histogram. The per-bin integer sums are identical
+  whether the data is read column-major or row-major (upstream notes column-wise and
+  row-wise build bit-identical histograms), so no row-major integer kernel is needed.
+- Two row-wise sub-cases (as set up in `new`):
+  - dense row-wise (`dense_row_wise`): all groups are dense single-value, still stored
+    in `ds.data`, and `multi_val` is `None`. `construct_int_histograms`'s existing dense
+    per-group loop reads `ds.data[gi]` directly and produces the correct sums; the
+    row-major copy (`row_major`) is a performance detail the integer path ignores.
+  - row-wise with a multi-value component (`all_row_wise`): `multi_val` is `None` and
+    `all_feature_bins` is a single `MultiValBin` over every feature. The whole integer
+    histogram is accumulated from it via `MultiValBin::accumulate_int` (added in D-029),
+    mirroring the double path's early `all.construct(...)` branch.
+- Fallback: only stochastic rounding remains unsupported (falls back to full
+  precision). Every CPU layout and objective of the deterministic nearest-rounding path
+  is now covered.
+- Oracle: `tests/parity/test_quantized_training_parity.py::
+  test_quantized_row_wise_matches_upstream` for dense and sparse `force_row_wise`,
+  tree-by-tree against `lightgbm==4.7.0`. Red first (row-wise fell back), green after.
+- SPEC ref: SPEC-NUM-6, SPEC-NUM-2, D-013 (layout equivalence).
+- Validation: cargo fmt --all --check, cargo clippy --workspace --all-targets
+  -D warnings clean; scripts/check.sh ended "all green" (2421 Python tests passed).
+  Touches `treelearner/`, so CI runs the interleaved benchmark (codegen-units=1).
+- Status: active

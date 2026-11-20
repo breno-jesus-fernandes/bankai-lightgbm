@@ -484,19 +484,16 @@ impl SerialTreeLearner {
             num_data,
         )?;
         // The quantized integer path is wired for the deterministic nearest-rounding slice:
-        // numeric and categorical features on the column-wise layout (dense single-value groups
-        // and a sparse/dense multi-value group), with leaf renewal (`renew_int_grad_tree_output`).
-        // Configs it does not cover yet (stochastic rounding — its distributions are
-        // implementation-defined across libc++/libstdc++; the row-wise layout) fall back to
-        // full-precision training, as before this slice. This is not a silent drop of the
-        // parameter: `use_quantized_grad` is honoured where it is implemented and otherwise behaves
-        // as it did while T2.7 was unimplemented. See D-026.
+        // numeric and categorical features on either the column-wise or the row-wise layout, with
+        // leaf renewal (`renew_int_grad_tree_output`). Only stochastic rounding is still
+        // unsupported — its `uniform_real`/`uniform_int` distributions are implementation-defined
+        // across libc++/libstdc++ — and falls back to full-precision training, as before this
+        // slice. This is not a silent drop of the parameter: `use_quantized_grad` is honoured where
+        // it is implemented and otherwise behaves as it did while T2.7 was unimplemented. See
+        // D-026.
         let bins = cfg.num_grad_quant_bins;
-        let quant_supported = cfg.use_quantized_grad
-            && !cfg.stochastic_rounding
-            && (2..=127).contains(&bins)
-            && !row_wise
-            && all_feature.is_none();
+        let quant_supported =
+            cfg.use_quantized_grad && !cfg.stochastic_rounding && (2..=127).contains(&bins);
         let quant = if quant_supported {
             let discretizer = GradientDiscretizer::new(num_data, bins as u8, is_constant_hessian)?;
             Some(QuantState {
@@ -1079,6 +1076,23 @@ impl SerialTreeLearner {
             }
             _ => None,
         };
+        // Row-wise with a multi-value component: one combined view over every feature, so the
+        // whole integer histogram is accumulated from it (upstream `ConstructHistogramsMultiVal`
+        // over `GetMultiBinFromAllFeatures`). The histogram value is layout-independent, so this
+        // matches the column-wise path's sums.
+        if let Some(all) = self.all_feature_bins.as_ref() {
+            let Some(q) = self.quant.as_mut() else {
+                unreachable!("construct_int_histograms is only called on the quantized path")
+            };
+            let packed = q.discretizer.packed_gradients_hessians();
+            all.accumulate_int(
+                indices.as_deref(),
+                leaf_cnt,
+                &|row| packed[row],
+                &mut q.int_slots[slot],
+            );
+            return;
+        }
         // Start bin of each used dense single-value group, and of the multi-value group (same
         // bin layout as the double pool). The multi-value group is accumulated separately.
         let mut jobs: Vec<(usize, usize, usize)> = Vec::new(); // (group, start bin, num_bin)
