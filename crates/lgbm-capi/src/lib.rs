@@ -648,3 +648,26 @@ pub unsafe extern "C" fn LGBM_BoosterPredictForMatSingleRow(
         )
     }
 }
+
+/// upstream: `LGBM_BoosterGetNumFeature`. The number of features the model expects.
+///
+/// # Safety
+/// `handle` must be a live booster handle; `out_len` a valid writable pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LGBM_BoosterGetNumFeature(
+    handle: *mut c_void,
+    out_len: *mut c_int,
+) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let booster = unsafe { booster_ref(handle) }?;
+        if out_len.is_null() {
+            return Err("out_len must not be null".into());
+        }
+        let value = c_int::try_from(booster.model.num_features())
+            .map_err(|_| "num_features does not fit in an int".to_string())?;
+        // SAFETY: checked non-null just above; writable per the contract.
+        unsafe { *out_len = value };
+        Ok(())
+    })
+}
