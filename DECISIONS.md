@@ -952,3 +952,48 @@ Entry format:
   -D warnings clean; scripts/check.sh ended "all green" (2421 Python tests passed).
   Touches `treelearner/`, so CI runs the interleaved benchmark (codegen-units=1).
 - Status: active
+
+## D-031: Stochastic rounding pinned to libc++ (T2.7, slice 10)
+
+- Date: 2026-11-19
+- Choice: implement `stochastic_rounding=true` (the default of `use_quantized_grad`)
+  by porting libc++'s `std::uniform_real_distribution<double>(0,1)` and
+  `std::uniform_int_distribution<int>(0,n)` over the mt19937 engine (D-023), and
+  pin that behaviour to libc++ — the standard library of the host where fixtures
+  and the dev wheel are built (macOS). User-authorized direction.
+- Why a pin is unavoidable: the C++ standard does not specify how these
+  distributions turn engine output into values, so libc++ (macOS), libstdc++
+  (Linux) and MSVC (Windows) each produce different sequences from the same engine
+  and seed. No single implementation can be bit-exact with the `lightgbm` wheel on
+  every platform, because that wheel's distributions follow whatever standard
+  library built it. This mirrors the platform-specific bit-exactness policy already
+  in AGENTS.md section 4 (`tests/fixtures/platform.json`).
+- libc++ specifics reproduced (validated against clang/libc++ `<random>` reference
+  values in `tests/mt19937.rs`):
+  - `uniform_real_distribution<double>(0,1)` = `generate_canonical<double,53>`: two
+    32-bit draws `g1, g2`, value `(g1 + g2 * 2^32) / 2^64`, with the additions and
+    the final division in that order so the double rounding matches.
+  - `uniform_int_distribution<int>(0,n)`: the low `w` bits of one draw (`w` the
+    width covering `n+1`, bumped when `n+1` is not a clean power of two within it),
+    rejecting values `>= n+1`. `n+1` fits in `u32`, so one draw per attempt.
+- Discretizer: `init_stochastic` precomputes per-row `[0,1)` noise once (upstream
+  `Init`), block-seeded exactly as upstream (`mt19937(seed+b)` for gradients,
+  `mt19937(seed+b+num_threads)` for Hessians, blocks from `BlockInfo(num_threads,
+  n, 512)`), so the values match upstream for the same thread count.
+  `discretize_stochastic` draws the per-tree rotation offset
+  (`uniform_int(0,num_data)`) and rounds each derivative by adding the rotated
+  noise before truncation, with the fused `madd` the nearest path already uses.
+- Scope: parity validated at `num_threads=1` (regression and binary). The noise is
+  block-seeded by thread count exactly as upstream, so other fixed thread counts are
+  expected to match too, but are not yet parity-tested. The parity test is guarded
+  to macOS (`sys.platform == "darwin"`); Linux/Windows CI skip it. Only an
+  out-of-range `num_grad_quant_bins` still falls back to full precision.
+- Oracle: `tests/parity/test_quantized_training_parity.py::
+  test_quantized_stochastic_rounding_matches_upstream` (macOS), tree-by-tree against
+  `lightgbm==4.7.0`; `tests/mt19937.rs` for the distributions.
+- SPEC ref: SPEC-NUM-9 (extended for the quantized RNG, D-023), SPEC-NUM-2,
+  AGENTS.md section 4 (platform-specific bit-exactness).
+- Validation: cargo fmt --all --check, cargo clippy --workspace --all-targets
+  -D warnings clean; scripts/check.sh ended "all green" (2423 Python tests passed,
+  the 2 stochastic parity cases among them on this macOS host).
+- Status: active. Marks T2.7 complete for CPU.
