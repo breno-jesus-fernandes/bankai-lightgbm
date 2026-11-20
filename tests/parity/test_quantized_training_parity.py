@@ -139,6 +139,18 @@ def test_quantized_sparse_matches_upstream(bins: int) -> None:
     assert _trees(ours.model_to_string()) == _trees(theirs.model_to_string())
 
 
+@pytest.mark.parametrize("sparse", [False, True])
+def test_quantized_row_wise_matches_upstream(sparse: bool) -> None:
+    """`force_row_wise` builds histograms row-major. The quantized integer sums are layout
+    independent, so the dense (row-major copy) and sparse (combined all-feature view) row-wise
+    paths must match upstream, and the full-precision / column-wise models too."""
+    X, y = _sparse_data() if sparse else _data()
+    params = {**BASE, "num_grad_quant_bins": 8, "force_row_wise": True}
+    theirs = lightgbm.train(params, lightgbm.Dataset(X, y), num_boost_round=10)
+    ours = lgb.train(params, lgb.Dataset(X, y), num_boost_round=10)
+    assert _trees(ours.model_to_string()) == _trees(theirs.model_to_string())
+
+
 def test_quantized_changes_the_model() -> None:
     """Quantized training is a distinct path: it must not coincide with full precision."""
     X, y = _data()
