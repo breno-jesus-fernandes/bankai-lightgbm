@@ -606,3 +606,45 @@ pub unsafe extern "C" fn LGBM_BoosterPredictForCSC(
         Ok(())
     })
 }
+
+/// upstream: `LGBM_BoosterPredictForMatSingleRow`. Predict a single dense row of `ncol` values
+/// (`float32`/`float64`) and write `num_pred_one_row` doubles to `out_result`. Equivalent to
+/// [`LGBM_BoosterPredictForMat`] with one row.
+///
+/// # Safety
+/// `handle` must be a live booster handle; `data` must point to `ncol` elements of `data_type`;
+/// `out_result` must hold `num_pred_one_row` doubles; `out_len` / `parameter` must be valid.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn LGBM_BoosterPredictForMatSingleRow(
+    handle: *mut c_void,
+    data: *const c_void,
+    data_type: c_int,
+    ncol: c_int,
+    is_row_major: c_int,
+    predict_type: c_int,
+    start_iteration: c_int,
+    num_iteration: c_int,
+    parameter: *const c_char,
+    out_len: *mut i64,
+    out_result: *mut f64,
+) -> c_int {
+    // A single row is one row of the dense matrix path; `is_row_major` does not matter for it.
+    // SAFETY: the contract matches `LGBM_BoosterPredictForMat` with `nrow == 1`.
+    unsafe {
+        LGBM_BoosterPredictForMat(
+            handle,
+            data,
+            data_type,
+            1,
+            ncol,
+            is_row_major,
+            predict_type,
+            start_iteration,
+            num_iteration,
+            parameter,
+            out_len,
+            out_result,
+        )
+    }
+}
