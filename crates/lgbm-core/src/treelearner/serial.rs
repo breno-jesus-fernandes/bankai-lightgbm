@@ -483,19 +483,22 @@ impl SerialTreeLearner {
             num_leaves,
             num_data,
         )?;
-        // The quantized integer path is wired for the deterministic nearest-rounding slice:
-        // numeric and categorical features on either the column-wise or the row-wise layout, with
-        // leaf renewal (`renew_int_grad_tree_output`). Only stochastic rounding is still
-        // unsupported — its `uniform_real`/`uniform_int` distributions are implementation-defined
-        // across libc++/libstdc++ — and falls back to full-precision training, as before this
-        // slice. This is not a silent drop of the parameter: `use_quantized_grad` is honoured where
-        // it is implemented and otherwise behaves as it did while T2.7 was unimplemented. See
-        // D-026.
+        // The quantized integer path covers numeric and categorical features on either the
+        // column-wise or the row-wise layout, with leaf renewal (`renew_int_grad_tree_output`) and
+        // both nearest and stochastic rounding. Stochastic rounding's `uniform_real`/`uniform_int`
+        // distributions are implementation-defined across libc++/libstdc++; bankai pins libc++
+        // (the host/fixture stdlib) and is bit-exact only there (D-026, D-031). Only an
+        // out-of-range `num_grad_quant_bins` now falls back to full precision.
         let bins = cfg.num_grad_quant_bins;
-        let quant_supported =
-            cfg.use_quantized_grad && !cfg.stochastic_rounding && (2..=127).contains(&bins);
+        let quant_supported = cfg.use_quantized_grad && (2..=127).contains(&bins);
         let quant = if quant_supported {
-            let discretizer = GradientDiscretizer::new(num_data, bins as u8, is_constant_hessian)?;
+            let mut discretizer =
+                GradientDiscretizer::new(num_data, bins as u8, is_constant_hessian)?;
+            if cfg.stochastic_rounding {
+                // Precompute the per-row rounding noise once (upstream `Init`), seeded from the
+                // config seed and the effective thread count — see `init_stochastic`.
+                discretizer.init_stochastic(cfg.seed as u32, num_threads);
+            }
             Some(QuantState {
                 discretizer,
                 grad_scale: 0.0,
@@ -677,11 +680,16 @@ impl SerialTreeLearner {
         }
         // upstream: `SerialTreeLearner::Train` calls `DiscretizeGradients` before `BeforeTrain`.
         if let Some(q) = self.quant.as_mut() {
-            // Nearest rounding only; stochastic rounding is refused in `new`. Degenerate
-            // gradients (nonfinite, or a zero maximum) are an unsupported edge upstream turns
-            // into undefined float-to-int casts (SPEC-NUM-10); warn and keep the previous
-            // discretization rather than panic in library code.
-            match q.discretizer.discretize_nearest(gradients, hessians) {
+            // Stochastic rounding draws per-row noise (set up in `new`); otherwise nearest.
+            // Degenerate gradients (nonfinite, or a zero maximum) are an unsupported edge
+            // upstream turns into undefined float-to-int casts (SPEC-NUM-10); warn and keep the
+            // previous discretization rather than panic in library code.
+            let result = if self.cfg.stochastic_rounding {
+                q.discretizer.discretize_stochastic(gradients, hessians)
+            } else {
+                q.discretizer.discretize_nearest(gradients, hessians)
+            };
+            match result {
                 Ok(()) => {
                     q.grad_scale = q.discretizer.gradient_scale();
                     q.hess_scale = q.discretizer.hessian_scale();
