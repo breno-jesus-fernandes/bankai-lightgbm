@@ -348,6 +348,53 @@ impl MultiValBin {
         }
     }
 
+    /// Accumulate the quantized integer `(gradient_sum, Hessian_sum)` of rows `0..num_rows`
+    /// into `out` (one pair per bin, zeroed here), for the quantized training path.
+    ///
+    /// `packed_at(row)` is the row's packed `int16` derivative (signed `int8` gradient high
+    /// byte, `uint8` Hessian low byte). Integer sums are exact and order-independent, so a
+    /// single sequential pass needs no block merge.
+    pub fn accumulate_int(
+        &self,
+        rows: Option<&[i32]>,
+        num_rows: usize,
+        packed_at: &impl Fn(usize) -> i16,
+        out: &mut [(i64, i64)],
+    ) {
+        let out = &mut out[..self.num_bin()];
+        for cell in out.iter_mut() {
+            *cell = (0, 0);
+        }
+        for i in 0..num_rows {
+            let row = rows.map_or(i, |r| r[i] as usize);
+            let p = packed_at(row);
+            let grad = i64::from((p >> 8) as i8);
+            let hess = i64::from((p & 0xff) as u8);
+            match self {
+                MultiValBin::Sparse { row_ptr, data, .. } => {
+                    for &bin in &data[row_ptr[row]..row_ptr[row + 1]] {
+                        let cell = &mut out[bin as usize];
+                        cell.0 += grad;
+                        cell.1 += hess;
+                    }
+                }
+                MultiValBin::Dense {
+                    num_feature,
+                    data,
+                    offsets,
+                    ..
+                } => {
+                    let base = row * num_feature;
+                    for (j, &bin) in data[base..base + num_feature].iter().enumerate() {
+                        let cell = &mut out[(bin + offsets[j]) as usize];
+                        cell.0 += grad;
+                        cell.1 += hess;
+                    }
+                }
+            }
+        }
+    }
+
     /// The group's histogram (`out`, zeroed here) over `num_rows` rows, split into
     /// upstream's data blocks for `num_threads` threads: block 0 is written in place and
     /// later blocks are added to it in block order (upstream
