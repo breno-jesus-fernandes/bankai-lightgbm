@@ -1336,6 +1336,26 @@ pub unsafe extern "C" fn LGBM_BoosterUpdateOneIter(
     })
 }
 
+/// upstream: `LGBM_BoosterRollbackOneIter`. Drop the last boosting iteration's trees and their
+/// contribution to the training scores (core's `GbdtTrainer::rollback_one_iter`). A booster loaded
+/// from a model has no training state and is rejected.
+///
+/// # Safety
+/// `handle` must be a live training booster handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LGBM_BoosterRollbackOneIter(handle: *mut c_void) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let booster = unsafe { booster_mut(handle) }?;
+        match booster {
+            CBooster::Trainer(trainer) => trainer.rollback_one_iter().map_err(|e| e.to_string()),
+            CBooster::Model(_) => {
+                Err("booster was loaded from a model and cannot be trained".into())
+            }
+        }
+    })
+}
+
 /// upstream: `LGBM_BoosterSaveModelToString`. Serialize the model (loaded or in training) to its
 /// text form, following the two-call buffer protocol: `out_len` is always set to the length
 /// needed including the trailing NUL, and the text is written to `out_str` only when
