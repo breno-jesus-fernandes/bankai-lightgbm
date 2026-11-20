@@ -171,13 +171,17 @@ fn save_model_to_string_works_on_a_loaded_model() {
     let mut num_iterations: c_int = -1;
     let mut handle: *mut c_void = ptr::null_mut();
     // SAFETY: valid C string and writable out-pointers.
-    let rc =
-        unsafe { LGBM_BoosterCreateFromModelfile(c_path.as_ptr(), &mut num_iterations, &mut handle) };
+    let rc = unsafe {
+        LGBM_BoosterCreateFromModelfile(c_path.as_ptr(), &mut num_iterations, &mut handle)
+    };
     assert_eq!(rc, 0, "load failed: {}", last_error());
 
     // The serialized model reloads into an equivalent core model.
     let got = save_to_string(handle);
-    assert!(Gbdt::from_model_string(&got).is_ok(), "reserialized model did not parse");
+    assert!(
+        Gbdt::from_model_string(&got).is_ok(),
+        "reserialized model did not parse"
+    );
 
     // SAFETY: freed once.
     assert_eq!(unsafe { LGBM_BoosterFree(handle) }, 0);
@@ -207,7 +211,10 @@ fn too_small_buffer_reports_length_without_writing() {
     };
     assert_eq!(rc, 0, "query failed: {}", last_error());
     assert!(needed > small.len() as i64);
-    assert_eq!(small, [0xAAu8; 4], "buffer must be untouched when too small");
+    assert_eq!(
+        small, [0xAAu8; 4],
+        "buffer must be untouched when too small"
+    );
 
     // SAFETY: handles freed once each.
     assert_eq!(unsafe { LGBM_BoosterFree(booster) }, 0);

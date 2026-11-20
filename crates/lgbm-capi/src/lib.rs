@@ -1335,3 +1335,49 @@ pub unsafe extern "C" fn LGBM_BoosterUpdateOneIter(
         }
     })
 }
+
+/// upstream: `LGBM_BoosterSaveModelToString`. Serialize the model (loaded or in training) to its
+/// text form, following the two-call buffer protocol: `out_len` is always set to the length
+/// needed including the trailing NUL, and the text is written to `out_str` only when
+/// `buffer_len >= out_len`. `num_iteration <= 0` saves all iterations; `feature_importance_type`
+/// is `C_API_FEATURE_IMPORTANCE_SPLIT` (0) or `..._GAIN` (1).
+///
+/// # Safety
+/// `handle` must be a live booster handle; `out_len` a valid writable pointer; `out_str` must be
+/// writable for `buffer_len` bytes (or null when `buffer_len` is 0).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn LGBM_BoosterSaveModelToString(
+    handle: *mut c_void,
+    start_iteration: c_int,
+    num_iteration: c_int,
+    feature_importance_type: c_int,
+    buffer_len: i64,
+    out_len: *mut i64,
+    out_str: *mut c_char,
+) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let booster = unsafe { booster_ref(handle) }?;
+        if out_len.is_null() {
+            return Err("out_len must not be null".into());
+        }
+        let text = booster
+            .with_model(|model| {
+                model.save_model_to_string(start_iteration, num_iteration, feature_importance_type)
+            })
+            .map_err(|e| e.to_string())?;
+        let needed =
+            i64::try_from(text.len() + 1).map_err(|_| "model text too large".to_string())?;
+        // SAFETY: checked non-null above; writable per the contract.
+        unsafe { *out_len = needed };
+        if buffer_len >= needed && !out_str.is_null() {
+            // SAFETY: `out_str` is writable for `buffer_len >= needed` bytes; the NUL fits.
+            unsafe {
+                std::ptr::copy_nonoverlapping(text.as_ptr().cast::<c_char>(), out_str, text.len());
+                *out_str.add(text.len()) = 0;
+            }
+        }
+        Ok(())
+    })
+}
