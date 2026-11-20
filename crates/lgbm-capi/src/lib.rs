@@ -1381,3 +1381,33 @@ pub unsafe extern "C" fn LGBM_BoosterSaveModelToString(
         Ok(())
     })
 }
+
+/// upstream: `LGBM_BoosterSaveModel`. Serialize the model (loaded or in training) to its text form
+/// and write it to `filename`. `num_iteration <= 0` saves all iterations; `feature_importance_type`
+/// is `C_API_FEATURE_IMPORTANCE_SPLIT` (0) or `..._GAIN` (1). The file holds the same bytes
+/// [`LGBM_BoosterSaveModelToString`] produces, without a trailing NUL.
+///
+/// # Safety
+/// `handle` must be a live booster handle and `filename` a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LGBM_BoosterSaveModel(
+    handle: *mut c_void,
+    start_iteration: c_int,
+    num_iteration: c_int,
+    feature_importance_type: c_int,
+    filename: *const c_char,
+) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let booster = unsafe { booster_ref(handle) }?;
+        // SAFETY: forwarded from this function's safety contract.
+        let path = unsafe { cstr_to_str(filename, "filename") }?;
+        let text = booster
+            .with_model(|model| {
+                model.save_model_to_string(start_iteration, num_iteration, feature_importance_type)
+            })
+            .map_err(|e| e.to_string())?;
+        std::fs::write(Path::new(path), text).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+}
