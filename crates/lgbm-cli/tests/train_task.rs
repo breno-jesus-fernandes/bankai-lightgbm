@@ -142,7 +142,10 @@ fn cli_args_override_the_config_file() {
     let got = std::fs::read_to_string(&model_path).unwrap();
     // 8 iterations (CLI) must win: the model has 8 trees, not 3.
     let tree_count = got.matches("\nTree=").count();
-    assert_eq!(tree_count, 8, "CLI num_iterations=8 should override the file's 3");
+    assert_eq!(
+        tree_count, 8,
+        "CLI num_iterations=8 should override the file's 3"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
