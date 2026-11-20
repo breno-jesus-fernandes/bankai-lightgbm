@@ -15,7 +15,7 @@ use std::path::Path;
 use lgbm_core::boosting::Gbdt;
 use lgbm_core::config::Config;
 use lgbm_core::io::dataset::Dataset;
-use lgbm_core::io::sparse::CsrMatrix;
+use lgbm_core::io::sparse::{CsrMatrix, csc_to_csr};
 use lgbm_core::predictor::{PredictConfig, PredictKind, Predictor};
 
 /// upstream: `API_END()` returns `0` on success.
@@ -893,8 +893,123 @@ pub unsafe extern "C" fn LGBM_DatasetCreateFromCSR(
     })
 }
 
+/// upstream: `LGBM_DatasetCreateFromCSC`. Bin a CSC matrix (`ncol_ptr` column pointers of
+/// `col_ptr_type`, `nelem` `int32` row indices and `data_type` values, over `num_row` rows) into
+/// a new dataset. The columns are gathered into CSR rows in upstream's column-walk order
+/// (`csc_to_csr`) and binned without densifying (core's `Dataset::from_csr`), using the
+/// `parameters` config string. The label and other fields are set separately; `reference`
+/// (sharing another dataset's bin mappers) is deferred, so it must be null.
+///
+/// # Safety
+/// `col_ptr` must point to `ncol_ptr` elements of `col_ptr_type`; `indices` and `data` to `nelem`
+/// elements each (`int32` and `data_type`); `parameters` is null or a C string; `reference` must
+/// be null; `out` must be a valid writable pointer.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn LGBM_DatasetCreateFromCSC(
+    col_ptr: *const c_void,
+    col_ptr_type: c_int,
+    indices: *const i32,
+    data: *const c_void,
+    data_type: c_int,
+    ncol_ptr: i64,
+    nelem: i64,
+    num_row: i64,
+    parameters: *const c_char,
+    reference: *const c_void,
+    out: *mut *mut c_void,
+) -> c_int {
+    guard(|| {
+        if out.is_null() {
+            return Err("out dataset handle pointer must not be null".into());
+        }
+        if !reference.is_null() {
+            return Err("dataset reference (shared bin mappers) is not supported yet".into());
+        }
+        if ncol_ptr < 1 {
+            return Err("ncol_ptr must be at least 1".into());
+        }
+        if nelem < 0 || num_row < 0 {
+            return Err("nelem and num_row must not be negative".into());
+        }
+        let params = if parameters.is_null() {
+            ""
+        } else {
+            // SAFETY: non-null per the branch; a valid C string per the contract.
+            unsafe { cstr_to_str(parameters, "parameters") }?
+        };
+        let cfg = Config::from_str_params(params).map_err(|e| e.to_string())?;
+        let categorical = parse_categorical(&cfg.categorical_feature)?;
+        let (ncol_ptr, nelem, nrow) = (ncol_ptr as usize, nelem as usize, num_row as usize);
+        if col_ptr.is_null() {
+            return Err("col_ptr must not be null".into());
+        }
+        if nelem != 0 && (indices.is_null() || data.is_null()) {
+            return Err("indices and data must not be null when nelem != 0".into());
+        }
+        let col_ptr_vec: Vec<i64> = match col_ptr_type {
+            C_API_DTYPE_INT32 => {
+                // SAFETY: `col_ptr` points to `ncol_ptr` i32 values (checked non-null).
+                unsafe { std::slice::from_raw_parts(col_ptr.cast::<i32>(), ncol_ptr) }
+                    .iter()
+                    .map(|&x| i64::from(x))
+                    .collect()
+            }
+            C_API_DTYPE_INT64 => {
+                // SAFETY: `col_ptr` points to `ncol_ptr` i64 values (checked non-null).
+                unsafe { std::slice::from_raw_parts(col_ptr.cast::<i64>(), ncol_ptr) }.to_vec()
+            }
+            other => {
+                return Err(format!(
+                    "unsupported col_ptr_type {other} (only int32=2 and int64=3)"
+                ));
+            }
+        };
+        // SAFETY: `indices` points to `nelem` i32 values (checked non-null when `nelem != 0`).
+        let idx: &[i32] = if nelem == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(indices, nelem) }
+        };
+        let values: Vec<f64> = match data_type {
+            C_API_DTYPE_FLOAT64 => {
+                // SAFETY: `data` points to `nelem` f64 values (checked non-null when `nelem != 0`).
+                unsafe { std::slice::from_raw_parts(data.cast::<f64>(), nelem) }.to_vec()
+            }
+            C_API_DTYPE_FLOAT32 => {
+                // SAFETY: `data` points to `nelem` f32 values (checked non-null when `nelem != 0`).
+                unsafe { std::slice::from_raw_parts(data.cast::<f32>(), nelem) }
+                    .iter()
+                    .map(|&x| f64::from(x))
+                    .collect()
+            }
+            other => {
+                return Err(format!(
+                    "unsupported data_type {other} (only float32=0 and float64=1)"
+                ));
+            }
+        };
+        // A CSC matrix is the CSR form of its transpose: gather the columns into CSR rows, keeping
+        // upstream's column-walk order, then bin with the CSR path. `num_row` fixes the row count,
+        // and the column count is `ncol_ptr - 1`.
+        let ncol = ncol_ptr - 1;
+        let (indptr, csr_idx, csr_vals) =
+            csc_to_csr(&col_ptr_vec, idx, &values, nrow).map_err(|e| e.to_string())?;
+        let m = CsrMatrix::new(&indptr, &csr_idx, &csr_vals, ncol).map_err(|e| e.to_string())?;
+        // The label is set separately in the C API; a zero placeholder keeps the length check
+        // happy and does not affect the bin mappers.
+        let label = vec![0.0f64; nrow];
+        let dataset =
+            Dataset::from_csr(&m, &label, &cfg, &categorical).map_err(|e| e.to_string())?;
+        let boxed = Box::new(CDataset { dataset });
+        // SAFETY: `out` is non-null (checked) and writable per the contract.
+        unsafe { *out = Box::into_raw(boxed).cast::<c_void>() };
+        Ok(())
+    })
+}
+
 /// upstream: `LGBM_DatasetFree`. Releases a handle from a dataset-create call
-/// (`LGBM_DatasetCreateFromMat` or `LGBM_DatasetCreateFromCSR`).
+/// (`LGBM_DatasetCreateFromMat`, `LGBM_DatasetCreateFromCSR` or `LGBM_DatasetCreateFromCSC`).
 ///
 /// # Safety
 /// `handle` must be a live pointer from a dataset-create call, freed at most once.
