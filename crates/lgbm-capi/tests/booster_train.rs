@@ -170,8 +170,9 @@ fn update_one_iter_rejects_a_loaded_model_booster() {
     let mut num_iterations: c_int = -1;
     let mut handle: *mut c_void = ptr::null_mut();
     // SAFETY: valid C string and writable out-pointers.
-    let rc =
-        unsafe { LGBM_BoosterCreateFromModelfile(c_path.as_ptr(), &mut num_iterations, &mut handle) };
+    let rc = unsafe {
+        LGBM_BoosterCreateFromModelfile(c_path.as_ptr(), &mut num_iterations, &mut handle)
+    };
     assert_eq!(rc, 0, "load failed: {}", last_error());
 
     let mut empty: c_int = -1;
