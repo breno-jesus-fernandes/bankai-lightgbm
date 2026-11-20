@@ -13,11 +13,45 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
 use lgbm_core::boosting::Gbdt;
+use lgbm_core::predictor::{PredictConfig, PredictKind, Predictor};
 
 /// upstream: `API_END()` returns `0` on success.
 const C_API_SUCCESS: c_int = 0;
 /// upstream: `API_END()` returns `-1` after storing the error.
 const C_API_ERROR: c_int = -1;
+
+// upstream: include/LightGBM/c_api.h `C_API_DTYPE_*` and `C_API_PREDICT_*`.
+const C_API_DTYPE_FLOAT32: c_int = 0;
+const C_API_DTYPE_FLOAT64: c_int = 1;
+const C_API_PREDICT_NORMAL: c_int = 0;
+const C_API_PREDICT_RAW_SCORE: c_int = 1;
+const C_API_PREDICT_LEAF_INDEX: c_int = 2;
+const C_API_PREDICT_CONTRIB: c_int = 3;
+
+/// Map a C API `predict_type` to the core [`PredictKind`].
+fn predict_kind(predict_type: c_int) -> Result<PredictKind, String> {
+    match predict_type {
+        C_API_PREDICT_NORMAL => Ok(PredictKind::Normal),
+        C_API_PREDICT_RAW_SCORE => Ok(PredictKind::RawScore),
+        C_API_PREDICT_LEAF_INDEX => Ok(PredictKind::LeafIndex),
+        C_API_PREDICT_CONTRIB => Ok(PredictKind::Contrib),
+        other => Err(format!("unknown predict_type {other}")),
+    }
+}
+
+/// Build a predictor config for the given predict type and iteration window.
+fn predict_config(
+    predict_type: c_int,
+    start_iteration: c_int,
+    num_iteration: c_int,
+) -> Result<PredictConfig, String> {
+    Ok(PredictConfig {
+        kind: predict_kind(predict_type)?,
+        start_iteration,
+        num_iteration,
+        ..PredictConfig::default()
+    })
+}
 
 thread_local! {
     /// upstream keeps the last error in a thread-local string (`LGBM_GetLastError`).
@@ -211,6 +245,140 @@ pub unsafe extern "C" fn LGBM_BoosterGetCurrentIteration(
             .map_err(|_| "current_iteration does not fit in an int".to_string())?;
         // SAFETY: checked non-null just above; writable per the contract.
         unsafe { *out_iteration = value };
+        Ok(())
+    })
+}
+
+/// Gather an `nrow x ncol` matrix (row- or column-major, element type `T`) into a row-major
+/// `f64` buffer, converting each element with `conv`.
+fn to_row_major<T: Copy>(
+    src: &[T],
+    nrow: usize,
+    ncol: usize,
+    row_major: bool,
+    conv: impl Fn(T) -> f64,
+) -> Vec<f64> {
+    let mut out = vec![0.0f64; nrow * ncol];
+    for r in 0..nrow {
+        for c in 0..ncol {
+            let si = if row_major {
+                r * ncol + c
+            } else {
+                c * nrow + r
+            };
+            out[r * ncol + c] = conv(src[si]);
+        }
+    }
+    out
+}
+
+/// upstream: `LGBM_BoosterCalcNumPredict`. The number of `double`s a `num_row`-row prediction of
+/// `predict_type` produces (`num_row * num_pred_one_row`).
+///
+/// # Safety
+/// `handle` must be a live booster handle; `out_len` a valid writable pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LGBM_BoosterCalcNumPredict(
+    handle: *mut c_void,
+    num_row: c_int,
+    predict_type: c_int,
+    start_iteration: c_int,
+    num_iteration: c_int,
+    out_len: *mut i64,
+) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let booster = unsafe { booster_ref(handle) }?;
+        if out_len.is_null() {
+            return Err("out_len must not be null".into());
+        }
+        if num_row < 0 {
+            return Err("num_row must not be negative".into());
+        }
+        let cfg = predict_config(predict_type, start_iteration, num_iteration)?;
+        let predictor = Predictor::new(&booster.model, &cfg).map_err(|e| e.to_string())?;
+        let total = predictor.num_pred_one_row() as i64 * i64::from(num_row);
+        // SAFETY: checked non-null just above; writable per the contract.
+        unsafe { *out_len = total };
+        Ok(())
+    })
+}
+
+/// upstream: `LGBM_BoosterPredictForMat`. Predict a dense `nrow x ncol` matrix (`float32` or
+/// `float64`, row- or column-major) and write `nrow * num_pred_one_row` doubles to `out_result`.
+///
+/// The prediction `parameter` string is parsed in a later slice; only an empty string (or null)
+/// is accepted now.
+///
+/// # Safety
+/// `handle` must be a live booster handle. `data` must point to `nrow * ncol` elements of the
+/// type `data_type` names. `out_result` must have room for the length `LGBM_BoosterCalcNumPredict`
+/// reports, and `out_len` / `parameter` must be valid pointers (`parameter` null or a C string).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn LGBM_BoosterPredictForMat(
+    handle: *mut c_void,
+    data: *const c_void,
+    data_type: c_int,
+    nrow: i32,
+    ncol: i32,
+    is_row_major: c_int,
+    predict_type: c_int,
+    start_iteration: c_int,
+    num_iteration: c_int,
+    parameter: *const c_char,
+    out_len: *mut i64,
+    out_result: *mut f64,
+) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let booster = unsafe { booster_ref(handle) }?;
+        if out_len.is_null() || out_result.is_null() {
+            return Err("out_len and out_result must not be null".into());
+        }
+        if nrow < 0 || ncol < 0 {
+            return Err("nrow and ncol must not be negative".into());
+        }
+        if !parameter.is_null() {
+            // SAFETY: non-null per the branch; a valid C string per the contract.
+            let param = unsafe { cstr_to_str(parameter, "parameter") }?;
+            if !param.trim().is_empty() {
+                return Err("non-empty prediction parameter string is not supported yet".into());
+            }
+        }
+        let (nrow, ncol) = (nrow as usize, ncol as usize);
+        let n = nrow * ncol;
+        if n != 0 && data.is_null() {
+            return Err("data must not be null".into());
+        }
+        let row_major = is_row_major != 0;
+        let gathered = match data_type {
+            C_API_DTYPE_FLOAT64 => {
+                // SAFETY: `data` points to `n` f64 values (checked non-null when `n != 0`).
+                let src = unsafe { std::slice::from_raw_parts(data.cast::<f64>(), n) };
+                to_row_major(src, nrow, ncol, row_major, |x| x)
+            }
+            C_API_DTYPE_FLOAT32 => {
+                // SAFETY: `data` points to `n` f32 values (checked non-null when `n != 0`).
+                let src = unsafe { std::slice::from_raw_parts(data.cast::<f32>(), n) };
+                to_row_major(src, nrow, ncol, row_major, f64::from)
+            }
+            other => {
+                return Err(format!(
+                    "unsupported data_type {other} (only float32=0 and float64=1)"
+                ));
+            }
+        };
+        let cfg = predict_config(predict_type, start_iteration, num_iteration)?;
+        let predictor = Predictor::new(&booster.model, &cfg).map_err(|e| e.to_string())?;
+        let out = predictor
+            .predict_dense(&gathered, nrow, ncol)
+            .map_err(|e| e.to_string())?;
+        // SAFETY: the caller sized `out_result` by `LGBM_BoosterCalcNumPredict`, which returns
+        // this same length for the same shape and predict type.
+        unsafe { std::ptr::copy_nonoverlapping(out.as_ptr(), out_result, out.len()) };
+        // SAFETY: checked non-null above; writable per the contract.
+        unsafe { *out_len = out.len() as i64 };
         Ok(())
     })
 }

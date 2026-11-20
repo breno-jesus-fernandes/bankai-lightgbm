@@ -90,7 +90,13 @@ fn predict_via_capi(
     out
 }
 
-fn reference_predict(model: &Gbdt, data: &[f64], nrow: usize, ncol: usize, kind: PredictKind) -> Vec<f64> {
+fn reference_predict(
+    model: &Gbdt,
+    data: &[f64],
+    nrow: usize,
+    ncol: usize,
+    kind: PredictKind,
+) -> Vec<f64> {
     let cfg = PredictConfig {
         kind,
         ..PredictConfig::default()
@@ -136,7 +142,16 @@ fn predict_for_mat_accepts_float32_and_column_major() {
     let want32 = reference_predict(&reference, &f64_from_f32, nrow, ncol, PredictKind::Normal);
     let mut num_pred: i64 = 0;
     // SAFETY: live handle, writable out-pointer.
-    unsafe { LGBM_BoosterCalcNumPredict(handle, nrow as c_int, C_API_PREDICT_NORMAL, 0, -1, &mut num_pred) };
+    unsafe {
+        LGBM_BoosterCalcNumPredict(
+            handle,
+            nrow as c_int,
+            C_API_PREDICT_NORMAL,
+            0,
+            -1,
+            &mut num_pred,
+        )
+    };
     let mut out = vec![0.0f64; num_pred as usize];
     let mut out_len = 0i64;
     let param = CString::new("").unwrap();
