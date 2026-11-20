@@ -88,6 +88,32 @@ impl Gbdt {
     pub fn set_leaf_value(&mut self, tree_idx: usize, leaf_idx: usize, value: f64) -> Result<()> {
         set_leaf_in(&mut self.models, tree_idx, leaf_idx, value)
     }
+
+    /// Append `other`'s trees to this model (upstream `GBDT::MergeFrom`, exposed as
+    /// `LGBM_BoosterMerge`): the merged model's score is the sum of both models' trees. Both must
+    /// have the same number of classes and trees per iteration and the same averaging mode.
+    pub fn merge(&mut self, other: &Gbdt) -> Result<()> {
+        if self.num_class != other.num_class
+            || self.num_tree_per_iteration != other.num_tree_per_iteration
+        {
+            return Err(Error::InvalidParameter(format!(
+                "cannot merge models with different classes ({} vs {}) or trees per iteration \
+                 ({} vs {})",
+                self.num_class,
+                other.num_class,
+                self.num_tree_per_iteration,
+                other.num_tree_per_iteration
+            )));
+        }
+        if self.average_output != other.average_output {
+            return Err(Error::InvalidParameter(
+                "cannot merge an averaged (random forest) model with a non-averaged one".into(),
+            ));
+        }
+        self.models.extend(other.models.iter().cloned());
+        self.max_feature_idx = self.max_feature_idx.max(other.max_feature_idx);
+        Ok(())
+    }
 }
 
 impl Gbdt {
