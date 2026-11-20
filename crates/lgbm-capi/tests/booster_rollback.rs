@@ -149,6 +149,15 @@ fn save_to_string(handle: *mut c_void) -> String {
     String::from_utf8(buf[..buf.len() - 1].to_vec()).unwrap()
 }
 
+/// The trees and feature importances, without the trailing `parameters:` block, which echoes the
+/// config (e.g. `num_iterations`) and so legitimately differs between a rolled-back booster and one
+/// trained with a smaller `num_iterations`. See CLAUDE.md: compare only the tree section.
+fn trees_only(model: &str) -> &str {
+    model
+        .split_once("\nparameters:\n")
+        .map_or(model, |(trees, _)| trees)
+}
+
 /// Core oracle: the model text after training `n` iterations from scratch.
 fn core_model_text(data: &[f64], label: &[f64], nrow: usize, ncol: usize, n: i32) -> String {
     let mut cfg = Config::from_str_params(PARAMS).unwrap();
@@ -178,7 +187,11 @@ fn rollback_matches_training_one_fewer_iteration() {
 
     let got = save_to_string(booster);
     let want = core_model_text(&data, &label, nrow, ncol, 5);
-    assert_eq!(got, want, "rollback to 5 should equal training 5 iterations");
+    assert_eq!(
+        trees_only(&got),
+        trees_only(&want),
+        "rollback to 5 should equal training 5 iterations"
+    );
 
     // SAFETY: handles freed once each.
     assert_eq!(unsafe { LGBM_BoosterFree(booster) }, 0);
@@ -200,7 +213,7 @@ fn rollback_then_train_reaches_the_same_model() {
 
     let got = save_to_string(booster);
     let want = core_model_text(&data, &label, nrow, ncol, 5);
-    assert_eq!(got, want);
+    assert_eq!(trees_only(&got), trees_only(&want));
 
     // SAFETY: handles freed once each.
     assert_eq!(unsafe { LGBM_BoosterFree(booster) }, 0);
