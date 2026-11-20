@@ -17,6 +17,7 @@ use lgbm_core::boosting::{Gbdt, GbdtTrainer};
 use lgbm_core::config::Config;
 use lgbm_core::io::dataset::Dataset;
 use lgbm_core::io::sparse::{CsrMatrix, csc_to_csr};
+use lgbm_core::io::text_loader::{TextLoadOptions, load_text};
 use lgbm_core::predictor::{PredictConfig, PredictKind, Predictor};
 
 /// upstream: `API_END()` returns `0` on success.
@@ -1353,6 +1354,77 @@ pub unsafe extern "C" fn LGBM_BoosterRollbackOneIter(handle: *mut c_void) -> c_i
                 Err("booster was loaded from a model and cannot be trained".into())
             }
         }
+    })
+}
+
+/// upstream: `LGBM_BoosterPredictForFile`. Load a text data file, predict every row, and write the
+/// predictions to `result_filename` — one row per line, the row's values tab-separated, each in its
+/// shortest round-trippable form. The file is parsed by `lgbm-core`'s loader with the model's
+/// feature count, so a leading label column is detected from the column count. `predict_type`,
+/// `start_iteration` and `num_iteration` match [`LGBM_BoosterPredictForMat`]. The prediction
+/// `parameter` string is not supported yet and must be empty or null.
+///
+/// # Safety
+/// `handle` must be a live booster handle; `data_filename` and `result_filename` valid C strings;
+/// `parameter` null or a valid C string.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn LGBM_BoosterPredictForFile(
+    handle: *mut c_void,
+    data_filename: *const c_char,
+    data_has_header: c_int,
+    predict_type: c_int,
+    start_iteration: c_int,
+    num_iteration: c_int,
+    parameter: *const c_char,
+    result_filename: *const c_char,
+) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let booster = unsafe { booster_ref(handle) }?;
+        // SAFETY: forwarded from this function's safety contract.
+        let data_path = unsafe { cstr_to_str(data_filename, "data_filename") }?;
+        // SAFETY: forwarded from this function's safety contract.
+        let result_path = unsafe { cstr_to_str(result_filename, "result_filename") }?;
+        if !parameter.is_null() {
+            // SAFETY: non-null per the branch; a valid C string per the contract.
+            let param = unsafe { cstr_to_str(parameter, "parameter") }?;
+            if !param.trim().is_empty() {
+                return Err("non-empty prediction parameter string is not supported yet".into());
+            }
+        }
+        let cfg = predict_config(predict_type, start_iteration, num_iteration)?;
+        let content = std::fs::read_to_string(Path::new(data_path)).map_err(|e| e.to_string())?;
+        let body = booster.with_model(|model| -> Result<String, String> {
+            let opts = TextLoadOptions {
+                header: data_has_header != 0,
+                label_column: "",
+                weight_column: "",
+                group_column: "",
+                ignore_column: "",
+                precise_float_parser: false,
+                num_features: model.num_features(),
+            };
+            let loaded = load_text(&content, &opts).map_err(|e| e.to_string())?;
+            let predictor = Predictor::new(model, &cfg).map_err(|e| e.to_string())?;
+            let preds = predictor
+                .predict_dense(&loaded.features, loaded.num_data, loaded.num_features)
+                .map_err(|e| e.to_string())?;
+            let k = predictor.num_pred_one_row();
+            if k == 0 {
+                // No value per row (e.g. leaf index with no iterations left): an empty line each.
+                return Ok("\n".repeat(loaded.num_data));
+            }
+            let mut out = String::with_capacity(preds.len() * 8);
+            for chunk in preds.chunks(k) {
+                let line: Vec<String> = chunk.iter().map(f64::to_string).collect();
+                out.push_str(&line.join("\t"));
+                out.push('\n');
+            }
+            Ok(out)
+        })?;
+        std::fs::write(Path::new(result_path), body).map_err(|e| e.to_string())?;
+        Ok(())
     })
 }
 
