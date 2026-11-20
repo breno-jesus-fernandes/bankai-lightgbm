@@ -11,8 +11,9 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
+use std::sync::Arc;
 
-use lgbm_core::boosting::Gbdt;
+use lgbm_core::boosting::{Gbdt, GbdtTrainer};
 use lgbm_core::config::Config;
 use lgbm_core::io::dataset::Dataset;
 use lgbm_core::io::sparse::{CsrMatrix, csc_to_csr};
@@ -88,9 +89,25 @@ fn guard(body: impl FnOnce() -> Result<(), String>) -> c_int {
 }
 
 /// A booster handle's contents. The opaque `BoosterHandle` upstream exposes is a pointer to
-/// this, owned by the caller until [`LGBM_BoosterFree`].
-struct CBooster {
-    model: Gbdt,
+/// this, owned by the caller until [`LGBM_BoosterFree`]. A handle is either a model loaded for
+/// prediction or a trainer built from a dataset; both predict (a trainer predicts from its
+/// current trees, as upstream does).
+enum CBooster {
+    /// Loaded from a model file or string (`LGBM_BoosterCreateFromModelfile` / `...FromString`).
+    Model(Box<Gbdt>),
+    /// Training from a dataset (`LGBM_BoosterCreate`), advanced by `LGBM_BoosterUpdateOneIter`.
+    Trainer(Box<GbdtTrainer>),
+}
+
+impl CBooster {
+    /// Run `f` with a prediction/metadata view of the model. A trainer snapshots its current
+    /// trees (upstream predicts from the in-progress model during training).
+    fn with_model<R>(&self, f: impl FnOnce(&Gbdt) -> R) -> R {
+        match self {
+            CBooster::Model(model) => f(model.as_ref()),
+            CBooster::Trainer(trainer) => f(&trainer.snapshot()),
+        }
+    }
 }
 
 /// Borrow a C string as `&str`, erroring like upstream when it is null or not UTF-8.
@@ -126,7 +143,7 @@ unsafe fn publish_booster(
         // SAFETY: checked non-null just above; the caller guarantees it is writable.
         unsafe { *out_num_iterations = num_iterations };
     }
-    let boxed = Box::new(CBooster { model });
+    let boxed = Box::new(CBooster::Model(Box::new(model)));
     // SAFETY: `out_handle` is non-null (checked) and writable per the contract.
     unsafe { *out_handle = Box::into_raw(boxed).cast::<c_void>() };
     Ok(())
@@ -140,8 +157,21 @@ unsafe fn booster_ref<'a>(handle: *mut c_void) -> Result<&'a CBooster, String> {
     if handle.is_null() {
         return Err("booster handle must not be null".into());
     }
-    // SAFETY: non-null and, per the contract, a live pointer from `publish_booster`.
+    // SAFETY: non-null and, per the contract, a live pointer from a booster-create call.
     Ok(unsafe { &*handle.cast::<CBooster>() })
+}
+
+/// Borrow the booster a handle points to mutably (for `LGBM_BoosterUpdateOneIter`).
+///
+/// # Safety
+/// `handle` must be a pointer returned by a `LGBM_BoosterCreate*` call, not yet freed, with no
+/// other reference to the same booster live for the duration of the borrow.
+unsafe fn booster_mut<'a>(handle: *mut c_void) -> Result<&'a mut CBooster, String> {
+    if handle.is_null() {
+        return Err("booster handle must not be null".into());
+    }
+    // SAFETY: non-null, a live pointer per the contract; the caller guarantees exclusivity.
+    Ok(unsafe { &mut *handle.cast::<CBooster>() })
 }
 
 /// upstream: `LGBM_GetLastError`. The returned pointer is valid until the next C API call on
@@ -223,7 +253,7 @@ pub unsafe extern "C" fn LGBM_BoosterGetNumClasses(
         if out_len.is_null() {
             return Err("out_len must not be null".into());
         }
-        let value = c_int::try_from(booster.model.num_class())
+        let value = c_int::try_from(booster.with_model(Gbdt::num_class))
             .map_err(|_| "num_class does not fit in an int".to_string())?;
         // SAFETY: checked non-null just above; writable per the contract.
         unsafe { *out_len = value };
@@ -246,7 +276,7 @@ pub unsafe extern "C" fn LGBM_BoosterGetCurrentIteration(
         if out_iteration.is_null() {
             return Err("out_iteration must not be null".into());
         }
-        let value = c_int::try_from(booster.model.current_iteration())
+        let value = c_int::try_from(booster.with_model(Gbdt::current_iteration))
             .map_err(|_| "current_iteration does not fit in an int".to_string())?;
         // SAFETY: checked non-null just above; writable per the contract.
         unsafe { *out_iteration = value };
@@ -301,8 +331,10 @@ pub unsafe extern "C" fn LGBM_BoosterCalcNumPredict(
             return Err("num_row must not be negative".into());
         }
         let cfg = predict_config(predict_type, start_iteration, num_iteration)?;
-        let predictor = Predictor::new(&booster.model, &cfg).map_err(|e| e.to_string())?;
-        let total = predictor.num_pred_one_row() as i64 * i64::from(num_row);
+        let per_row = booster
+            .with_model(|model| Predictor::new(model, &cfg).map(|p| p.num_pred_one_row()))
+            .map_err(|e| e.to_string())?;
+        let total = per_row as i64 * i64::from(num_row);
         // SAFETY: checked non-null just above; writable per the contract.
         unsafe { *out_len = total };
         Ok(())
@@ -375,9 +407,11 @@ pub unsafe extern "C" fn LGBM_BoosterPredictForMat(
             }
         };
         let cfg = predict_config(predict_type, start_iteration, num_iteration)?;
-        let predictor = Predictor::new(&booster.model, &cfg).map_err(|e| e.to_string())?;
-        let out = predictor
-            .predict_dense(&gathered, nrow, ncol)
+        let out = booster
+            .with_model(|model| {
+                let predictor = Predictor::new(model, &cfg)?;
+                predictor.predict_dense(&gathered, nrow, ncol)
+            })
             .map_err(|e| e.to_string())?;
         // SAFETY: the caller sized `out_result` by `LGBM_BoosterCalcNumPredict`, which returns
         // this same length for the same shape and predict type.
@@ -487,9 +521,11 @@ pub unsafe extern "C" fn LGBM_BoosterPredictForCSR(
             }
         };
         let cfg = predict_config(predict_type, start_iteration, num_iteration)?;
-        let predictor = Predictor::new(&booster.model, &cfg).map_err(|e| e.to_string())?;
-        let out = predictor
-            .predict_csr(&indptr_vec, idx, &values)
+        let out = booster
+            .with_model(|model| {
+                let predictor = Predictor::new(model, &cfg)?;
+                predictor.predict_csr(&indptr_vec, idx, &values)
+            })
             .map_err(|e| e.to_string())?;
         // SAFETY: the caller sized `out_result` by `LGBM_BoosterCalcNumPredict` for these rows.
         unsafe { std::ptr::copy_nonoverlapping(out.as_ptr(), out_result, out.len()) };
@@ -598,9 +634,11 @@ pub unsafe extern "C" fn LGBM_BoosterPredictForCSC(
             }
         };
         let cfg = predict_config(predict_type, start_iteration, num_iteration)?;
-        let predictor = Predictor::new(&booster.model, &cfg).map_err(|e| e.to_string())?;
-        let out = predictor
-            .predict_csc(&col_ptr_vec, idx, &values, nrow)
+        let out = booster
+            .with_model(|model| {
+                let predictor = Predictor::new(model, &cfg)?;
+                predictor.predict_csc(&col_ptr_vec, idx, &values, nrow)
+            })
             .map_err(|e| e.to_string())?;
         // SAFETY: the caller sized `out_result` by `LGBM_BoosterCalcNumPredict` for these rows.
         unsafe { std::ptr::copy_nonoverlapping(out.as_ptr(), out_result, out.len()) };
@@ -667,7 +705,7 @@ pub unsafe extern "C" fn LGBM_BoosterGetNumFeature(
         if out_len.is_null() {
             return Err("out_len must not be null".into());
         }
-        let value = c_int::try_from(booster.model.num_features())
+        let value = c_int::try_from(booster.with_model(Gbdt::num_features))
             .map_err(|_| "num_features does not fit in an int".to_string())?;
         // SAFETY: checked non-null just above; writable per the contract.
         unsafe { *out_len = value };
@@ -1227,4 +1265,73 @@ unsafe fn raw_slice<'a, T>(ptr: *const c_void, n: usize) -> &'a [T] {
         // SAFETY: `ptr` points to `n` readable `T` per the contract.
         unsafe { std::slice::from_raw_parts(ptr.cast::<T>(), n) }
     }
+}
+
+/// upstream: `LGBM_BoosterCreate`. Build a training booster from a dataset handle and a config
+/// `parameters` string. The dataset's binned data, labels and other fields are copied into the
+/// booster, so the dataset handle may be freed afterwards and later field changes do not affect
+/// it (as upstream builds the booster from the dataset at create time). Advance training with
+/// [`LGBM_BoosterUpdateOneIter`]; predict with the same handle.
+///
+/// # Safety
+/// `train_data` must be a live dataset handle; `parameters` is null or a C string; `out` must be
+/// a valid writable pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LGBM_BoosterCreate(
+    train_data: *const c_void,
+    parameters: *const c_char,
+    out: *mut *mut c_void,
+) -> c_int {
+    guard(|| {
+        if out.is_null() {
+            return Err("out booster handle pointer must not be null".into());
+        }
+        // SAFETY: a live dataset handle per the contract (const handle, borrowed read-only).
+        let ds = unsafe { dataset_ref(train_data.cast_mut()) }?;
+        let params = if parameters.is_null() {
+            ""
+        } else {
+            // SAFETY: non-null per the branch; a valid C string per the contract.
+            unsafe { cstr_to_str(parameters, "parameters") }?
+        };
+        let cfg = Config::from_str_params(params).map_err(|e| e.to_string())?;
+        let trainer = GbdtTrainer::new(Arc::new(cfg), Arc::new(ds.dataset.clone()))
+            .map_err(|e| e.to_string())?;
+        let boxed = Box::new(CBooster::Trainer(Box::new(trainer)));
+        // SAFETY: `out` is non-null (checked) and writable per the contract.
+        unsafe { *out = Box::into_raw(boxed).cast::<c_void>() };
+        Ok(())
+    })
+}
+
+/// upstream: `LGBM_BoosterUpdateOneIter`. Run one boosting iteration on a training booster.
+/// `produced_empty_tree` (when non-null) is set to 1 when the iteration added no splits, which
+/// usually means training is finished (core's `GbdtTrainer::update_one_iter`). A booster loaded
+/// from a model has no training state and is rejected.
+///
+/// # Safety
+/// `handle` must be a live training booster handle; `produced_empty_tree` is null or a valid
+/// writable pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LGBM_BoosterUpdateOneIter(
+    handle: *mut c_void,
+    produced_empty_tree: *mut c_int,
+) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let booster = unsafe { booster_mut(handle) }?;
+        match booster {
+            CBooster::Trainer(trainer) => {
+                let empty = trainer.update_one_iter();
+                if !produced_empty_tree.is_null() {
+                    // SAFETY: non-null per the branch; writable per the contract.
+                    unsafe { *produced_empty_tree = c_int::from(empty) };
+                }
+                Ok(())
+            }
+            CBooster::Model(_) => {
+                Err("booster was loaded from a model and cannot be trained".into())
+            }
+        }
+    })
 }
