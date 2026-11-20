@@ -44,18 +44,21 @@ fn eval_values_are_the_training_mse_and_mae() {
     // Names fix the order of the values.
     assert_eq!(trainer.eval_names().unwrap(), vec!["l2", "l1"]);
 
-    // Independent oracle over the training score (num_class == 1, so one score per row).
+    // Independent oracle over the training score (num_class == 1, so one score per row). The
+    // metric reads labels from the metadata, where they are stored as f32, so round-trip through
+    // f32 to match.
     let scores = trainer.training_score().to_vec();
     assert_eq!(scores.len(), nrow);
+    let y: Vec<f64> = label.iter().map(|&v| f64::from(v as f32)).collect();
     let mse: f64 = scores
         .iter()
-        .zip(&label)
+        .zip(&y)
         .map(|(&s, &y)| (s - y) * (s - y))
         .sum::<f64>()
         / nrow as f64;
     let mae: f64 = scores
         .iter()
-        .zip(&label)
+        .zip(&y)
         .map(|(&s, &y)| (s - y).abs())
         .sum::<f64>()
         / nrow as f64;
