@@ -47,7 +47,12 @@ fn uniform_real_01_matches_libcxx() {
     let mut engine = Mt19937::new(42);
     for (i, &bits) in expected.iter().enumerate() {
         let v = engine.uniform_real_01();
-        assert_eq!(v.to_bits(), bits, "draw {i}: {v} != {}", f64::from_bits(bits));
+        assert_eq!(
+            v.to_bits(),
+            bits,
+            "draw {i}: {v} != {}",
+            f64::from_bits(bits)
+        );
     }
 }
 
