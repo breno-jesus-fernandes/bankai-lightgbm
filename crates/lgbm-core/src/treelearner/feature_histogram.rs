@@ -1590,3 +1590,286 @@ pub fn find_best_threshold_categorical(
     output.gain *= meta.penalty;
     is_splittable
 }
+
+/// upstream: `FeatureHistogram::FindBestThresholdCategoricalIntInner` (quantized categorical).
+///
+/// The integer counterpart of [`find_best_threshold_categorical`] over the integer
+/// `(gradient_sum, Hessian_sum)` histogram. Exact integer sums are scaled once by
+/// `grad_scale`/`hess_scale`; counts are estimated from the integer Hessian sums. Unlike the
+/// full-precision categorical search, the integer path adds no `kEpsilon` to any sum.
+#[allow(clippy::too_many_arguments)]
+pub fn find_best_threshold_categorical_int(
+    hist: &[(i64, i64)],
+    meta: &mut FeatureMeta,
+    p: &SplitParams,
+    c: &CatParams,
+    int_sum_gradient: i64,
+    int_sum_hessian: i64,
+    grad_scale: f64,
+    hess_scale: f64,
+    num_data: i32,
+    parent_output: f64,
+    mc: Mc<'_>,
+    output: &mut SplitInfo,
+) -> bool {
+    let mc = mc.fixed();
+    let sum_gradient = int_sum_gradient as f64 * grad_scale;
+    let sum_hessian = int_sum_hessian as f64 * hess_scale;
+    output.default_left = false;
+    output.gain = K_MIN_SCORE;
+    let use_l1 = p.lambda_l1 > 0.0;
+    let use_max = p.max_delta_step > 0.0;
+    let use_smooth = p.path_smooth > EPS;
+    let flags = (use_l1, use_max, use_smooth);
+    let rand = p.extra_trees;
+
+    let gain_shift = if use_smooth {
+        if use_l1 {
+            leaf_gain_given_output::<true>(
+                sum_gradient,
+                sum_hessian,
+                p.lambda_l1,
+                p.lambda_l2,
+                parent_output,
+            )
+        } else {
+            leaf_gain_given_output::<false>(
+                sum_gradient,
+                sum_hessian,
+                p.lambda_l1,
+                p.lambda_l2,
+                parent_output,
+            )
+        }
+    } else {
+        leaf_gain_rt(
+            sum_gradient,
+            sum_hessian,
+            p,
+            0.0,
+            num_data,
+            0.0,
+            (use_l1, use_max, false),
+        )
+    };
+    let min_gain_shift = gain_shift + p.min_gain_to_split;
+
+    let offset = meta.offset;
+    let bin_start = 1 - offset;
+    let bin_end = meta.num_bin - offset;
+    let int_grad = |t: i32| hist[t as usize].0;
+    let int_hess = |t: i32| hist[t as usize].1;
+    let cnt_factor = f64::from(num_data) / int_sum_hessian as f64;
+    let use_onehot = meta.num_bin <= c.max_cat_to_onehot;
+    let mut l2 = p.lambda_l2;
+    let mut is_splittable = false;
+    let mut best_gain = K_MIN_SCORE;
+    let mut best_threshold: i32 = -1;
+    let mut best_dir: i32 = 1;
+    let mut best_int_left_grad: i64 = 0;
+    let mut best_int_left_hess: i64 = 0;
+    let mut rand_threshold: i32 = 0;
+    let mut used_bin: i32 = -1;
+    let mut sorted_idx: Vec<i32> = Vec::new();
+
+    if use_onehot {
+        if rand && bin_end - bin_start > 0 {
+            rand_threshold = meta.rand.next_int(bin_start, bin_end);
+        }
+        for t in bin_start..bin_end {
+            let (ig, ih) = (int_grad(t), int_hess(t));
+            let h = ih as f64 * hess_scale;
+            let cnt = round_int(ih as f64 * cnt_factor);
+            if cnt < p.min_data_in_leaf || h < p.min_sum_hessian_in_leaf {
+                continue;
+            }
+            let other_count = num_data - cnt;
+            if other_count < p.min_data_in_leaf {
+                continue;
+            }
+            let int_other_hess = int_sum_hessian - ih;
+            let sum_other_hessian = int_other_hess as f64 * hess_scale;
+            if sum_other_hessian < p.min_sum_hessian_in_leaf {
+                continue;
+            }
+            let g = ig as f64 * grad_scale;
+            let sum_other_gradient = (int_sum_gradient - ig) as f64 * grad_scale;
+            if rand && t != rand_threshold {
+                continue;
+            }
+            let current_gain = split_gains_rt(
+                sum_other_gradient,
+                sum_other_hessian,
+                g,
+                h,
+                p,
+                l2,
+                other_count,
+                cnt,
+                parent_output,
+                flags,
+                mc,
+            );
+            if current_gain <= min_gain_shift {
+                continue;
+            }
+            is_splittable = true;
+            if current_gain > best_gain {
+                best_threshold = t;
+                best_int_left_grad = ig;
+                best_int_left_hess = ih;
+                best_gain = current_gain;
+            }
+        }
+    } else {
+        for i in bin_start..bin_end {
+            if f64::from(round_int(int_hess(i) as f64 * cnt_factor)) >= c.cat_smooth {
+                sorted_idx.push(i);
+            }
+        }
+        used_bin = sorted_idx.len() as i32;
+        l2 += c.cat_l2;
+        let ctr =
+            |ig: i64, ih: i64| (ig as f64 * grad_scale) / (ih as f64 * hess_scale + c.cat_smooth);
+        sorted_idx.sort_by(|&i, &j| {
+            let (a, b) = (ctr(int_grad(i), int_hess(i)), ctr(int_grad(j), int_hess(j)));
+            a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let directions = [1i32, -1];
+        let start_positions = [0i32, used_bin - 1];
+        let max_num_cat = c.max_cat_threshold.min((used_bin + 1) / 2);
+        let max_threshold = (max_num_cat.min(used_bin) - 1).max(0);
+        if rand && max_threshold > 0 {
+            rand_threshold = meta.rand.next_int(0, max_threshold);
+        }
+        for (dir, start) in directions.iter().zip(start_positions) {
+            let mut start_pos = start;
+            let min_data_per_group = c.min_data_per_group;
+            let mut cnt_cur_group = 0i32;
+            let mut int_left_grad = 0i64;
+            let mut int_left_hess = 0i64;
+            let mut left_count = 0i32;
+            let mut i = 0i32;
+            while i < used_bin && i < max_num_cat {
+                let t = sorted_idx[start_pos as usize];
+                start_pos += dir;
+                let (ig, ih) = (int_grad(t), int_hess(t));
+                let cnt = round_int(ih as f64 * cnt_factor);
+                int_left_grad += ig;
+                int_left_hess += ih;
+                left_count += cnt;
+                cnt_cur_group += cnt;
+                let sum_left_hessian = int_left_hess as f64 * hess_scale;
+                if left_count < p.min_data_in_leaf || sum_left_hessian < p.min_sum_hessian_in_leaf {
+                    i += 1;
+                    continue;
+                }
+                let right_count = num_data - left_count;
+                if right_count < p.min_data_in_leaf || right_count < min_data_per_group {
+                    break;
+                }
+                let int_right_hess = int_sum_hessian - int_left_hess;
+                let sum_right_hessian = int_right_hess as f64 * hess_scale;
+                if sum_right_hessian < p.min_sum_hessian_in_leaf {
+                    break;
+                }
+                if cnt_cur_group < min_data_per_group {
+                    i += 1;
+                    continue;
+                }
+                cnt_cur_group = 0;
+                let sum_left_gradient = int_left_grad as f64 * grad_scale;
+                let sum_right_gradient = (int_sum_gradient - int_left_grad) as f64 * grad_scale;
+                if rand && i != rand_threshold {
+                    i += 1;
+                    continue;
+                }
+                let current_gain = split_gains_rt(
+                    sum_left_gradient,
+                    sum_left_hessian,
+                    sum_right_gradient,
+                    sum_right_hessian,
+                    p,
+                    l2,
+                    left_count,
+                    right_count,
+                    parent_output,
+                    flags,
+                    mc,
+                );
+                if current_gain > min_gain_shift {
+                    is_splittable = true;
+                    if current_gain > best_gain {
+                        best_int_left_grad = int_left_grad;
+                        best_int_left_hess = int_left_hess;
+                        best_threshold = i;
+                        best_gain = current_gain;
+                        best_dir = *dir;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+
+    if is_splittable {
+        let best_sum_left_gradient = best_int_left_grad as f64 * grad_scale;
+        let best_sum_left_hessian = best_int_left_hess as f64 * hess_scale;
+        let int_right_grad = int_sum_gradient - best_int_left_grad;
+        let int_right_hess = int_sum_hessian - best_int_left_hess;
+        let best_sum_right_gradient = int_right_grad as f64 * grad_scale;
+        let best_sum_right_hessian = int_right_hess as f64 * hess_scale;
+        let best_left_count = round_int(best_int_left_hess as f64 * cnt_factor);
+        let best_right_count = round_int(int_right_hess as f64 * cnt_factor);
+        output.left_output = clamp_opt(
+            output_rt(
+                best_sum_left_gradient,
+                best_sum_left_hessian,
+                p,
+                l2,
+                p.path_smooth,
+                best_left_count,
+                parent_output,
+                flags,
+            ),
+            mc,
+        );
+        output.left_count = best_left_count;
+        output.left_sum_gradient = best_sum_left_gradient;
+        output.left_sum_hessian = best_sum_left_hessian;
+        output.right_output = clamp_opt(
+            output_rt(
+                best_sum_right_gradient,
+                best_sum_right_hessian,
+                p,
+                l2,
+                p.path_smooth,
+                best_right_count,
+                parent_output,
+                flags,
+            ),
+            mc,
+        );
+        output.right_count = best_right_count;
+        output.right_sum_gradient = best_sum_right_gradient;
+        output.right_sum_hessian = best_sum_right_hessian;
+        output.left_int_sum = (best_int_left_grad << 32) | (best_int_left_hess & 0xffff_ffff);
+        output.right_int_sum = (int_right_grad << 32) | (int_right_hess & 0xffff_ffff);
+        output.gain = best_gain - min_gain_shift;
+        if use_onehot {
+            output.num_cat_threshold = 1;
+            output.cat_threshold = vec![(best_threshold + offset) as u32];
+        } else {
+            output.num_cat_threshold = best_threshold + 1;
+            output.cat_threshold = (0..=best_threshold)
+                .map(|i| {
+                    let pos = if best_dir == 1 { i } else { used_bin - 1 - i };
+                    (sorted_idx[pos as usize] + offset) as u32
+                })
+                .collect();
+        }
+        output.monotone_type = 0;
+    }
+    output.gain *= meta.penalty;
+    is_splittable
+}

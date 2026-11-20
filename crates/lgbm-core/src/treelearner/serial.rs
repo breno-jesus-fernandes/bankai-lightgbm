@@ -13,8 +13,8 @@ use super::col_sampler::ColSampler;
 use super::data_partition::{DataPartition, SplitRule};
 use super::feature_histogram::{
     CatParams, FeatureMeta, Mc, SplitParams, calculate_splitted_leaf_output,
-    find_best_threshold_categorical, find_best_threshold_numerical,
-    find_best_threshold_numerical_int, leaf_output_root,
+    find_best_threshold_categorical, find_best_threshold_categorical_int,
+    find_best_threshold_numerical, find_best_threshold_numerical_int, leaf_output_root,
 };
 use super::gradient_discretizer::GradientDiscretizer;
 use super::histogram;
@@ -484,21 +484,19 @@ impl SerialTreeLearner {
             num_data,
         )?;
         // The quantized integer path is wired for the deterministic nearest-rounding slice:
-        // numeric features and the dense column-wise layout (leaf renewal is supported, see
-        // `renew_int_grad_tree_output`). Configs it does not cover yet (stochastic rounding — its
-        // distributions are implementation-defined across libc++/libstdc++; categorical,
-        // multi-value, sparse or row-wise layouts) fall back to full-precision training, as before
-        // this slice. This is not a silent drop of the parameter: `use_quantized_grad` is honoured
-        // where it is implemented and otherwise behaves as it did while T2.7 was unimplemented.
-        // See D-026.
+        // numeric and categorical features on the dense column-wise layout, with leaf renewal
+        // (`renew_int_grad_tree_output`). Configs it does not cover yet (stochastic rounding — its
+        // distributions are implementation-defined across libc++/libstdc++; multi-value, sparse or
+        // row-wise layouts) fall back to full-precision training, as before this slice. This is not
+        // a silent drop of the parameter: `use_quantized_grad` is honoured where it is implemented
+        // and otherwise behaves as it did while T2.7 was unimplemented. See D-026.
         let bins = cfg.num_grad_quant_bins;
         let quant_supported = cfg.use_quantized_grad
             && !cfg.stochastic_rounding
             && (2..=127).contains(&bins)
             && !row_wise
             && all_feature.is_none()
-            && multi_val.is_none()
-            && metas.iter().all(|m| m.bin_type != BinType::Categorical);
+            && multi_val.is_none();
         let quant = if quant_supported {
             let discretizer = GradientDiscretizer::new(num_data, bins as u8, is_constant_hessian)?;
             Some(QuantState {
@@ -2348,19 +2346,36 @@ fn search_feature_int(
     let mut new_split = SplitInfo::default();
     let int_sum_gradient = ls.int_sum >> 32;
     let int_sum_hessian = ls.int_sum & 0xffff_ffff;
-    let splittable = find_best_threshold_numerical_int(
-        hist,
-        meta,
-        ctx.params,
-        int_sum_gradient,
-        int_sum_hessian,
-        grad_scale,
-        hess_scale,
-        ls.num_data_in_leaf,
-        parent_output,
-        mc,
-        &mut new_split,
-    );
+    let splittable = if meta.bin_type == BinType::Categorical {
+        find_best_threshold_categorical_int(
+            hist,
+            meta,
+            ctx.params,
+            ctx.cat_params,
+            int_sum_gradient,
+            int_sum_hessian,
+            grad_scale,
+            hess_scale,
+            ls.num_data_in_leaf,
+            parent_output,
+            mc,
+            &mut new_split,
+        )
+    } else {
+        find_best_threshold_numerical_int(
+            hist,
+            meta,
+            ctx.params,
+            int_sum_gradient,
+            int_sum_hessian,
+            grad_scale,
+            hess_scale,
+            ls.num_data_in_leaf,
+            parent_output,
+            mc,
+            &mut new_split,
+        )
+    };
     if ctx.monotone_active && meta.monotone_type != 0 {
         let depth = ctx.leaf_depth[ls.leaf_index as usize];
         new_split.gain *= monotone_split_gain_penalty(depth, ctx.monotone_penalization);
