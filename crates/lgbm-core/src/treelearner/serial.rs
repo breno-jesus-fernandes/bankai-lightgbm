@@ -484,19 +484,19 @@ impl SerialTreeLearner {
             num_data,
         )?;
         // The quantized integer path is wired for the deterministic nearest-rounding slice:
-        // numeric and categorical features on the dense column-wise layout, with leaf renewal
-        // (`renew_int_grad_tree_output`). Configs it does not cover yet (stochastic rounding — its
-        // distributions are implementation-defined across libc++/libstdc++; multi-value, sparse or
-        // row-wise layouts) fall back to full-precision training, as before this slice. This is not
-        // a silent drop of the parameter: `use_quantized_grad` is honoured where it is implemented
-        // and otherwise behaves as it did while T2.7 was unimplemented. See D-026.
+        // numeric and categorical features on the column-wise layout (dense single-value groups
+        // and a sparse/dense multi-value group), with leaf renewal (`renew_int_grad_tree_output`).
+        // Configs it does not cover yet (stochastic rounding — its distributions are
+        // implementation-defined across libc++/libstdc++; the row-wise layout) fall back to
+        // full-precision training, as before this slice. This is not a silent drop of the
+        // parameter: `use_quantized_grad` is honoured where it is implemented and otherwise behaves
+        // as it did while T2.7 was unimplemented. See D-026.
         let bins = cfg.num_grad_quant_bins;
         let quant_supported = cfg.use_quantized_grad
             && !cfg.stochastic_rounding
             && (2..=127).contains(&bins)
             && !row_wise
-            && all_feature.is_none()
-            && multi_val.is_none();
+            && all_feature.is_none();
         let quant = if quant_supported {
             let discretizer = GradientDiscretizer::new(num_data, bins as u8, is_constant_hessian)?;
             Some(QuantState {
@@ -1056,11 +1056,11 @@ impl SerialTreeLearner {
 
     /// Build the integer gradient/Hessian histograms for one leaf (quantized path).
     ///
-    /// upstream: `Dataset::ConstructHistograms` on the discretized derivatives (dense
-    /// column-wise groups only). Each row adds its packed `int8` gradient and `uint8` Hessian
-    /// into its group's bin; integer sums are exact and order-independent, so no gather or
-    /// SIMD lane ordering is needed. The buffer layout mirrors the double histogram, so the
-    /// split search reads the same per-feature bin ranges.
+    /// upstream: `Dataset::ConstructHistograms` on the discretized derivatives (column-wise:
+    /// dense single-value groups and one sparse/dense multi-value group). Each row adds its
+    /// packed `int8` gradient and `uint8` Hessian into its group's bin; integer sums are exact
+    /// and order-independent, so no gather or SIMD lane ordering is needed. The buffer layout
+    /// mirrors the double histogram, so the split search reads the same per-feature bin ranges.
     fn construct_int_histograms(
         &mut self,
         is_feature_used: &[bool],
@@ -1079,18 +1079,26 @@ impl SerialTreeLearner {
             }
             _ => None,
         };
-        // Group start bin of each used dense single-value group (same layout as the double pool).
+        // Start bin of each used dense single-value group, and of the multi-value group (same
+        // bin layout as the double pool). The multi-value group is accumulated separately.
         let mut jobs: Vec<(usize, usize, usize)> = Vec::new(); // (group, start bin, num_bin)
+        let mut multi_val_start: Option<usize> = None;
         let mut group_start = 0usize;
         for (gi, g) in l.groups.iter().enumerate() {
             let num_bin = *g.bin_offsets.last().unwrap_or(&0) as usize;
             let fs = l.group_feature_start[gi] as usize;
             let fc = l.group_feature_cnt[gi] as usize;
-            if (fs..fs + fc).any(|f| is_feature_used[f]) {
+            let used = (fs..fs + fc).any(|f| is_feature_used[f]);
+            if g.is_multi_val {
+                if used {
+                    multi_val_start = Some(group_start);
+                }
+            } else if used {
                 jobs.push((gi, group_start, num_bin));
             }
             group_start += num_bin;
         }
+        let mv = self.multi_val.as_ref().map(|(_, mv)| mv);
         let Some(q) = self.quant.as_mut() else {
             unreachable!("construct_int_histograms is only called on the quantized path")
         };
@@ -1101,7 +1109,7 @@ impl SerialTreeLearner {
                 *cell = (0, 0);
             }
             let GroupData::Single(BinData::Dense(bin)) = &ds.data[gi] else {
-                unreachable!("quantized path refused non-dense layouts in new()")
+                unreachable!("non-multi-value quantized group is dense single-value")
             };
             let mut add = |row: usize| {
                 let p = packed[row];
@@ -1115,6 +1123,16 @@ impl SerialTreeLearner {
                 Some(ix) => ix.iter().for_each(|&r| add(r as usize)),
                 None => (0..leaf_cnt).for_each(&mut add),
             }
+        }
+        // upstream: `ConstructHistogramsMultiVal` after the dense groups. Integer sums are
+        // exact, so a single sequential pass over the multi-value group's per-row bins suffices.
+        if let (Some(start), Some(mv)) = (multi_val_start, mv) {
+            mv.accumulate_int(
+                indices.as_deref(),
+                leaf_cnt,
+                &|row| packed[row],
+                &mut int[start..],
+            );
         }
     }
 
