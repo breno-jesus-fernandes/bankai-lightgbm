@@ -13,6 +13,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
 use lgbm_core::boosting::Gbdt;
+use lgbm_core::config::Config;
+use lgbm_core::io::dataset::Dataset;
 use lgbm_core::predictor::{PredictConfig, PredictKind, Predictor};
 
 /// upstream: `API_END()` returns `0` on success.
@@ -668,6 +670,172 @@ pub unsafe extern "C" fn LGBM_BoosterGetNumFeature(
             .map_err(|_| "num_features does not fit in an int".to_string())?;
         // SAFETY: checked non-null just above; writable per the contract.
         unsafe { *out_len = value };
+        Ok(())
+    })
+}
+
+/// A dataset handle's contents (upstream's opaque `DatasetHandle`), owned until
+/// [`LGBM_DatasetFree`].
+struct CDataset {
+    dataset: Dataset,
+}
+
+/// Borrow the dataset a handle points to.
+///
+/// # Safety
+/// `handle` must be a pointer returned by `LGBM_DatasetCreateFromMat` and not yet freed.
+unsafe fn dataset_ref<'a>(handle: *mut c_void) -> Result<&'a CDataset, String> {
+    if handle.is_null() {
+        return Err("dataset handle must not be null".into());
+    }
+    // SAFETY: a live `CDataset` pointer per the contract.
+    Ok(unsafe { &*handle.cast::<CDataset>() })
+}
+
+/// Parse `categorical_feature` (a comma-separated list of column indices) into indices. The
+/// `name:` form upstream also accepts is deferred.
+fn parse_categorical(s: &str) -> Result<Vec<i32>, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+    if s.starts_with("name:") {
+        return Err("categorical_feature by name is not supported in the C API yet".into());
+    }
+    s.split(',')
+        .map(|t| {
+            t.trim()
+                .parse::<i32>()
+                .map_err(|_| format!("invalid categorical_feature index '{}'", t.trim()))
+        })
+        .collect()
+}
+
+/// upstream: `LGBM_DatasetCreateFromMat`. Bin a dense `nrow x ncol` matrix (`float32`/`float64`,
+/// row- or column-major) into a new dataset, using the `parameters` config string. The label and
+/// other fields are set separately; `reference` (sharing another dataset's bin mappers) is
+/// deferred, so it must be null.
+///
+/// # Safety
+/// `data` must point to `nrow * ncol` elements of `data_type`; `parameters` is null or a C
+/// string; `reference` must be null; `out` must be a valid writable pointer.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn LGBM_DatasetCreateFromMat(
+    data: *const c_void,
+    data_type: c_int,
+    nrow: i32,
+    ncol: i32,
+    is_row_major: c_int,
+    parameters: *const c_char,
+    reference: *const c_void,
+    out: *mut *mut c_void,
+) -> c_int {
+    guard(|| {
+        if out.is_null() {
+            return Err("out dataset handle pointer must not be null".into());
+        }
+        if !reference.is_null() {
+            return Err("dataset reference (shared bin mappers) is not supported yet".into());
+        }
+        if nrow < 0 || ncol < 0 {
+            return Err("nrow and ncol must not be negative".into());
+        }
+        let (nrow, ncol) = (nrow as usize, ncol as usize);
+        let n = nrow * ncol;
+        if n != 0 && data.is_null() {
+            return Err("data must not be null".into());
+        }
+        let params = if parameters.is_null() {
+            ""
+        } else {
+            // SAFETY: non-null per the branch; a valid C string per the contract.
+            unsafe { cstr_to_str(parameters, "parameters") }?
+        };
+        let cfg = Config::from_str_params(params).map_err(|e| e.to_string())?;
+        let categorical = parse_categorical(&cfg.categorical_feature)?;
+        let row_major = is_row_major != 0;
+        let gathered = match data_type {
+            C_API_DTYPE_FLOAT64 => {
+                // SAFETY: `data` points to `n` f64 values (checked non-null when `n != 0`).
+                let src = unsafe { std::slice::from_raw_parts(data.cast::<f64>(), n) };
+                to_row_major(src, nrow, ncol, row_major, |x| x)
+            }
+            C_API_DTYPE_FLOAT32 => {
+                // SAFETY: `data` points to `n` f32 values (checked non-null when `n != 0`).
+                let src = unsafe { std::slice::from_raw_parts(data.cast::<f32>(), n) };
+                to_row_major(src, nrow, ncol, row_major, f64::from)
+            }
+            other => {
+                return Err(format!(
+                    "unsupported data_type {other} (only float32=0 and float64=1)"
+                ));
+            }
+        };
+        // The label is set separately in the C API; a zero placeholder keeps the length check
+        // happy and does not affect the bin mappers.
+        let label = vec![0.0f64; nrow];
+        let dataset = Dataset::from_dense(&gathered, nrow, ncol, &label, &cfg, &categorical)
+            .map_err(|e| e.to_string())?;
+        let boxed = Box::new(CDataset { dataset });
+        // SAFETY: `out` is non-null (checked) and writable per the contract.
+        unsafe { *out = Box::into_raw(boxed).cast::<c_void>() };
+        Ok(())
+    })
+}
+
+/// upstream: `LGBM_DatasetFree`. Releases a handle from `LGBM_DatasetCreateFromMat`.
+///
+/// # Safety
+/// `handle` must be a live pointer from a dataset-create call, freed at most once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LGBM_DatasetFree(handle: *mut c_void) -> c_int {
+    guard(|| {
+        if handle.is_null() {
+            return Err("dataset handle must not be null".into());
+        }
+        // SAFETY: a live `CDataset` pointer, freed at most once per the contract.
+        drop(unsafe { Box::from_raw(handle.cast::<CDataset>()) });
+        Ok(())
+    })
+}
+
+/// upstream: `LGBM_DatasetGetNumData`. The number of rows in the dataset.
+///
+/// # Safety
+/// `handle` must be a live dataset handle; `out` a valid writable pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LGBM_DatasetGetNumData(handle: *mut c_void, out: *mut c_int) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let ds = unsafe { dataset_ref(handle) }?;
+        if out.is_null() {
+            return Err("out must not be null".into());
+        }
+        let value = c_int::try_from(ds.dataset.num_data())
+            .map_err(|_| "num_data does not fit in an int".to_string())?;
+        // SAFETY: checked non-null just above; writable per the contract.
+        unsafe { *out = value };
+        Ok(())
+    })
+}
+
+/// upstream: `LGBM_DatasetGetNumFeature`. The number of features in the dataset.
+///
+/// # Safety
+/// `handle` must be a live dataset handle; `out` a valid writable pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LGBM_DatasetGetNumFeature(handle: *mut c_void, out: *mut c_int) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let ds = unsafe { dataset_ref(handle) }?;
+        if out.is_null() {
+            return Err("out must not be null".into());
+        }
+        let value = c_int::try_from(ds.dataset.layout.num_total_features)
+            .map_err(|_| "num_feature does not fit in an int".to_string())?;
+        // SAFETY: checked non-null just above; writable per the contract.
+        unsafe { *out = value };
         Ok(())
     })
 }

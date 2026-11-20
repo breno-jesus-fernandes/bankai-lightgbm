@@ -2,12 +2,12 @@
 //! `Dataset::from_dense` and upstream's C API contract (SPEC-ERR-5).
 #![allow(clippy::unwrap_used)]
 
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CStr, CString, c_int, c_void};
 use std::ptr;
 
 use lgbm_capi::{
-    LGBM_DatasetCreateFromMat, LGBM_DatasetFree, LGBM_DatasetGetNumData,
-    LGBM_DatasetGetNumFeature, LGBM_GetLastError,
+    LGBM_DatasetCreateFromMat, LGBM_DatasetFree, LGBM_DatasetGetNumData, LGBM_DatasetGetNumFeature,
+    LGBM_GetLastError,
 };
 use lgbm_core::config::Config;
 use lgbm_core::io::dataset::Dataset;
@@ -107,8 +107,10 @@ fn create_from_mat_rejects_reference_and_nulls() {
     let params = CString::new("").unwrap();
     let mut handle: *mut c_void = ptr::null_mut();
 
-    // A non-null reference is not supported yet: error, not a crash.
-    let dummy_ref = 1usize as *const c_void;
+    // A non-null reference is not supported yet: error, not a crash. Point at a real local so
+    // the pointer is non-null and not dangling.
+    let anchor = 0u8;
+    let dummy_ref = std::ptr::from_ref(&anchor).cast::<c_void>();
     // SAFETY: data valid; reference is an explicitly handled unsupported path.
     let rc = unsafe {
         LGBM_DatasetCreateFromMat(
@@ -149,6 +151,4 @@ fn create_from_mat_rejects_reference_and_nulls() {
         -1
     );
     assert!(last_error().contains("null"));
-    let _ = C_API_DTYPE_FLOAT32; // keep the const referenced if the f32 test is filtered out
-    let _: *const c_char = params.as_ptr();
 }
