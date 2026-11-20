@@ -36,7 +36,41 @@ fn synthetic(nrow: usize, ncol: usize) -> (Vec<f64>, Vec<f64>) {
     (x, y)
 }
 
+/// Dense data (no mostly-zero columns), so feature bundling makes no multi-value group and the
+/// quantized integer path is actually exercised rather than falling back to full precision.
+fn dense_synthetic(nrow: usize, ncol: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut state = 0x2545_F491_4F6C_DD1D_u64;
+    let mut next = move || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    let mut x = vec![0.0; nrow * ncol];
+    let mut y = vec![0.0; nrow];
+    for r in 0..nrow {
+        for c in 0..ncol {
+            let u = (next() >> 11) as f64 / (1u64 << 53) as f64;
+            x[r * ncol + c] = u * (c as f64 + 1.0) - 0.5;
+        }
+        y[r] = x[r * ncol] + 2.0 * x[r * ncol + 1] - x[r * ncol + 2] * x[r * ncol + 3];
+    }
+    (x, y)
+}
+
 fn train_text(num_threads: u32, x: &[f64], y: &[f64], nrow: usize, ncol: usize) -> String {
+    train_text_with(num_threads, x, y, nrow, ncol, &[])
+}
+
+fn train_text_with(
+    num_threads: u32,
+    x: &[f64],
+    y: &[f64],
+    nrow: usize,
+    ncol: usize,
+    extra: &[(&str, &str)],
+) -> String {
     let params: HashMap<String, String> = [
         ("objective", "regression"),
         ("num_leaves", "31"),
@@ -47,6 +81,7 @@ fn train_text(num_threads: u32, x: &[f64], y: &[f64], nrow: usize, ncol: usize) 
         ("verbose", "-1"),
     ]
     .into_iter()
+    .chain(extra.iter().copied())
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .chain([("num_threads".to_string(), num_threads.to_string())])
     .collect();
@@ -71,6 +106,29 @@ fn model_text_is_independent_of_num_threads() {
         assert!(
             parallel == serial,
             "num_threads={threads} changed the model text"
+        );
+    }
+}
+
+#[test]
+fn quantized_model_text_is_independent_of_num_threads() {
+    // Quantized training (`use_quantized_grad`) on dense data. The integer gradient/Hessian
+    // sums are exact and order-independent, so the trees must be identical for any thread count
+    // (SPEC-NUM-3), just like the full-precision path.
+    let (nrow, ncol) = (40_000, 20);
+    let (x, y) = dense_synthetic(nrow, ncol);
+    let quant: &[(&str, &str)] = &[
+        ("use_quantized_grad", "true"),
+        ("stochastic_rounding", "false"),
+        ("num_grad_quant_bins", "8"),
+    ];
+    let serial = train_text_with(1, &x, &y, nrow, ncol, quant);
+    assert!(serial.contains("Tree=14"), "expected 15 trees in the model");
+    for threads in [2, 3] {
+        let parallel = train_text_with(threads, &x, &y, nrow, ncol, quant);
+        assert!(
+            parallel == serial,
+            "num_threads={threads} changed the quantized model text"
         );
     }
 }
