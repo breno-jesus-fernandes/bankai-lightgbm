@@ -262,6 +262,27 @@ impl GbdtTrainer {
         Ok(names)
     }
 
+    /// Evaluate the configured metrics over the training data, in the order [`Self::eval_names`]
+    /// reports (upstream `Booster::GetEval` for `data_idx == 0`). The metrics see the training
+    /// score updater — the raw scores accumulated during boosting, class-major and including the
+    /// init score — exactly as upstream's training `ScoreUpdater` holds them.
+    pub fn eval_values(&mut self) -> Result<Vec<f64>> {
+        // `snapshot` (shared borrow) must precede `training_score` (exclusive borrow); the model is
+        // owned, so its objective stays valid while the scores are read.
+        let model = self.snapshot();
+        let scores = self.training_score().to_vec();
+        let cfg = &self.trainer.cfg;
+        let md = &self.trainer.ds.metadata;
+        let objective = model.objective();
+        let mut values = Vec::new();
+        for name in &cfg.metric {
+            if let Some(metric) = create_metric(name, cfg, md)? {
+                values.extend(metric.eval(&scores, objective));
+            }
+        }
+        Ok(values)
+    }
+
     /// The model trained so far (a copy; training can continue afterwards).
     pub fn snapshot(&self) -> Gbdt {
         self.trainer.snapshot()

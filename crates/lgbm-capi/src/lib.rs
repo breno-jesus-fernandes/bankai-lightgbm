@@ -1522,6 +1522,51 @@ pub unsafe extern "C" fn LGBM_BoosterGetEvalNames(
     })
 }
 
+/// upstream: `LGBM_BoosterGetEval`. Evaluate the training metrics for dataset `data_idx` and write
+/// the values to `out_results` (sized by [`LGBM_BoosterGetEvalCounts`]), setting `out_len` to how
+/// many were written. Only the training data (`data_idx == 0`) is supported; validation datasets
+/// are not available yet. A booster loaded from a model has no training data and reports no values.
+///
+/// # Safety
+/// `handle` must be a live booster handle; `out_len` a valid writable pointer; `out_results`
+/// writable for at least [`LGBM_BoosterGetEvalCounts`] `f64` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LGBM_BoosterGetEval(
+    handle: *mut c_void,
+    data_idx: c_int,
+    out_len: *mut c_int,
+    out_results: *mut f64,
+) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let booster = unsafe { booster_mut(handle) }?;
+        if out_len.is_null() {
+            return Err("out_len must not be null".into());
+        }
+        if data_idx != 0 {
+            return Err(format!(
+                "validation dataset {data_idx} is not available; only the training data \
+                 (data_idx 0) is supported"
+            ));
+        }
+        let values = match booster {
+            CBooster::Trainer(trainer) => trainer.eval_values().map_err(|e| e.to_string())?,
+            // A booster loaded from a model has no training data: report no values.
+            CBooster::Model(_) => Vec::new(),
+        };
+        // SAFETY: checked non-null above; writable per the contract.
+        unsafe { *out_len = c_int::try_from(values.len()).map_err(|_| "too many metrics")? };
+        if !values.is_empty() {
+            if out_results.is_null() {
+                return Err("out_results must not be null".into());
+            }
+            // SAFETY: the caller sized `out_results` by `LGBM_BoosterGetEvalCounts`.
+            unsafe { std::ptr::copy_nonoverlapping(values.as_ptr(), out_results, values.len()) };
+        }
+        Ok(())
+    })
+}
+
 /// upstream: `LGBM_BoosterSaveModelToString`. Serialize the model (loaded or in training) to its
 /// text form, following the two-call buffer protocol: `out_len` is always set to the length
 /// needed including the trailing NUL, and the text is written to `out_str` only when
