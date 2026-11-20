@@ -693,6 +693,19 @@ unsafe fn dataset_ref<'a>(handle: *mut c_void) -> Result<&'a CDataset, String> {
     Ok(unsafe { &*handle.cast::<CDataset>() })
 }
 
+/// Borrow the dataset a handle points to mutably (for `LGBM_DatasetSetField`).
+///
+/// # Safety
+/// `handle` must be a pointer returned by a dataset-create call, not yet freed, with no other
+/// reference to the same dataset live for the duration of the borrow.
+unsafe fn dataset_mut<'a>(handle: *mut c_void) -> Result<&'a mut CDataset, String> {
+    if handle.is_null() {
+        return Err("dataset handle must not be null".into());
+    }
+    // SAFETY: a live `CDataset` pointer per the contract; the caller guarantees exclusivity.
+    Ok(unsafe { &mut *handle.cast::<CDataset>() })
+}
+
 /// Parse `categorical_feature` (a comma-separated list of column indices) into indices. The
 /// `name:` form upstream also accepts is deferred.
 fn parse_categorical(s: &str) -> Result<Vec<i32>, String> {
@@ -1063,4 +1076,155 @@ pub unsafe extern "C" fn LGBM_DatasetGetNumFeature(handle: *mut c_void, out: *mu
         unsafe { *out = value };
         Ok(())
     })
+}
+
+/// upstream: `LGBM_DatasetSetField`. Set a metadata field from a C buffer of `num_element`
+/// elements. The field name selects the array and the expected dtype:
+/// `label`/`target` and `weight`/`weights` take `float32`; `init_score` takes `float64`;
+/// `group`/`query` (per-query sizes, turned into boundaries) and `position` take `int32`.
+/// The dtype must match the field, as upstream.
+///
+/// # Safety
+/// `handle` must be a live dataset handle; `field_name` a valid C string; `field_data` must point
+/// to `num_element` elements of `field_type`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LGBM_DatasetSetField(
+    handle: *mut c_void,
+    field_name: *const c_char,
+    field_data: *const c_void,
+    num_element: c_int,
+    field_type: c_int,
+) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let ds = unsafe { dataset_mut(handle) }?;
+        // SAFETY: a valid C string per the contract (null is rejected inside).
+        let name = unsafe { cstr_to_str(field_name, "field_name") }?.trim();
+        if num_element < 0 {
+            return Err("num_element must not be negative".into());
+        }
+        let n = num_element as usize;
+        if n != 0 && field_data.is_null() {
+            return Err("field_data must not be null when num_element != 0".into());
+        }
+        match (field_type, name) {
+            (C_API_DTYPE_FLOAT32, "label" | "target") => {
+                // SAFETY: `field_data` points to `n` f32 values (checked non-null when `n != 0`).
+                let src = unsafe { raw_slice::<f32>(field_data, n) };
+                let label: Vec<f64> = src.iter().map(|&x| f64::from(x)).collect();
+                ds.dataset.set_label(&label).map_err(|e| e.to_string())
+            }
+            (C_API_DTYPE_FLOAT32, "weight" | "weights") => {
+                // SAFETY: `field_data` points to `n` f32 values (checked non-null when `n != 0`).
+                let src = unsafe { raw_slice::<f32>(field_data, n) };
+                ds.dataset.set_weights(src).map_err(|e| e.to_string())
+            }
+            (C_API_DTYPE_FLOAT64, "init_score") => {
+                // SAFETY: `field_data` points to `n` f64 values (checked non-null when `n != 0`).
+                let src = unsafe { raw_slice::<f64>(field_data, n) };
+                ds.dataset.set_init_score(src).map_err(|e| e.to_string())
+            }
+            (C_API_DTYPE_INT32, "group" | "query") => {
+                // SAFETY: `field_data` points to `n` i32 values (checked non-null when `n != 0`).
+                let src = unsafe { raw_slice::<i32>(field_data, n) };
+                ds.dataset.set_group(src).map_err(|e| e.to_string())
+            }
+            (C_API_DTYPE_INT32, "position") => {
+                // SAFETY: `field_data` points to `n` i32 values (checked non-null when `n != 0`).
+                let src = unsafe { raw_slice::<i32>(field_data, n) };
+                ds.dataset.set_positions(src).map_err(|e| e.to_string())
+            }
+            (_, other) => Err(format!(
+                "unknown field '{other}' for dtype {field_type} (supported: label/weight as \
+                 float32, init_score as float64, group/query/position as int32)"
+            )),
+        }
+    })
+}
+
+/// upstream: `LGBM_DatasetGetField`. Return a borrowed pointer to a metadata field, its length and
+/// its dtype. The pointer stays valid until the field is set again or the dataset is freed. An
+/// unset (empty) field yields a null pointer and length 0, as upstream. Field names and dtypes
+/// mirror [`LGBM_DatasetSetField`]; `group`/`query` returns the query boundaries
+/// (`num_queries + 1` values), not the per-query sizes.
+///
+/// # Safety
+/// `handle` must be a live dataset handle; `field_name` a valid C string; `out_len`, `out_ptr` and
+/// `out_type` must be valid writable pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn LGBM_DatasetGetField(
+    handle: *mut c_void,
+    field_name: *const c_char,
+    out_len: *mut c_int,
+    out_ptr: *mut *const c_void,
+    out_type: *mut c_int,
+) -> c_int {
+    guard(|| {
+        // SAFETY: forwarded from this function's safety contract.
+        let ds = unsafe { dataset_ref(handle) }?;
+        // SAFETY: a valid C string per the contract (null is rejected inside).
+        let name = unsafe { cstr_to_str(field_name, "field_name") }?.trim();
+        if out_len.is_null() || out_ptr.is_null() || out_type.is_null() {
+            return Err("out_len, out_ptr and out_type must not be null".into());
+        }
+        let md = &ds.dataset.metadata;
+        // Each arm names the field's dtype and the raw byte pointer + element count.
+        let (ty, ptr, len): (c_int, *const c_void, usize) = match name {
+            "label" | "target" => (
+                C_API_DTYPE_FLOAT32,
+                md.label.as_ptr().cast::<c_void>(),
+                md.label.len(),
+            ),
+            "weight" | "weights" => (
+                C_API_DTYPE_FLOAT32,
+                md.weights.as_ptr().cast::<c_void>(),
+                md.weights.len(),
+            ),
+            "init_score" => (
+                C_API_DTYPE_FLOAT64,
+                md.init_score.as_ptr().cast::<c_void>(),
+                md.init_score.len(),
+            ),
+            "group" | "query" => (
+                C_API_DTYPE_INT32,
+                md.query_boundaries.as_ptr().cast::<c_void>(),
+                md.query_boundaries.len(),
+            ),
+            "position" => (
+                C_API_DTYPE_INT32,
+                md.positions.as_ptr().cast::<c_void>(),
+                md.positions.len(),
+            ),
+            other => return Err(format!("unknown field '{other}'")),
+        };
+        // An empty field reports a null pointer and length 0 (upstream normalizes this way), since
+        // an empty Vec's pointer is dangling.
+        let (ptr, len) = if len == 0 {
+            (std::ptr::null::<c_void>(), 0)
+        } else {
+            let len = c_int::try_from(len)
+                .map_err(|_| "field length does not fit in an int".to_string())?;
+            (ptr, len)
+        };
+        // SAFETY: all three checked non-null above; writable per the contract.
+        unsafe {
+            *out_type = ty;
+            *out_ptr = ptr;
+            *out_len = len;
+        }
+        Ok(())
+    })
+}
+
+/// Read `n` elements of type `T` from a C buffer as a slice (empty when `n == 0`).
+///
+/// # Safety
+/// `ptr` must point to `n` readable `T` values, or `n` must be 0.
+unsafe fn raw_slice<'a, T>(ptr: *const c_void, n: usize) -> &'a [T] {
+    if n == 0 {
+        &[]
+    } else {
+        // SAFETY: `ptr` points to `n` readable `T` per the contract.
+        unsafe { std::slice::from_raw_parts(ptr.cast::<T>(), n) }
+    }
 }

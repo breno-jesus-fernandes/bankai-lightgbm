@@ -176,7 +176,10 @@ fn weight_init_score_round_trip_and_empty_before_set() {
     let mut reference =
         Dataset::from_dense(&matrix(nrow, ncol), nrow, ncol, &vec![0.0; nrow], &cfg, &[]).unwrap();
     reference.set_weights(&weight).unwrap();
-    assert_eq!(read_f32(get_field(handle, "weight").1, nrow), reference.metadata.weights);
+    assert_eq!(
+        read_f32(get_field(handle, "weight").1, nrow),
+        reference.metadata.weights
+    );
 
     // SAFETY: freed once.
     assert_eq!(unsafe { LGBM_DatasetFree(handle) }, 0);
