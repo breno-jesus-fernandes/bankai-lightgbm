@@ -895,3 +895,32 @@ Entry format:
   -D warnings clean; scripts/check.sh ended "all green" (2416 Python tests passed).
   Touches `treelearner/`, so CI runs the interleaved benchmark (codegen-units=1).
 - Status: active
+
+## D-029: Multi-value (sparse) group in quantized training (T2.7, slice 8)
+
+- Date: 2026-11-19
+- Choice: build the integer histogram for a column-wise multi-value feature group
+  (`MultiValBin::accumulate_int`, routed from `construct_int_histograms`), so sparse
+  data trains on the quantized path instead of falling back to full precision.
+- Mechanism: Exclusive Feature Bundling packs sparse columns into one multi-value
+  group whose per-row entries are `(sub-feature, bin)` pairs (sparse CSR-like or dense
+  packed). `accumulate_int` iterates the leaf's rows and adds each row's packed
+  `int8`/`uint8` derivative into every bin the row touches, mirroring the double
+  `MultiValBin::accumulate`. Because integer sums are exact and order-independent, it
+  is a single sequential pass with no per-thread blocks or merge (unlike the double
+  `construct`, which blocks for determinism). The dense single-value groups keep their
+  existing per-group loop; the multi-value group's histogram occupies its own bin
+  range in the same layout as the double pool, so the integer split search and sibling
+  subtraction are unchanged.
+- Fallback narrowed: `multi_val.is_some()` no longer forces the full-precision
+  fallback. The remaining fallback is the row-wise layout (`force_row_wise`, which uses
+  the row-major copy and the all-feature row-wise view) and stochastic rounding.
+- Oracle: `tests/parity/test_quantized_training_parity.py::
+  test_quantized_sparse_matches_upstream` on 75%-zero columns (EFB bundles them),
+  tree-by-tree against `lightgbm==4.7.0` at `num_grad_quant_bins` 4/8/16. Red first
+  (sparse fell back to full precision), green after.
+- SPEC ref: SPEC-NUM-6, SPEC-NUM-2, SPEC-CONC-3.
+- Validation: cargo fmt --all --check, cargo clippy --workspace --all-targets
+  -D warnings clean; scripts/check.sh ended "all green" (2419 Python tests passed).
+  Touches `treelearner/`, so CI runs the interleaved benchmark (codegen-units=1).
+- Status: active
