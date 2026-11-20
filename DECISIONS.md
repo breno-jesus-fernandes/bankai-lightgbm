@@ -997,3 +997,39 @@ Entry format:
   -D warnings clean; scripts/check.sh ended "all green" (2423 Python tests passed,
   the 2 stochastic parity cases among them on this macOS host).
 - Status: active. Marks T2.7 complete for CPU.
+
+## D-032: C-header harness closes T5.3; implemented C API subset (T5.3)
+
+- Date: 2026-11-20
+- Question: T5.3's Verify is "a C test harness built against the upstream header, GATES". The
+  `lgbm-capi` symbol surface now covers the whole single-dataset workflow, but no C program had
+  ever compiled against the real `c_api.h`, so signature/ABI drift from upstream was unchecked.
+  When is T5.3 done, given upstream exports ~98 symbols and we implement a subset?
+- Choice: vendor the verbatim upstream headers (`include/LightGBM/{c_api.h,export.h,arrow.h}` at
+  v4.7.0) under `third_party/lightgbm/include/`, add `crates/lgbm-capi/ctest/harness.c` which
+  `#include <LightGBM/c_api.h>` and drives the implemented symbols end to end (dataset create →
+  set label → train → eval counts/names/values → predict → save-to-string), and run it from
+  `scripts/c_header_harness.sh` (build the staticlib, compile with `-isystem` the vendored
+  include dir, link, run). Wired as a dedicated `c_header_harness` CI job (ubuntu) and into
+  `scripts/check.sh` (guarded by the presence of a C compiler). This is the stop-list CI-gate
+  change, made with explicit user authorization. Mark T5.3 `[x]`.
+- Rationale: compiling the harness against the *upstream* prototypes type-checks every call site
+  against upstream's declared signatures, and running it against the linked staticlib catches
+  symbol gaps and ABI drift the Rust integration tests (which use the crate's own `extern "C"`
+  declarations) cannot. The implemented surface is the complete CPU single-dataset path:
+  error handling + last error; model load/free; dataset construction (`DatasetCreateFrom{Mat,CSR,
+  CSC}` + `Free`/`GetNumData`/`GetNumFeature`); fields (`DatasetSet/GetField`); training
+  (`BoosterCreate`/`UpdateOneIter`/`RollbackOneIter`); prediction (`PredictFor{Mat,CSR,CSC,
+  MatSingleRow,File}` + `CalcNumPredict`/`GetNumFeature`); serialization (`SaveModelToString`/
+  `SaveModel`); eval over training data (`GetEvalCounts`/`GetEvalNames`/`GetEval`). Deferred to
+  follow-up nodes (not needed for the v1 CPU drop-in train/predict/eval/serialize cycle):
+  `AddValidData` + `GetEval` over validation data (needs a predict-over-`Dataset` path or a raw
+  matrix retained in the handle — a core design choice), streaming/push APIs, Arrow ingestion,
+  `FastConfig`, `Refit`, CV, and `DumpModel`/feature-importance accessors. The prediction
+  `parameter` string remains unparsed (rejected when non-empty), as noted since slice 2.
+- SPEC ref: SPEC-ERR-5; ROADMAP T5.3 (Verify). Extends D-012.
+- Validation: `scripts/c_header_harness.sh` prints "c_api harness: OK" and "all green" locally
+  (macOS, clang); `scripts/check.sh` ended "all green" (2423 Python tests). CI runs the harness
+  in its own `c_header_harness` job (ubuntu, gcc).
+- Status: active. Marks T5.3 complete for the implemented CPU subset; the deferred symbols above
+  are tracked as follow-ups.
