@@ -93,6 +93,17 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  # Compile a C program against the verbatim upstream header and link the lgbm-capi static library,
+  # then run it end to end (ROADMAP T5.3 "Verify": a C test harness built against the upstream
+  # header). `cc` is preinstalled on the runner.
+  c_header_harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/c_header_harness.sh
+
   python:
     runs-on: ${{ matrix.os }}
     strategy:
