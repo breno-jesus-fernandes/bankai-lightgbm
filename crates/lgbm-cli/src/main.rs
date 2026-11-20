@@ -30,8 +30,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
     match cfg.task {
         TaskType::Train => train(&cfg),
         TaskType::Predict => predict(&cfg),
+        TaskType::SaveBinary => save_binary(&cfg),
         other => Err(format!(
-            "task {other:?} is not implemented yet (only task=train and task=predict are supported)"
+            "task {other:?} is not implemented yet (supported: train, predict, save_binary)"
         )),
     }
 }
@@ -70,7 +71,9 @@ fn config_tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn train(cfg: &Config) -> Result<(), String> {
+/// Load the `data` text file and bin it into a training `Dataset` (column 0 is the label unless
+/// `label_column` says otherwise). Shared by `task=train` and `task=save_binary`.
+fn build_training_dataset(cfg: &Config) -> Result<Dataset, String> {
     if cfg.data.is_empty() {
         return Err("no training data: set data=<file>".into());
     }
@@ -83,11 +86,10 @@ fn train(cfg: &Config) -> Result<(), String> {
         group_column: &cfg.group_column,
         ignore_column: &cfg.ignore_column,
         precise_float_parser: cfg.precise_float_parser,
-        // Training: column 0 is the label unless `label_column` says otherwise.
         num_features: 0,
     };
     let loaded = load_text(&content, &opts).map_err(|e| e.to_string())?;
-    let dataset = Dataset::from_dense(
+    Dataset::from_dense(
         &loaded.features,
         loaded.num_data,
         loaded.num_features,
@@ -95,7 +97,11 @@ fn train(cfg: &Config) -> Result<(), String> {
         cfg,
         &[],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())
+}
+
+fn train(cfg: &Config) -> Result<(), String> {
+    let dataset = build_training_dataset(cfg)?;
     let model = Gbdt::train(cfg, &dataset).map_err(|e| e.to_string())?;
     let text = model
         .save_model_to_string(0, 0, cfg.saved_feature_importance_type)
@@ -107,6 +113,21 @@ fn train(cfg: &Config) -> Result<(), String> {
     };
     std::fs::write(Path::new(output), text)
         .map_err(|e| format!("writing model to {output}: {e}"))?;
+    Ok(())
+}
+
+fn save_binary(cfg: &Config) -> Result<(), String> {
+    let dataset = build_training_dataset(cfg)?;
+    // Upstream writes the binary dataset next to the data file as `<data>.bin`.
+    let output = format!("{}.bin", cfg.data);
+    // The core writer refuses to overwrite (it warns and skips); fail loudly here so a silent
+    // no-op is not mistaken for a successful save.
+    if Path::new(&output).exists() {
+        return Err(format!(
+            "output file {output} already exists; refusing to overwrite"
+        ));
+    }
+    dataset.save_binary(&output).map_err(|e| e.to_string())?;
     Ok(())
 }
 

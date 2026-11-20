@@ -91,7 +91,11 @@ fn save_binary_writes_the_same_bytes_as_core() {
 
     // Upstream writes to `<data>.bin`.
     let bin_path = dir.join("train.csv.bin");
-    assert!(bin_path.exists(), "expected binary at {}", bin_path.display());
+    assert!(
+        bin_path.exists(),
+        "expected binary at {}",
+        bin_path.display()
+    );
 
     // Oracle bytes.
     let oracle_path = dir.join("oracle.bin");
