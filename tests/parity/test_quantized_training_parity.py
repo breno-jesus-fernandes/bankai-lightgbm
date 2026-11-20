@@ -13,6 +13,8 @@ the training tolerance of AGENTS.md section 4.
 
 from __future__ import annotations
 
+import sys
+
 import lightgbm
 import numpy as np
 import pytest
@@ -146,6 +148,23 @@ def test_quantized_row_wise_matches_upstream(sparse: bool) -> None:
     paths must match upstream, and the full-precision / column-wise models too."""
     X, y = _sparse_data() if sparse else _data()
     params = {**BASE, "num_grad_quant_bins": 8, "force_row_wise": True}
+    theirs = lightgbm.train(params, lightgbm.Dataset(X, y), num_boost_round=10)
+    ours = lgb.train(params, lgb.Dataset(X, y), num_boost_round=10)
+    assert _trees(ours.model_to_string()) == _trees(theirs.model_to_string())
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="stochastic rounding draws libc++ std::uniform_* distributions; bit-exact parity "
+    "holds only where the installed lightgbm uses libc++ (macOS). See DECISIONS D-031.",
+)
+@pytest.mark.parametrize("objective", ["regression", "binary"])
+def test_quantized_stochastic_rounding_matches_upstream(objective: str) -> None:
+    """`stochastic_rounding=true` (the default) rounds each derivative by adding precomputed
+    uniform [0,1) noise. The noise comes from `std::mt19937` + libc++'s `uniform_real`/
+    `uniform_int`, so this is pinned to libc++ and runs bit-exact only on macOS."""
+    X, y = _binary_data() if objective == "binary" else _data()
+    params = {**BASE, "objective": objective, "num_grad_quant_bins": 8, "stochastic_rounding": True}
     theirs = lightgbm.train(params, lightgbm.Dataset(X, y), num_boost_round=10)
     ours = lgb.train(params, lgb.Dataset(X, y), num_boost_round=10)
     assert _trees(ours.model_to_string()) == _trees(theirs.model_to_string())
