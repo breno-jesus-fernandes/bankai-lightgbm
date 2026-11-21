@@ -1166,3 +1166,12 @@ Entry format:
 - The bin-mismatch test constructs both datasets before the update so it exercises the upstream bin alignment check on independently constructed bins.
 - Validation: `scripts/check.sh` all green (2459 Python tests), with 2453 tests passed in the release parity and upstream suites.
 - Criterion: macOS/aarch64, release bench profile, one thread, base `cf26dbb`, seven interleaved runs. Split finding at 255 bins was 1.0002x base, partition at 200k rows was 1.0004x, and the 4096 × 12 mixed row-wise training cases were 0.9940x and 1.0005x. The unaligned benchmark showed two 4096-bin histogram slowdowns above 5% on isolated rerun. With both revisions rebuilt using the CI flags `-C llvm-args=-align-all-functions=6 -C codegen-units=1`, the isolated seven-round ratios were 0.9897x for all-row histogram accumulation and 0.9753x for variable-Hessian SIMD dispatch, with 0.9532x for the dense prediction control. Timings used the standard `kernels` bench, with 0.5 s warmup, 1 s measurement and 20 samples for the aligned rerun. No upstream process participates in Criterion, so OMP_WAIT_POLICY is not applicable to those timings.
+
+## D-041: Rebuild the random forest score when switching training rows
+
+- Date: 2026-11-21
+- Choice: Keep split records for the forest's trained trees, replay them on the replacement data, and scale the score by the upstream f32 reciprocal of the tree count per class. With trees already present, upstream BoostFromAverage returns zero, so recompute fixed gradients on the replacement labels from a zero base score.
+- Evidence: The RF test first failed on the unsupported reset. The replacement has half as many rows and different labels. After the third iteration the model predictions and training L2 match LightGBM 4.7.0 within the documented tolerance.
+- Criterion: seven interleaved release rounds on macOS/aarch64, one thread, against `62c5857` using all 25 `kernels` cases, 0.1 s warmup, 0.2 s measurement, and 20 samples. The slowest ratio was 1.0398x. Numerical split finding (255 bins) was 1.0003x, partition (200k rows) 1.0005x, and the 4096 × 12 mixed row-wise training cases were 1.0016x and 0.9980x. The Rust-only comparison does not run upstream or use OMP_WAIT_POLICY.
+- `scripts/check.sh` reported all green with 2460 Python tests passed.
+- The release parity and upstream Python suites passed 2454 tests.

@@ -50,3 +50,33 @@ def test_update_rejects_different_bin_mappers(lib: ModuleType) -> None:
     replacement = lib.Dataset(x * 10, label=x[:, 0], params=params).construct()
     with pytest.raises(lib.basic.LightGBMError, match="different bin mappers"):
         booster.update(train_set=replacement)
+
+
+def test_rf_update_with_aligned_training_dataset() -> None:
+    rng = np.random.default_rng(83)
+    x = rng.normal(size=(256, 5))
+    y = 10 + x @ np.arange(1.0, 6.0)
+    params = {
+        "objective": "regression",
+        "boosting": "rf",
+        "metric": "l2",
+        "num_threads": 1,
+        "min_data_in_leaf": 4,
+        "feature_fraction": 0.6,
+        "verbosity": -1,
+    }
+    predictions = []
+    evaluations = []
+    for lib in (lightgbm, bankai_lightgbm):
+        original = lib.Dataset(x, label=y, params=params)
+        booster = lib.Booster(params, original)
+        booster.update()
+        booster.update()
+        replacement = original.create_valid(x[::2], label=-y[::2], params=params)
+        booster.update(train_set=replacement)
+        assert booster.current_iteration() == 3
+        predictions.append(booster.predict(x, num_threads=1))
+        evaluations.append(booster.eval_train()[0][2])
+
+    np.testing.assert_allclose(predictions[1], predictions[0], rtol=1e-12, atol=0)
+    np.testing.assert_allclose(evaluations[1], evaluations[0], rtol=1e-12, atol=0)

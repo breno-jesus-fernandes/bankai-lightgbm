@@ -204,11 +204,6 @@ impl GbdtTrainer {
         if Arc::ptr_eq(&t.ds, &ds) {
             return Ok(());
         }
-        if t.rf {
-            return Err(Error::Unsupported(
-                "replacing the training Dataset with boosting=rf".into(),
-            ));
-        }
         let old = &t.ds;
         let mapper = |data: &Dataset, f: usize| {
             (
@@ -258,6 +253,24 @@ impl GbdtTrainer {
                 &mut replacement.score[off..off + n],
             );
         }
+        if t.rf && !t.models.is_empty() {
+            // upstream: RF::ResetTrainingData averages the replayed trees. BoostFromAverage
+            // returns zero once the forest has trees, so refresh fixed derivatives from zero.
+            let iterations = t.models.len() / ntpi;
+            scale(
+                &mut replacement.score,
+                f64::from(1.0f32 / iterations as f32),
+            );
+            replacement.rf_init.fill(0.0);
+            replacement.rf_pred.fill(0.0);
+            replacement.objective.get_gradients(
+                &replacement.rf_pred,
+                &mut replacement.gradients,
+                &mut replacement.hessians,
+            );
+        }
+        t.rf_init = replacement.rf_init;
+        t.rf_pred = replacement.rf_pred;
         t.ds = replacement.ds;
         t.learner = replacement.learner;
         t.sampler = replacement.sampler;
@@ -461,7 +474,7 @@ struct Trainer {
     shrinkage: f64,
     /// User configured learning rate, kept separate from DART's temporary shrinkage.
     model_learning_rate: f64,
-    /// Splits of every model tree, for replays on all rows (DART only).
+    /// Splits of trees built by this trainer, for replays on other training rows.
     tree_splits: Vec<Vec<SplitRecord>>,
 }
 
@@ -651,6 +664,11 @@ impl Trainer {
                 }
                 scale(score, 1.0 / f64::from(iter + 1));
             }
+            self.tree_splits.push(if tree.num_leaves > 1 {
+                self.learner.last_splits()
+            } else {
+                Vec::new()
+            });
             tree.finish_training();
             self.models.push(tree);
         }
