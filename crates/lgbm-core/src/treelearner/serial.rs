@@ -1407,8 +1407,11 @@ impl SerialTreeLearner {
                             let start = self.feature_hist_offsets[f] * 2;
                             let len = self.feature_hist_len[f] * 2;
                             let (small, large) = two_slots(&mut self.pool.slots, smaller_slot, ls);
-                            for i in start..start + len {
-                                large[i] -= small[i];
+                            let end = start + len;
+                            for (large_bin, small_bin) in
+                                large[start..end].iter_mut().zip(&small[start..end])
+                            {
+                                *large_bin -= *small_bin;
                             }
                         } else {
                             self.fix_histogram(
