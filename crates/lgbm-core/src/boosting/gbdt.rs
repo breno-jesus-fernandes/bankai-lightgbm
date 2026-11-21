@@ -89,7 +89,7 @@ impl Gbdt {
         set_leaf_in(&mut self.models, tree_idx, leaf_idx, value)
     }
 
-    /// Append `other`'s trees to this model (upstream `GBDT::MergeFrom`, exposed as
+    /// Prepend `other`'s trees to this model (upstream `GBDT::MergeFrom`, exposed as
     /// `LGBM_BoosterMerge`): the merged model's score is the sum of both models' trees. Both must
     /// have the same number of classes and trees per iteration and the same averaging mode.
     pub fn merge(&mut self, other: &Gbdt) -> Result<()> {
@@ -110,7 +110,12 @@ impl Gbdt {
                 "cannot merge an averaged (random forest) model with a non-averaged one".into(),
             ));
         }
-        self.models.extend(other.models.iter().cloned());
+        // upstream: src/boosting/gbdt.h (v4.7.0) MergeFrom copies the donor first, then
+        // the recipient. This order is observable in iteration windows and leaf indices.
+        let mut merged = Vec::with_capacity(other.models.len() + self.models.len());
+        merged.extend(other.models.iter().cloned());
+        merged.append(&mut self.models);
+        self.models = merged;
         self.max_feature_idx = self.max_feature_idx.max(other.max_feature_idx);
         Ok(())
     }
