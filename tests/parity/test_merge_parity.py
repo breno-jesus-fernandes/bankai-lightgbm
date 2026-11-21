@@ -61,7 +61,9 @@ def test_merge_rejects_incompatible_models() -> None:
     Xm, _ = _data(2, 300)
     ym = (np.arange(300) % 3).astype(float)
 
-    reg = lightgbm.train({**PARAMS, "objective": "regression"}, lightgbm.Dataset(Xr, yr), num_boost_round=5)
+    reg = lightgbm.train(
+        {**PARAMS, "objective": "regression"}, lightgbm.Dataset(Xr, yr), num_boost_round=5
+    )
     multi = lightgbm.train(
         {**PARAMS, "objective": "multiclass", "num_class": 3},
         lightgbm.Dataset(Xm, ym),

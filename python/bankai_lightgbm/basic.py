@@ -2021,6 +2021,15 @@ class Booster:
         self._native().shuffle_models(int(start_iteration), int(end_iteration))
         return self
 
+    def merge(self, other: Booster) -> Booster:
+        """Append ``other``'s trees to this booster (upstream ``LGBM_BoosterMerge``).
+
+        The merged model's score is the sum of both models' trees. ``other`` must have the same
+        number of classes and trees per iteration and the same averaging mode.
+        """
+        self._native().merge(other._native())
+        return self
+
     def set_leaf_output(self, tree_id: int, leaf_id: int, value: float) -> Booster:
         """Set one leaf output of a tree (model tree index, as in ``get_leaf_output``)."""
         self._native().set_leaf_output(int(tree_id), int(leaf_id), float(value))
