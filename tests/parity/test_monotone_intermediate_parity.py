@@ -48,9 +48,7 @@ def test_intermediate_monotone_matches_upstream_tree_by_tree(
     x, y = _data(with_nan_and_categorical)
     params = {**PARAMS, "monotone_penalty": penalty, "monotone_constraints_method": method}
     cat = [2] if with_nan_and_categorical else "auto"
-    # advanced + categorical is well-defined upstream: its categorical split search ignores the
-    # constraint (plain gain, no `constraints->` reads) and a categorical split skips the advanced
-    # min/max propagation (is_numerical_split == false). So it must match tree by tree too.
+    # Both methods constrain categorical child outputs using the inherited leaf bounds.
     up = lightgbm.Booster(params=params, train_set=lightgbm.Dataset(x, y, categorical_feature=cat))
     ours = lgb.Booster(params=params, train_set=lgb.Dataset(x, y, categorical_feature=cat))
     for _ in range(20):
