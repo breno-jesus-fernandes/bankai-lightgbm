@@ -187,8 +187,7 @@ pub enum Mc<'a> {
 }
 
 impl Mc<'_> {
-    /// The single `[min, max]` of a fixed constraint. Categorical searches use it: the
-    /// advanced method is refused for categorical features, so they never see `Cumulative`.
+    /// The single `[min, max]` of a fixed constraint, if present.
     pub fn fixed(self) -> Option<(f64, f64)> {
         match self {
             Mc::Fixed(lo, hi) => Some((lo, hi)),
@@ -1273,20 +1272,20 @@ fn split_gains_rt(
     rc: i32,
     parent_output: f64,
     flags: (bool, bool, bool),
-    mc: Option<(f64, f64)>,
+    mc: Option<ChildBounds>,
 ) -> f64 {
-    if mc.is_some() {
+    if let Some((left, right)) = mc {
         let lp = SplitParams {
             lambda_l2: l2,
             ..*p
         };
         let lo = clamp_opt(
             output_rt(sl_g, sl_h, &lp, l2, p.path_smooth, lc, parent_output, flags),
-            mc,
+            Some(left),
         );
         let ro = clamp_opt(
             output_rt(sr_g, sr_h, &lp, l2, p.path_smooth, rc, parent_output, flags),
-            mc,
+            Some(right),
         );
         let l1 = flags.0;
         return if l1 {
@@ -1323,8 +1322,8 @@ fn split_gains_rt(
     )
 }
 
-/// upstream: `FeatureHistogram::FindBestThresholdCategoricalInner` (no monotone constraints,
-/// no quantized gradients). Returns whether the feature is splittable at this leaf.
+/// upstream: `FeatureHistogram::FindBestThresholdCategoricalInner` (v4.7.0, full precision).
+/// Returns whether the feature is splittable at this leaf.
 #[allow(clippy::too_many_arguments)]
 pub fn find_best_threshold_categorical(
     hist: &[f64],
@@ -1338,7 +1337,13 @@ pub fn find_best_threshold_categorical(
     mc: Mc<'_>,
     output: &mut SplitInfo,
 ) -> bool {
-    let mc = mc.fixed();
+    // upstream: feature_histogram.cpp (v4.7.0) initializes the reverse cumulative view
+    // once for categorical searches; unlike a numerical scan it never updates the threshold.
+    let cumulative = match mc {
+        Mc::Cumulative(feature) => Some(Cumulative::new(feature, true)),
+        _ => None,
+    };
+    let mc = child_bounds(mc, cumulative.as_ref());
     // upstream: FindBestThreshold adds 2 * kEpsilon before dispatching
     let sum_hessian = sum_hessian + 2.0 * EPS;
     output.default_left = false;
@@ -1551,7 +1556,7 @@ pub fn find_best_threshold_categorical(
                 parent_output,
                 flags,
             ),
-            mc,
+            mc.map(|bounds| bounds.0),
         );
         output.left_count = best_left_count;
         output.left_sum_gradient = best_sum_left_gradient;
@@ -1567,7 +1572,7 @@ pub fn find_best_threshold_categorical(
                 parent_output,
                 flags,
             ),
-            mc,
+            mc.map(|bounds| bounds.1),
         );
         output.right_count = num_data - best_left_count;
         output.right_sum_gradient = sum_gradient - best_sum_left_gradient;
@@ -1612,7 +1617,13 @@ pub fn find_best_threshold_categorical_int(
     mc: Mc<'_>,
     output: &mut SplitInfo,
 ) -> bool {
-    let mc = mc.fixed();
+    // upstream: feature_histogram.cpp (v4.7.0) initializes the reverse cumulative view
+    // once for categorical searches; unlike a numerical scan it never updates the threshold.
+    let cumulative = match mc {
+        Mc::Cumulative(feature) => Some(Cumulative::new(feature, true)),
+        _ => None,
+    };
+    let mc = child_bounds(mc, cumulative.as_ref());
     let sum_gradient = int_sum_gradient as f64 * grad_scale;
     let sum_hessian = int_sum_hessian as f64 * hess_scale;
     output.default_left = false;
@@ -1832,7 +1843,7 @@ pub fn find_best_threshold_categorical_int(
                 parent_output,
                 flags,
             ),
-            mc,
+            mc.map(|bounds| bounds.0),
         );
         output.left_count = best_left_count;
         output.left_sum_gradient = best_sum_left_gradient;
@@ -1848,7 +1859,7 @@ pub fn find_best_threshold_categorical_int(
                 parent_output,
                 flags,
             ),
-            mc,
+            mc.map(|bounds| bounds.1),
         );
         output.right_count = best_right_count;
         output.right_sum_gradient = best_sum_right_gradient;

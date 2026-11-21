@@ -127,8 +127,8 @@ before the module that uses it is merged. Rows marked `(verify)` are not yet che
   any training or prediction path. Each use site documents its seed derivation with an upstream citation.
 - **SPEC-NUM-10 (known upstream undefined behaviour).** Where upstream reads uninitialised memory, bankai
   either reproduces the majority outcome and records it in `DECISIONS.md`, or refuses with `Unsupported`.
-  Current cases: DART's first drop draw (`is_update_score_cur_iter_`), monotone `advanced` with categorical
-  features (refused).
+  Current case: DART's first drop draw (`is_update_score_cur_iter_`). Advanced monotone categorical
+  searches initialize their cumulative view in v4.7.0 and are supported (D-036).
 - **SPEC-NUM-11 (tolerances in tests).** Any tolerance wider than the table above needs a justification
   comment in the test, citing the cause. Tolerance edits are governed by AGENTS.md section 13.
 
