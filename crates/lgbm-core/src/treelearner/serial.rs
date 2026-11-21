@@ -263,6 +263,14 @@ impl SerialTreeLearner {
         self.cfg = cfg;
     }
 
+    pub(crate) fn continue_after_dataset_reset(&mut self, previous: &Self) {
+        self.col_sampler
+            .continue_after_dataset_reset(&previous.col_sampler);
+        for (meta, old) in self.metas.iter_mut().zip(&previous.metas) {
+            meta.rand = old.rand.clone();
+        }
+    }
+
     /// upstream: SerialTreeLearner::ResetIsConstantHessian after objective reset.
     pub fn reset_constant_hessian(&mut self, value: bool) {
         self.is_constant_hessian = value;

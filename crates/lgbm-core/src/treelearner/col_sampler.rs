@@ -77,6 +77,12 @@ impl ColSampler {
         Ok(s)
     }
 
+    /// Continue the previous sampler's RNG stream after upstream's SetTrainingData draw.
+    pub(crate) fn continue_after_dataset_reset(&mut self, previous: &Self) {
+        self.random = previous.random.clone();
+        self.reset_by_tree();
+    }
+
     /// upstream: `ColSampler::ResetByTree`
     pub fn reset_by_tree(&mut self) {
         if self.need_reset_bytree {

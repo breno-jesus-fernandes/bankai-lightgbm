@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Python: `Booster.update(train_set=...)` can switch a live GBDT or DART booster to new rows with aligned bin mappers and continue from its existing trees.
+
 - One-thread CPU training reuses sibling histograms with vectorizable subtraction over checked slices, reducing sparse training time without changing model output.
 
 - Model merge now places the donor ensemble before the recipient, matching upstream `GBDT::MergeFrom`. This fixes leaf-index column ordering and prediction windows using `start_iteration` / `num_iteration`.

@@ -1155,3 +1155,14 @@ Entry format:
 - Local gates: `scripts/check.sh` ended all green with 2453 Python tests passed.
 - Roadmap command: `OMP_WAIT_POLICY=PASSIVE .venv/bin/python benches/bench_train_interleaved.py --threads 1 2 --rounds 9` passed all four cases. Bankai/upstream ratios were dense 0.762x and 0.659x and sparse 0.944x and 0.908x at one and two threads, respectively.
 - Release parity and upstream Python suites: 2447 passed.
+
+## D-040: Replay trained trees when replacing a Booster's training rows
+
+- Date: 2026-11-21
+- Question: Can `Booster.update(train_set=...)` continue a live Booster on a different set of rows with the same bin mappers?
+- Choice: Match upstream `GBDT::ResetTrainingData` by checking bin alignment, rebuilding data-dependent training state, and replaying the trees trained by this Booster onto the replacement rows. Initial model scores come from the replacement Dataset's init score. Preserve the tree sequence, iteration state, and feature RNG stream.
+- Scope: GBDT and DART. RF uses a separate running-average score updater and remains explicitly unsupported for replacement.
+- Evidence: The first parity test failed on the Python `NotImplementedError`. A test with feature sampling also failed when the replacement reseeded the column sampler. The final tests cover predictions after replacing rows with a different row count and labels, as well as rejecting incompatible bin mappers.
+- The bin-mismatch test constructs both datasets before the update so it exercises the upstream bin alignment check on independently constructed bins.
+- Validation: `scripts/check.sh` all green (2459 Python tests), with 2453 tests passed in the release parity and upstream suites.
+- Criterion: macOS/aarch64, release bench profile, one thread, base `cf26dbb`, seven interleaved runs. Split finding at 255 bins was 1.0002x base, partition at 200k rows was 1.0004x, and the 4096 × 12 mixed row-wise training cases were 0.9940x and 1.0005x. The unaligned benchmark showed two 4096-bin histogram slowdowns above 5% on isolated rerun. With both revisions rebuilt using the CI flags `-C llvm-args=-align-all-functions=6 -C codegen-units=1`, the isolated seven-round ratios were 0.9897x for all-row histogram accumulation and 0.9753x for variable-Hessian SIMD dispatch, with 0.9532x for the dense prediction control. Timings used the standard `kernels` bench, with 0.5 s warmup, 1 s measurement and 20 samples for the aligned rerun. No upstream process participates in Criterion, so OMP_WAIT_POLICY is not applicable to those timings.
