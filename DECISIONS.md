@@ -1108,3 +1108,13 @@ Entry format:
 - SPEC ref: SPEC-CONC-6, SPEC-NUM-7 (scan order/tie-breaking); AGENTS.md section 5.
 - Status: active. Supersedes D-034's "open/needs profiling". Marks T3.2 `[x]`; unblocks T4.4.
   T3.1 (sparse 1-thread) remains open and hard (D-017/D-018).
+
+## D-037: pinned upstream CLI fixtures unblock convert_model (T5.5)
+
+- Date: 2026-11-21
+- Question: can the missing CLI oracle from D-033 be made available without linking upstream C++ into bankai?
+- Choice: build the pinned v4.7.0 source and its pinned Eigen/fast_double_parser/fmt/nanoarrow submodules in the ignored session build directory, with CMake `-DUSE_OPENMP=OFF -DBUILD_CLI=ON -DCMAKE_BUILD_TYPE=Release`. Use that executable only to generate golden C++ outputs from upstream-wheel models. Record its SHA-256 and wheel/tag versions in fixture provenance. The shipped CLI implementation is Rust only.
+- Evidence: eight generated model/output pairs cover numerical, categorical one-hot/grouped (>32 categories), missing/zero-missing, stump, multiclass and linear trees. The first acceptance test failed before implementation because ConvertModel was unsupported. Thirteen CLI tests now compare complete generated files, default output, existing-file wrappers (including non-UTF8 source bytes), and input/output failures. The byte-preserving regression first failed on read_to_string; the wrapper bytes were independently checked against the pinned upstream executable.
+- Compatibility: preserve upstream's quirks. The generated missing-value branches and linear-tree outputs are emitted as upstream emits them. A single-leaf tree uses six significant digits and returns its leaf value even in leaf-index mode. Existing files use `#define USE_HARD_CODE 0` followed by `#ifndef USE_HARD_CODE`; do not correct this preprocessor spelling. Static template scaffolding is adapted from upstream's MIT-licensed ModelToIfElse output.
+- SPEC ref: SPEC-SCOPE-1/2, SPEC-MAP-1, SPEC-PY-5; roadmap T5.5.
+- Status: implemented. Supersedes D-033's missing-oracle deferral. No training or prediction hot path changes, so no performance benchmark applies.

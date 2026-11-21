@@ -3,7 +3,9 @@
 //! Parameters come from a config file (`config=<file>`) and/or `key=value` command-line arguments,
 //! merged into one parameter string with the command line taking precedence, then parsed by
 //! `lgbm_core::config::Config` (which resolves aliases and reports unknown keys). `task` selects the
-//! action; `train`, `predict`, `save_binary` and `refit` are implemented.
+//! action; `train`, `predict`, `save_binary`, `refit` and `convert_model` are implemented.
+
+mod convert_model;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -29,13 +31,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let params = collect_params(&args)?;
     let cfg = Config::from_str_params(&params).map_err(|e| e.to_string())?;
     match cfg.task {
+        TaskType::ConvertModel => convert_model::run(&cfg),
         TaskType::Train => train(&cfg),
         TaskType::Predict => predict(&cfg),
         TaskType::SaveBinary => save_binary(&cfg),
         TaskType::RefitTree => refit(&cfg),
-        other => Err(format!(
-            "task {other:?} is not implemented yet (supported: train, predict, save_binary, refit)"
-        )),
     }
 }
 
