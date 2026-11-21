@@ -10,7 +10,14 @@ class LightGBMError(Exception): ...
 
 class NativeDataset:
     @staticmethod
-    def from_binary_file(path: str) -> NativeDataset: ...
+    def from_binary_file(
+        path: str,
+        label: list[float] | None = None,
+        weight: list[float] | None = None,
+        group: list[int] | None = None,
+        init_score: list[float] | None = None,
+    ) -> NativeDataset: ...
+    def group(self) -> list[int] | None: ...
     @staticmethod
     def from_dense(
         data: npt.NDArray[np.float64],

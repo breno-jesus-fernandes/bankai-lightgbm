@@ -1673,16 +1673,34 @@ class Dataset:
         if self.data is None:
             raise ValueError("Cannot construct a Dataset without data")
         if isinstance(self.data, (str, Path)) and _is_binary_dataset_file(self.data):
-            # upstream: a binary file carries its own bins and metadata (DatasetLoader::LoadFromBinFile).
-            if self.reference is not None:
-                raise NotImplementedError(
-                    "a reference Dataset with a binary dataset file is not supported yet"
-                )
-            if any(v is not None for v in (self.label, self.weight, self.group, self.init_score)):
-                raise NotImplementedError(
-                    "label, weight, group or init_score with a binary dataset file is not supported yet"
-                )
-            return NativeDataset.from_binary_file(str(self.data))
+            # upstream: DatasetLoader::LoadFromBinFile keeps the file's bins even when
+            # a reference is provided. Dataset._lazy_init applies explicit fields afterwards.
+            label = (
+                _list_to_1d_numpy(data=self.label, dtype=np.float64, name="label").tolist()
+                if self.label is not None
+                else None
+            )
+            weight = (
+                _list_to_1d_numpy(data=self.weight, dtype=np.float32, name="weight").tolist()
+                if self.weight is not None
+                else None
+            )
+            group = (
+                [int(g) for g in np.asarray(self.group).reshape(-1)]
+                if self.group is not None
+                else None
+            )
+            init_score = (
+                np.asarray(self.init_score, dtype=np.float64).ravel(order="F").tolist()
+                if self.init_score is not None
+                else None
+            )
+            built = NativeDataset.from_binary_file(str(self.data), label, weight, group, init_score)
+            if self.group is None:
+                self.group = built.group()
+            if init_score == []:
+                self.init_score = None
+            return built
         feature_names: list[str] | None = None
         pandas_cat_cols: list[int] = []
         # upstream: _data_from_pandas (v4.7.0) takes only the unordered columns for 'auto'.
