@@ -1053,3 +1053,29 @@ Entry format:
   an unattended session. No code was written for this node.
 - SPEC ref: ROADMAP T5.5 (Verify: `pytest tests/parity -k convert_model`).
 - Status: deferred. Unblocks once upstream `convert_model` golden fixtures exist.
+
+## D-034: T3.2 split-search scaling needs profiling under review, not a blind change
+
+- Date: 2026-11-21
+- Question: T3.2 ("Split search: sequential threshold phase scaling", bench dense 2 threads) is the
+  last unblocked pre-Tier-6 node and gates T3.1 and T4.4. Can it be completed in an unattended
+  session?
+- Choice: do not make a speculative perf change. Record the assessment and leave T3.2 `[ ]`
+  (T3.1/T4.4 stay blocked on it).
+- Rationale: the per-feature threshold search is already parallel — `find_best_splits_from_histograms`
+  runs a `fused_search` across features when `num_threads > 1` and the work clears
+  `PARALLEL_SEARCH_MIN_BINS` (crates/lgbm-core/src/treelearner/serial.rs). T3.2 is therefore not a
+  missing-feature TDD slice but a question of how well that existing parallel path *scales* to
+  2 threads on the dense workload. AGENTS.md section 5 requires any hot-path change to be driven by
+  profiling and to attach criterion + interleaved-benchmark findings (release, interleaved, medians)
+  to the PR; the development VM has ±20-30% run-to-run noise, so credible measurements cannot be
+  produced unattended. Merging a change that only passes CI's pass/fail benchmark gate — without
+  trustworthy before/after medians showing it actually improves 2-thread scaling — would dress up a
+  possibly-neutral change as progress and violate the measure-before-optimise discipline. The
+  correct next step is a supervised profiling session (samply/flamegraph on the dense 2-thread
+  split-search phase) to locate the scaling loss, then a measured change. No code was written.
+- SPEC ref: SPEC-CONC-6 (threshold tie-breaking/order the parallel path must preserve); AGENTS.md
+  section 5 (perf discipline).
+- Status: open, needs supervised profiling. T3.1 (sparse 1-thread target, already ~1.11x after
+  T2.6 per D-018) and T4.4 (monotone advanced + categorical; also needs the upstream UB decision)
+  remain blocked on it.
