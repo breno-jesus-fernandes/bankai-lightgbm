@@ -1108,3 +1108,15 @@ Entry format:
 - SPEC ref: SPEC-CONC-6, SPEC-NUM-7 (scan order/tie-breaking); AGENTS.md section 5.
 - Status: active. Supersedes D-034's "open/needs profiling". Marks T3.2 `[x]`; unblocks T4.4.
   T3.1 (sparse 1-thread) remains open and hard (D-017/D-018).
+
+## D-036: advanced monotone categorical searches initialize cumulative bounds
+
+- Date: 2026-11-21
+- Question: does v4.7.0 read an uninitialized cumulative constraint when searching categorical features?
+- Choice: support the combination, matching the pinned source rather than the prior unsupported classification.
+- Evidence: `src/treelearner/feature_histogram.cpp` at tag v4.7.0 calls `InitCumulativeConstraints(true)` before both `FindBestThresholdCategoricalInner` and `FindBestThresholdCategoricalIntInner`. Candidate gains call `GetSplitGains<USE_MC>` and final leaf outputs read `LeftToBasicConstraint` / `RightToBasicConstraint`. Unlike numerical scans, categorical scans never call `Update(threshold)`, so they retain the initial reverse cumulative bounds. The left and right bounds can differ. The Rust `Mc::fixed` helper discarded advanced bounds entirely, explaining the divergence after removing the refusal. The advanced constraint walks themselves match the pinned source and need no changes.
+- Validation: reproduced the existing categorical+NaN parity failure before implementation (maximum absolute prediction difference 0.1047145). Eight additional model-text parity cases cover one-hot/grouped searches, numerical missing values, and deterministic nearest-rounded quantized training. The prior strict upstream gap entry is removed as Harness maintenance because the feature is now supported; no existing assertion or tolerance is relaxed.
+- SPEC ref: SPEC-SCOPE-1, SPEC-NUM-2, SPEC-NUM-10.
+- Status: implemented; supersedes the old advanced+categorical unsupported/undefined-behaviour classification.
+
+- Performance validation for D-036: seven interleaved Criterion rounds, macOS/aarch64, bench/release profile, one thread, baseline `c4fd750` versus the T4.4 working tree. Numerical split finding: 1.0015x baseline; dense mixed row-wise training: 0.9919x. An absolute machine-speed transition from ~2.7 to ~4.3 ms skewed the mixed sparse row-wise median, so that case was repeated in isolation (1 s warmup, 3 s measurement, 20 samples, seven rounds): 0.9978x, no >5% regression. Commands: `cargo bench -p lgbm-core --bench kernels --no-run`, then interleave the before/after binaries with `--bench --warm-up-time 0.1 --measurement-time 0.2 --sample-size 20 --nresamples 1000`; isolated rerun adds filter `training/row_wise_mixed/` and uses 1/3 s. These are bankai-before/after measurements; upstream oracle is 4.7.0, with no upstream timing or OMP_WAIT_POLICY involved. Full `scripts/check.sh`: all green; release parity/upstream suite: 2431 passed.
