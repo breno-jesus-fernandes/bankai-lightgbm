@@ -197,6 +197,78 @@ impl GbdtTrainer {
         self.trainer.train_one_iter()
     }
 
+    /// Replace the training rows while preserving existing trees and iteration state.
+    /// upstream: src/boosting/gbdt.cpp (v4.7.0) GBDT::ResetTrainingData.
+    pub fn reset_training_data(&mut self, ds: Arc<Dataset>) -> Result<()> {
+        let t = &mut self.trainer;
+        if Arc::ptr_eq(&t.ds, &ds) {
+            return Ok(());
+        }
+        if t.rf {
+            return Err(Error::Unsupported(
+                "replacing the training Dataset with boosting=rf".into(),
+            ));
+        }
+        let old = &t.ds;
+        let mapper = |data: &Dataset, f: usize| {
+            (
+                data.layout.feature2group[f] as usize,
+                data.layout.feature2subfeature[f] as usize,
+            )
+        };
+        let aligned = old.layout.num_total_features == ds.layout.num_total_features
+            && old.layout.num_features == ds.layout.num_features
+            && old.label_idx == ds.label_idx
+            && (0..old.layout.num_features).all(|f| {
+                let (ag, af) = mapper(old, f);
+                let (bg, bf) = mapper(&ds, f);
+                let a = &old.layout.groups[ag].bin_mappers[af];
+                let b = &ds.layout.groups[bg].bin_mappers[bf];
+                a.num_bin == b.num_bin
+                    && a.missing_type == b.missing_type
+                    && a.bin_type == b.bin_type
+                    && a.bin_upper_bound == b.bin_upper_bound
+                    && a.bin_2_categorical == b.bin_2_categorical
+            });
+        if !aligned {
+            return Err(Error::InvalidParameter(
+                "Cannot reset training data, since new training data has different bin mappers"
+                    .into(),
+            ));
+        }
+        let objective = create_objective(&t.cfg, &ds.metadata)?;
+        let mut replacement = Trainer::new(Arc::clone(&t.cfg), ds, objective)?;
+        replacement.learner.continue_after_dataset_reset(&t.learner);
+        let ntpi = t.num_tree_per_iteration;
+        if ntpi != replacement.num_tree_per_iteration {
+            return Err(Error::InvalidParameter(
+                "Number of trees per iteration changed with the training data".into(),
+            ));
+        }
+        let n = replacement.ds.num_data();
+        let rows: Vec<i32> = (0..n as i32).collect();
+        // Initial model scores already come from the replacement dataset's init_score.
+        let start = t.models.len() - t.tree_splits.len();
+        for (idx, (model, splits)) in t.models[start..].iter().zip(&t.tree_splits).enumerate() {
+            let off = (idx % ntpi) * n;
+            replacement.learner.add_prediction_for_rows(
+                model,
+                splits,
+                &rows,
+                &mut replacement.score[off..off + n],
+            );
+        }
+        t.ds = replacement.ds;
+        t.learner = replacement.learner;
+        t.sampler = replacement.sampler;
+        t.objective = replacement.objective;
+        t.class_need_train = replacement.class_need_train;
+        t.score = replacement.score;
+        t.gradients = replacement.gradients;
+        t.hessians = replacement.hessians;
+        Ok(())
+    }
+
     /// Switch to external derivatives, preserving trees and scores.
     /// upstream: src/boosting/gbdt.h (v4.7.0) ResetConfig.
     pub fn reset_custom_objective(&mut self) -> Result<()> {

@@ -2382,14 +2382,20 @@ class Booster:
 
     def update(self, train_set: Dataset | None = None, fobj: Any = None) -> bool:
         """Train one additional iteration and return whether training has finished."""
+        if train_set is not None:
+            if not isinstance(train_set, Dataset):
+                raise TypeError(
+                    f"Training data should be Dataset instance, met {type(train_set).__name__}"
+                )
+            if self._train_set is not None and train_set is not self._train_set:
+                self._ensure_training_handle()
+                train_set.construct()
+                self._native().reset_training_data(train_set._handle_or_raise())
+            self._train_set = train_set
         if fobj is not None:
             if self._handle is not None and self._native().objective() is not None:
                 self._native().reset_custom_objective()
             self.params["objective"] = "none"
-        if train_set is not None:
-            if self._train_set is not None and train_set is not self._train_set:
-                raise NotImplementedError("changing the training Dataset is not implemented yet")
-            self._train_set = train_set
         self._ensure_training_handle()
         if fobj is not None:
             # upstream: fobj(self.__inner_predict(data_idx=0), ...) -- the internal raw
