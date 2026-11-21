@@ -2024,7 +2024,7 @@ class Booster:
         return self
 
     def merge(self, other: Booster) -> Booster:
-        """Append ``other``'s trees to this booster (upstream ``LGBM_BoosterMerge``).
+        """Prepend ``other``'s trees to this booster (upstream ``LGBM_BoosterMerge``).
 
         The merged model's score is the sum of both models' trees. ``other`` must have the same
         number of classes and trees per iteration and the same averaging mode.

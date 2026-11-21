@@ -1108,3 +1108,14 @@ Entry format:
 - SPEC ref: SPEC-CONC-6, SPEC-NUM-7 (scan order/tie-breaking); AGENTS.md section 5.
 - Status: active. Supersedes D-034's "open/needs profiling". Marks T3.2 `[x]`; unblocks T4.4.
   T3.1 (sparse 1-thread) remains open and hard (D-017/D-018).
+
+## D-038: model merge preserves upstream's donor-first tree order
+
+- Date: 2026-11-21
+- Question: does summing the two ensembles' full raw scores establish MergeFrom parity?
+- Choice: prepend the donor ensemble before the recipient, matching `src/boosting/gbdt.h` (v4.7.0) GBDT::MergeFrom. Move the recipient's existing trees and clone the donor, preserving ownership without unnecessary recipient copies.
+- Evidence: the existing implementation appended the donor, while upstream explicitly pushes the donor before the original models. The sum-based tests could not distinguish those orders. A new native test failed first on the first donor tree; a new parity test failed first on leaf-index columns. Regression/binary/multiclass parity calls the wheel's `LGBM_BoosterMerge` directly (there is no public Python merge), then compares all leaf-index columns and raw-score iteration windows exactly. No existing test assertion or tolerance is edited.
+- SPEC ref: SPEC-SCOPE-1, SPEC-NUM-1, SPEC-NUM-2; roadmap T4.3.
+- Status: implemented; corrects the prior append description. The operation is offline model composition; no prediction/training loop is changed. The existing benchmark CI filter still runs for this file.
+
+- Performance validation for D-038: seven interleaved Criterion rounds against the `c4fd750` core source (identical to the branch base), macOS/aarch64, bench/release profile, one thread. Ratios: prediction 4096x16x20 1.0167x; numerical split finding 255 bins 1.0209x; row-wise dense mixed 4096x12 0.9810x; row-wise mixed 4096x12 0.9749x. All within 5%, with no speed-up claim for noise-sized changes. Build with `cargo bench -p lgbm-core --bench kernels --no-run`; interleave before/after binaries seven times with filter `split_finding|training/|prediction/`, `--bench --warm-up-time 1 --measurement-time 2 --sample-size 20 --nresamples 1000`. Upstream oracle is lightgbm==4.7.0, but these are bankai-before/after timings, so OMP_WAIT_POLICY is not applicable. Full check: all green, 2431 Python tests; release parity/upstream suite: 2425 passed.
