@@ -12,6 +12,7 @@ import tracemalloc
 import lightgbm as up
 import numpy as np
 import pytest
+import scipy.sparse
 
 import bankai_lightgbm as bk
 
@@ -42,6 +43,53 @@ def test_float32_c_contiguous_input_has_no_python_float64_copy(dtype: type) -> N
     # Native code allocates its own buffer, which tracemalloc does not see. Python must not add
     # a float64 copy of the matrix, so the traced peak stays well under one copy.
     assert peak < one_float64_copy // 2, f"peak {peak} bytes is at least half a float64 copy"
+
+
+def _csr_float32(nnz_per_row: int = 4) -> scipy.sparse.csr_matrix:
+    rng = np.random.default_rng(5)
+    rows = np.repeat(np.arange(ROWS), nnz_per_row)
+    cols = rng.integers(0, COLS, size=ROWS * nnz_per_row)
+    vals = rng.normal(size=ROWS * nnz_per_row).astype(np.float32)
+    return scipy.sparse.csr_matrix((vals, (rows, cols)), shape=(ROWS, COLS))
+
+
+def _csr_construct_peak(matrix: scipy.sparse.csr_matrix) -> int:
+    label = np.arange(ROWS, dtype=np.float64) % 3
+    tracemalloc.start()
+    try:
+        bk.Dataset(matrix, label, params={"verbose": -1}).construct()
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+def test_float32_csr_input_adds_no_python_float64_copy() -> None:
+    f32 = _csr_float32()
+    f64 = f32.astype(np.float64)
+    # Compared with float64 input (whose values pass through), float32 input must not cost an extra
+    # Python-side float64 copy of the values; the native layer widens float32 in its own buffer.
+    extra = _csr_construct_peak(f32) - _csr_construct_peak(f64)
+    one_float64_copy = f32.data.size * 8
+    assert extra < one_float64_copy // 2, f"float32 adds {extra} bytes vs a float64 copy"
+
+
+def test_float32_csr_trains_the_same_model_as_float64() -> None:
+    matrix = _csr_float32()
+    label = (np.sin(matrix[:, 0].toarray().ravel()) + 0.5).astype(np.float64)
+    params = {
+        "objective": "regression",
+        "num_leaves": 15,
+        "verbose": -1,
+        "num_threads": 1,
+        "deterministic": True,
+        "seed": 1,
+    }
+    reference = matrix.astype(np.float64)
+    got = bk.train(params, bk.Dataset(matrix, label), num_boost_round=5)
+    want = bk.train(params, bk.Dataset(reference, label), num_boost_round=5)
+    np.testing.assert_array_equal(
+        got.predict(reference.toarray()), want.predict(reference.toarray())
+    )
 
 
 def test_column_major_input_has_no_python_copy() -> None:
