@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- One-thread CPU training reuses sibling histograms with vectorizable subtraction over checked slices, reducing sparse training time without changing model output.
+
 - Model merge now places the donor ensemble before the recipient, matching upstream `GBDT::MergeFrom`. This fixes leaf-index column ordering and prediction windows using `start_iteration` / `num_iteration`.
 - CLI: `task=convert_model input_model=<file> convert_model=<output.cpp>` now emits upstream-compatible C++ score and leaf-index prediction functions, including map inputs. The default output is `gbdt_prediction.cpp`; existing output files are wrapped exactly as upstream does.
 - Rust core: support `monotone_constraints_method=advanced` with categorical features. Categorical gain and leaf-output calculations now use the initial reverse cumulative child bounds, matching upstream v4.7.0 for full-precision and quantized training.
