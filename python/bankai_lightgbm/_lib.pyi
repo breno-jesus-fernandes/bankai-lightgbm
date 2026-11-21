@@ -26,9 +26,9 @@ class NativeDataset:
     ) -> NativeDataset: ...
     @staticmethod
     def from_sparse(
-        indptr: npt.NDArray[np.int64],
-        indices: npt.NDArray[np.int32],
-        data: npt.NDArray[np.float64],
+        indptr: npt.NDArray[np.integer],
+        indices: npt.NDArray[np.integer],
+        data: npt.NDArray[np.floating],
         nrow: int,
         ncol: int,
         is_csc: bool,

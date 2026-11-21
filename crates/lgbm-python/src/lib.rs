@@ -165,6 +165,70 @@ fn dense_row_major(data: &Bound<'_, PyAny>) -> PyResult<(Vec<f64>, usize, usize)
     })
 }
 
+/// A 1-D `int32` or `int64` array as a contiguous `i64` buffer. The widening of `int32` happens in
+/// Rust, so Python never allocates an `int64` copy. upstream: the C API's offset arrays are
+/// `int32`/`int64`.
+fn as_i64_vec(array: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<i64>> {
+    let contiguous = |e: numpy::NotContiguousError| LightGBMError::new_err(e.to_string());
+    if let Ok(a) = array.downcast::<numpy::PyArray1<i64>>() {
+        Ok(a.readonly().as_slice().map_err(contiguous)?.to_vec())
+    } else if let Ok(a) = array.downcast::<numpy::PyArray1<i32>>() {
+        Ok(a.readonly()
+            .as_slice()
+            .map_err(contiguous)?
+            .iter()
+            .map(|&v| i64::from(v))
+            .collect())
+    } else {
+        Err(PyTypeError::new_err(format!(
+            "{name} must be a 1-D int32 or int64 array"
+        )))
+    }
+}
+
+/// A 1-D `int32` or `int64` array as a contiguous `i32` buffer (column indices). `int64` indices are
+/// narrowed, as the C API's indices are `int32`.
+fn as_i32_vec(array: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<i32>> {
+    let contiguous = |e: numpy::NotContiguousError| LightGBMError::new_err(e.to_string());
+    if let Ok(a) = array.downcast::<numpy::PyArray1<i32>>() {
+        Ok(a.readonly().as_slice().map_err(contiguous)?.to_vec())
+    } else if let Ok(a) = array.downcast::<numpy::PyArray1<i64>>() {
+        a.readonly()
+            .as_slice()
+            .map_err(contiguous)?
+            .iter()
+            .map(|&v| {
+                i32::try_from(v)
+                    .map_err(|_| LightGBMError::new_err(format!("{name} index {v} exceeds int32")))
+            })
+            .collect()
+    } else {
+        Err(PyTypeError::new_err(format!(
+            "{name} must be a 1-D int32 or int64 array"
+        )))
+    }
+}
+
+/// A 1-D `float32` or `float64` array as a contiguous `f64` buffer. The widening of `float32`
+/// happens in Rust, so Python never allocates a `float64` copy (as for dense input).
+fn as_f64_vec(array: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<f64>> {
+    let contiguous = |e: numpy::NotContiguousError| LightGBMError::new_err(e.to_string());
+    if let Ok(a) = array.downcast::<numpy::PyArray1<f64>>() {
+        Ok(a.readonly().as_slice().map_err(contiguous)?.to_vec())
+    } else if let Ok(a) = array.downcast::<numpy::PyArray1<f32>>() {
+        Ok(a.readonly()
+            .as_slice()
+            .map_err(contiguous)?
+            .iter()
+            .map(|&v| f64::from(v))
+            .collect())
+    } else {
+        Err(PyTypeError::new_err(format!(
+            "{name} must be a 1-D float32 or float64 array"
+        )))
+    }
+}
+
 #[pymethods]
 impl NativeDataset {
     /// Load a binary dataset file written by `save_binary` (upstream `DatasetLoader::LoadFromBinFile`).
@@ -248,9 +312,9 @@ impl NativeDataset {
     #[allow(clippy::too_many_arguments)] // Python Dataset constructor arguments.
     fn from_sparse(
         py: Python<'_>,
-        indptr: PyReadonlyArray1<'_, i64>,
-        indices: PyReadonlyArray1<'_, i32>,
-        data: PyReadonlyArray1<'_, f64>,
+        indptr: Bound<'_, PyAny>,
+        indices: Bound<'_, PyAny>,
+        data: Bound<'_, PyAny>,
         nrow: usize,
         ncol: usize,
         is_csc: bool,
@@ -264,12 +328,11 @@ impl NativeDataset {
         feature_names: Option<Vec<String>>,
     ) -> PyResult<Self> {
         guard(move || {
-            let contiguous = |e: numpy::NotContiguousError| LightGBMError::new_err(e.to_string());
-            let (indptr, indices, values) = (
-                indptr.as_slice().map_err(contiguous)?.to_vec(),
-                indices.as_slice().map_err(contiguous)?.to_vec(),
-                data.as_slice().map_err(contiguous)?.to_vec(),
-            );
+            // float32/int32 inputs widen in these Rust buffers, so Python allocates no float64 or
+            // int64 copy of the sparse arrays.
+            let indptr = as_i64_vec(&indptr, "indptr")?;
+            let indices = as_i32_vec(&indices, "indices")?;
+            let values = as_f64_vec(&data, "data")?;
             let reference = reference.map(|r| Arc::clone(&r.ds));
             let (ds, raw) = py
                 .allow_threads(|| -> lgbm_core::Result<(Dataset, RawRows)> {

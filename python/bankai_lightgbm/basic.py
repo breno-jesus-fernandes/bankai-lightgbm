@@ -1831,9 +1831,11 @@ class Dataset:
             import scipy.sparse
 
             return NativeDataset.from_sparse(
-                np.ascontiguousarray(sparse.indptr, dtype=np.int64),
-                np.ascontiguousarray(sparse.indices, dtype=np.int32),
-                np.ascontiguousarray(sparse.data, dtype=np.float64),
+                # Keep the dtype (int32/int64, float32/float64); the native layer widens in its own
+                # buffer, so Python makes no int64/float64 copy of the sparse arrays.
+                np.ascontiguousarray(sparse.indptr),
+                np.ascontiguousarray(sparse.indices),
+                np.ascontiguousarray(sparse.data),
                 int(sparse.shape[0]),
                 int(sparse.shape[1]),
                 isinstance(sparse, scipy.sparse.csc_matrix),
