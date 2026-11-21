@@ -1079,3 +1079,32 @@ Entry format:
 - Status: open, needs supervised profiling. T3.1 (sparse 1-thread target, already ~1.11x after
   T2.6 per D-018) and T4.4 (monotone advanced + categorical; also needs the upstream UB decision)
   remain blocked on it.
+
+## D-035: T3.2 met — dense 2-thread split-search scaling confirmed; sparse residual is T3.1
+
+- Date: 2026-11-21
+- Question: supersedes D-034's "needs profiling". With profiling now done (supervised), is T3.2
+  ("Split search: sequential threshold phase scaling", Verify: GATES + thread_invariance, Bench:
+  criterion split_finding + interleaved dense 2 threads) met, and is there a clean win left?
+- Choice: mark T3.2 complete on its formal criteria; do not change code. The residual sparse
+  1-thread gap stays with T3.1 as a separate, hard, open item.
+- Evidence (local dev host, macOS/aarch64 Apple M1, release, OMP_WAIT_POLICY=PASSIVE):
+  - `benches/bench_train.py` (40 rounds, upstream/bankai time ratio, >1 = bankai faster): dense
+    50k x 20 = 1.55x (1 thread) and 1.76x (2 threads); bankai's 1->2-thread speed-up is 1.47x vs
+    upstream's 1.29x, so the dense threshold-search phase scales at least as well as upstream.
+  - `cargo bench -p lgbm-core --bench kernels -- split_finding`: numerical/255_bins ~516 ns, no
+    regression (consistent with D-018's 0.9474x). `thread_invariance` passes in the gate.
+  - CI's benchmark job (2-vCPU Linux) has passed on every hot-path PR this session (e.g. #139),
+    corroborating that the dense paths do not regress on the gated environment.
+- Rationale: the per-bin threshold scan (`find_best_threshold_numerical`) is a data-dependent
+  prefix sum (each bin's cumulative sums depend on the previous), so it is inherently serial and
+  scalar, exactly mirroring upstream's `FindBestThresholdSequentially`; T2.6 (D-018) already
+  vectorised the independent gain arithmetic. Profiling the sparse 1-thread case (multi-val
+  50k x 100, construction amortised) shows split search is the largest training cost, but it
+  matches upstream's structure and the `search_feature` wrapper has no bankai-specific overhead,
+  so no bounded, low-risk speed-up is available without open-ended research that would risk the
+  bit-exact tie-breaking (SPEC-CONC-6 / SPEC-NUM-7). The sparse end-to-end target (~0.90-0.95x at
+  1 thread here; ~1.11x in D-018's gated run) is T3.1's bench, not T3.2's.
+- SPEC ref: SPEC-CONC-6, SPEC-NUM-7 (scan order/tie-breaking); AGENTS.md section 5.
+- Status: active. Supersedes D-034's "open/needs profiling". Marks T3.2 `[x]`; unblocks T4.4.
+  T3.1 (sparse 1-thread) remains open and hard (D-017/D-018).
