@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- CLI: `task=convert_model input_model=<file> convert_model=<output.cpp>` now emits upstream-compatible C++ score and leaf-index prediction functions, including map inputs. The default output is `gbdt_prediction.cpp`; existing output files are wrapped exactly as upstream does.
 - Rust core: support `monotone_constraints_method=advanced` with categorical features. Categorical gain and leaf-output calculations now use the initial reverse cumulative child bounds, matching upstream v4.7.0 for full-precision and quantized training.
 
 - Python: building a `Dataset` from a scipy CSR/CSC matrix no longer makes a Python-side float64/int64 copy of the sparse arrays. The native `from_sparse` now accepts float32/float64 values and int32/int64 offsets directly and widens them in its own buffer (as dense input already did), so float32 sparse input costs no extra float64 copy and trains the same model (SPEC-PY-1).

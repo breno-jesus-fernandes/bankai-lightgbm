@@ -4,7 +4,9 @@
 
 The files `python/bankai_lightgbm/sklearn.py`, `python/bankai_lightgbm/compat.py`, and the
 type aliases in `python/bankai_lightgbm/basic.py` and `python/bankai_lightgbm/callback.py`
-are adapted from LightGBM v4.7.0 `python-package/lightgbm/`, which is distributed under the
+are adapted from LightGBM v4.7.0 `python-package/lightgbm/`.
+`crates/lgbm-cli/src/convert_model.rs` and its C++ template are adapted from upstream
+`src/boosting/gbdt_model_text.cpp` and `src/io/tree.cpp`. LightGBM is distributed under the
 MIT License:
 
 

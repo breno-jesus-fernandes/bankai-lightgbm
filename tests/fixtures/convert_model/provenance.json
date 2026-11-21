@@ -1,0 +1,15 @@
+{
+  "upstream_version": "v4.7.0",
+  "wheel_version": "4.7.0",
+  "cli_sha256": "23190ecc4fb11f8eae3608ec17667ecef37da3b826a58d38b4eb0a8580ec37e6",
+  "cases": [
+    "categorical",
+    "categorical_many",
+    "linear",
+    "missing",
+    "multiclass",
+    "numerical",
+    "stump",
+    "zero_missing"
+  ]
+}
