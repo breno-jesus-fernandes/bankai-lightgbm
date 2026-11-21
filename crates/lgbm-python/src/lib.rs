@@ -607,6 +607,11 @@ impl NativeBooster {
         }
     }
 
+    /// Append `other`'s trees to this model (upstream `LGBM_BoosterMerge`).
+    fn merge(&mut self, other: PyRef<'_, NativeBooster>) -> PyResult<()> {
+        self.model.merge(&other.model).map_err(to_py)
+    }
+
     /// Edit one leaf output in the model and in the trainer's copy (upstream
     /// `LGBM_BoosterSetLeafValue`), so continued training sees the edit.
     fn set_leaf_output(&mut self, tree_idx: usize, leaf_idx: usize, value: f64) -> PyResult<()> {
