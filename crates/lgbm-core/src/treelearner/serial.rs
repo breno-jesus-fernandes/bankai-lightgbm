@@ -462,13 +462,6 @@ impl SerialTreeLearner {
             .linear_tree
             .then(|| linear::LinearState::new(&ds, &metas));
         let advanced_on = monotone_active && cfg.monotone_constraints_method == "advanced";
-        // The advanced cumulative view is only initialised by the numerical scan upstream, so a
-        // categorical search would read uninitialised state there. Refuse rather than guess.
-        if advanced_on && metas.iter().any(|m| m.bin_type == BinType::Categorical) {
-            return Err(Error::Unsupported(
-                "monotone_constraints_method=advanced with categorical features".into(),
-            ));
-        }
         let intermediate = (monotone_active
             && matches!(
                 cfg.monotone_constraints_method.as_str(),
