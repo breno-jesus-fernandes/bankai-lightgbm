@@ -1033,3 +1033,23 @@ Entry format:
   in its own `c_header_harness` job (ubuntu, gcc).
 - Status: active. Marks T5.3 complete for the implemented CPU subset; the deferred symbols above
   are tracked as follow-ups.
+
+## D-033: Defer T5.5 convert_model (no in-environment parity oracle)
+
+- Date: 2026-11-21
+- Question: T5.5 is the CLI's `task=convert_model`, which emits a standalone C++ prediction file
+  (upstream `GBDT::ModelToIfElse`, default `gbdt_prediction.cpp`). Its Verify is
+  `pytest tests/parity -k convert_model`. Can it be implemented and validated autonomously now?
+- Choice: defer. Upstream LightGBM 4.7.0 exposes `convert_model` only through the CLI binary, which
+  is not installed in the test environment (the `lightgbm` Python wheel ships no CLI), and the
+  generated C++ must match upstream byte-for-byte (exact if/else tree lowering and float
+  formatting) to be a faithful drop-in. Without the upstream generator available to produce golden
+  fixtures, there is no trustworthy parity oracle in CI, so a from-scratch codegen could only be
+  "validated" against itself — which would make a green run meaningless. Leave T5.5 `[ ]`.
+- Rationale: the project's rule is that behaviour merges only behind a test that failed first and
+  checks it against upstream. The honest path is to generate golden `gbdt_prediction.cpp` fixtures
+  with the upstream CLI (a fixture-generation step, like `scripts/gen_fixtures.py`) and then port
+  the codegen to match them. That needs the upstream CLI binary set up, which is out of scope for
+  an unattended session. No code was written for this node.
+- SPEC ref: ROADMAP T5.5 (Verify: `pytest tests/parity -k convert_model`).
+- Status: deferred. Unblocks once upstream `convert_model` golden fixtures exist.
