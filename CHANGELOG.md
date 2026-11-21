@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Python: `Booster.update(train_set=...)` can switch a live GBDT or DART booster to new rows with aligned bin mappers and continue from its existing trees.
+- Python: `Booster.update(train_set=...)` can switch a live GBDT, DART, or Random Forest booster to new rows with aligned bin mappers and continue from its existing trees.
 
 - One-thread CPU training reuses sibling histograms with vectorizable subtraction over checked slices, reducing sparse training time without changing model output.
 
