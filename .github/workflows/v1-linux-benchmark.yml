@@ -1,4 +1,4 @@
-name: Linux x86-64 zero-node prediction experiment
+name: Linux x86-64 no-missing-node prediction experiment
 
 on:
   push:
@@ -34,7 +34,7 @@ jobs:
           python -m pip install maturin numpy scipy 'lightgbm==4.7.0' pytest
           maturin develop -r
           python -c 'import bankai_lightgbm, lightgbm; print(bankai_lightgbm.__version__, lightgbm.__version__)'
-      - name: Build the zero-input experiment and test parity
+      - name: Build the no-missing experiment and test parity
         run: |
           source .venv/bin/activate
           cp python/bankai_lightgbm/_lib.abi3.so "$RUNNER_TEMP/base.so"
@@ -43,12 +43,9 @@ jobs:
           p = Path("crates/lgbm-core/src/tree.rs")
           src = p.read_text()
           at = src.index("        if fval.is_nan()", src.index("    fn numerical_decision("))
-          src = src[:at] + """        if fval == 0.0 {
-                      let go_left = if missing_type == MissingType::Zero {
-                          get_decision_type(dt, K_DEFAULT_LEFT_MASK)
-                      } else {
-                          0.0 <= self.threshold[node]
-                      };
+          src = src[:at] + """        if missing_type == MissingType::None {
+                      let value = if fval.is_nan() { 0.0 } else { fval };
+                      let go_left = value <= self.threshold[node];
                       return if go_left { self.left_child[node] } else { self.right_child[node] };
                   }
           """ + src[at:]
@@ -57,7 +54,7 @@ jobs:
           maturin develop -r
           cp python/bankai_lightgbm/_lib.abi3.so "$RUNNER_TEMP/zero.so"
           pytest -q tests/parity/test_sparse_predict_parity.py
-      - name: Interleave baseline, zero-input experiment, and upstream
+      - name: Interleave baseline, no-missing experiment, and upstream
         run: |
           source .venv/bin/activate
           python - <<'PY2'
