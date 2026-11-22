@@ -1306,10 +1306,11 @@ class Dataset:
         Once constructed, the labels are read back from the native Dataset, as upstream's
         ``set_label`` does, so non-finite values come back sanitized (NaN -> 0, +-1e38).
         """
-        if self._handle is None:
+        handle = self._handle or self._evaluation_handle
+        if handle is None:
             # upstream: before construction the labels are returned as they were provided.
             return self.label
-        return np.asarray(self._handle.label(), dtype=np.float32)
+        return np.asarray(handle.label(), dtype=np.float32)
 
     def subset(self, used_indices: Any, params: dict[str, Any] | None = None) -> Dataset:
         """Select rows while reusing this Dataset's bin mappers."""
@@ -1406,10 +1407,11 @@ class Dataset:
     def get_weight(self) -> Any:
         """Return the sample weights as a one-dimensional float32 array (read back from the
         native Dataset once constructed, sanitized like upstream)."""
-        if self._handle is None:
+        handle = self._handle or self._evaluation_handle
+        if handle is None:
             # upstream: before construction the weights are returned as they were provided.
             return self.weight
-        native = self._handle.weight()
+        native = handle.weight()
         return None if native is None else np.asarray(native, dtype=np.float32)
 
     def get_group(self) -> Any:
@@ -2471,6 +2473,16 @@ class Booster:
         self.__dict__.setdefault("name_valid_sets", []).append(name)
         self.__num_dataset += 1
 
+    def _evaluation_predictions(
+        self, data: Dataset, native_dataset: NativeDataset
+    ) -> _PredictReturnType:
+        binned = self._native().binned_eval_predictions(native_dataset)
+        if binned is None:
+            return self.predict(_internal_rows(data.data))
+        predictions = np.asarray(binned, dtype=np.float64)
+        nclasses = self.num_model_per_iteration()
+        return predictions.reshape(-1, nclasses) if nclasses > 1 else predictions
+
     def eval(self, data: Dataset, name: str, feval: Any = None) -> list[EvalResult]:
         """Evaluate the configured metrics on ``data`` (upstream ``Booster.eval``).
 
@@ -2486,11 +2498,12 @@ class Booster:
         if self._train_set is not None:
             self._ensure_training_handle()
         params = {**data.params, **self.params}
-        native = self._native().eval(data._construct_for_eval(), _params_to_strings(params), name)
+        native_dataset = data._construct_for_eval()
+        native = self._native().eval(native_dataset, _params_to_strings(params), name)
         results = [EvalResult(*item) for item in native]
         custom_metrics = _custom_metrics(feval)
         if custom_metrics:
-            predictions = self.predict(_internal_rows(data.data))
+            predictions = self._evaluation_predictions(data, native_dataset)
             results.extend(
                 EvalResult(*item)
                 for item in _custom_results(name, predictions, data, custom_metrics)
@@ -2519,7 +2532,7 @@ class Booster:
             params = {**dataset.params, **self.params}
             results.extend(self._native().eval(native_dataset, _params_to_strings(params), name))
             if custom_metrics:
-                predictions = self.predict(_internal_rows(dataset.data))
+                predictions = self._evaluation_predictions(dataset, native_dataset)
                 results.extend(_custom_results(name, predictions, dataset, custom_metrics))
         return results
 

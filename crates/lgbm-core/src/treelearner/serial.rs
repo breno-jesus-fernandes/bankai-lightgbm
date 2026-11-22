@@ -2016,18 +2016,7 @@ impl SerialTreeLearner {
         if rows.is_empty() {
             return;
         }
-        let mut part = DataPartition::new(self.num_data, tree.num_leaves.max(1));
-        part.init_with(rows);
-        for s in splits {
-            let rule = match &s.kind {
-                SplitKind::Numerical {
-                    threshold,
-                    default_left,
-                } => SplitRule::numerical(&self.ds, s.inner, *threshold, *default_left),
-                SplitKind::Categorical(bins) => SplitRule::categorical(&self.ds, s.inner, bins),
-            };
-            part.split(s.leaf, &rule, s.right, None);
-        }
+        let part = Self::replay_partition(&self.ds, tree, splits, rows);
         for leaf in 0..tree.num_leaves {
             if tree.is_linear {
                 for &idx in part.indices_on_leaf(leaf) {
@@ -2040,6 +2029,43 @@ impl SerialTreeLearner {
                 score[idx as usize] += out;
             }
         }
+    }
+
+    /// Add leaf outputs using the bin layout of a separate aligned Dataset.
+    pub(crate) fn add_binned_prediction(
+        dataset: &Dataset,
+        tree: &Tree,
+        splits: &[SplitRecord],
+        rows: &[i32],
+        score: &mut [f64],
+    ) {
+        let part = Self::replay_partition(dataset, tree, splits, rows);
+        for (leaf, &out) in tree.leaf_value.iter().take(tree.num_leaves).enumerate() {
+            for &row in part.indices_on_leaf(leaf) {
+                score[row as usize] += out;
+            }
+        }
+    }
+
+    fn replay_partition(
+        dataset: &Dataset,
+        tree: &Tree,
+        splits: &[SplitRecord],
+        rows: &[i32],
+    ) -> DataPartition {
+        let mut part = DataPartition::new(dataset.num_data(), tree.num_leaves.max(1));
+        part.init_with(rows);
+        for s in splits {
+            let rule = match &s.kind {
+                SplitKind::Numerical {
+                    threshold,
+                    default_left,
+                } => SplitRule::numerical(dataset, s.inner, *threshold, *default_left),
+                SplitKind::Categorical(bins) => SplitRule::categorical(dataset, s.inner, bins),
+            };
+            part.split(s.leaf, &rule, s.right, None);
+        }
+        part
     }
 }
 

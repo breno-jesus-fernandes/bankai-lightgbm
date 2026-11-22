@@ -125,3 +125,32 @@ def test_binary_file_rejects_incompatible_metadata(
     for lib in (lightgbm, lgb):
         with pytest.raises(lib.basic.LightGBMError, match=message):
             lib.Dataset(str(binary), params=PARAMS, **{field: value}).construct()
+
+
+@pytest.mark.parametrize("boosting", ["gbdt", "rf", "dart"])
+def test_binary_file_can_be_used_as_validation_data(tmp_path: Path, boosting: str) -> None:
+    rng = np.random.default_rng(42)
+    x = rng.normal(size=(240, 4))
+    y = x[:, 0] - 2 * x[:, 1]
+    binary = tmp_path / "valid.bin"
+    origin = lightgbm.Dataset(x[:180], label=y[:180], params=PARAMS).construct()
+    origin.create_valid(x[180:], label=y[180:], params=PARAMS).save_binary(str(binary))
+
+    def custom_metric(preds: np.ndarray, data: lgb.Dataset) -> tuple[str, float, bool]:
+        return "mae_custom", float(np.mean(np.abs(preds - data.get_label()))), False
+
+    results: list[list[list[float]]] = []
+    for lib in (lightgbm, lgb):
+        training = lib.Dataset(x[:180], label=y[:180], params=PARAMS)
+        validation = lib.Dataset(str(binary), reference=training, params=PARAMS)
+        record: dict[str, dict[str, list[float]]] = {}
+        lib.train(
+            {**PARAMS, "metric": "l2", "boosting": boosting, "feature_fraction": 0.75},
+            training,
+            num_boost_round=5,
+            valid_sets=[validation],
+            callbacks=[lib.record_evaluation(record)],
+            feval=custom_metric,
+        )
+        results.append([record["valid_0"]["l2"], record["valid_0"]["mae_custom"]])
+    np.testing.assert_allclose(results[1], results[0], rtol=1e-12, atol=0)
