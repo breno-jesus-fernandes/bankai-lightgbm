@@ -25,9 +25,11 @@ import scipy.sparse
 import bankai_lightgbm as bk
 
 
-def _dense(rng: np.random.Generator) -> tuple[Any, np.ndarray]:
-    x = rng.normal(size=(50_000, 20))
-    y = x[:, 0] * 2 + np.sin(x[:, 1]) + rng.normal(scale=0.1, size=50_000)
+def dense_regression(
+    rng: np.random.Generator, n_rows: int = 50_000
+) -> tuple[np.ndarray, np.ndarray]:
+    x = rng.normal(size=(n_rows, 20))
+    y = x[:, 0] * 2 + np.sin(x[:, 1]) + rng.normal(scale=0.1, size=n_rows)
     return x, y
 
 
@@ -38,7 +40,7 @@ def _sparse(rng: np.random.Generator) -> tuple[Any, np.ndarray]:
 
 
 CASES: dict[str, Callable[[np.random.Generator], tuple[Any, np.ndarray]]] = {
-    "dense": _dense,
+    "dense": dense_regression,
     "sparse": _sparse,
 }
 
