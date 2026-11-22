@@ -34,7 +34,7 @@ jobs:
           python -m pip install maturin numpy scipy 'lightgbm==4.7.0' pytest
           maturin develop -r
           python -c 'import bankai_lightgbm, lightgbm; print(bankai_lightgbm.__version__, lightgbm.__version__)'
-      - name: Build the packed-node experiment and test parity
+      - name: Build the packed-zero experiment and test parity
         run: |
           source .venv/bin/activate
           cp python/bankai_lightgbm/_lib.abi3.so "$RUNNER_TEMP/base.so"
@@ -49,6 +49,7 @@ jobs:
               threshold: f64,
               left: i32,
               right: i32,
+              zero_child: i32,
               missing: crate::meta::MissingType,
               default_left: bool,
           }
@@ -63,6 +64,10 @@ jobs:
               while index >= 0 {
                   let node = &nodes[index as usize];
                   let mut v = row[node.feature];
+                  if v == 0.0 {
+                      index = node.zero_child;
+                      continue;
+                  }
                   if v.is_nan() && node.missing != MissingType::NaN {
                       v = 0.0;
                   }
@@ -90,6 +95,13 @@ jobs:
                           threshold: tree.threshold[i],
                           left: tree.left_child[i],
                           right: tree.right_child[i],
+                          zero_child: {
+                              let dt = tree.decision_type[i];
+                              let zero_is_missing = crate::meta::MissingType::from_bits((dt >> 2) & 3)
+                                  == crate::meta::MissingType::Zero;
+                              let left = if zero_is_missing { (dt & 2) != 0 } else { 0.0 <= tree.threshold[i] };
+                              if left { tree.left_child[i] } else { tree.right_child[i] }
+                          },
                           missing: crate::meta::MissingType::from_bits((tree.decision_type[i] >> 2) & 3),
                           default_left: (tree.decision_type[i] & 2) != 0,
                       }).collect())
@@ -109,7 +121,7 @@ jobs:
           maturin develop -r
           cp python/bankai_lightgbm/_lib.abi3.so "$RUNNER_TEMP/zero.so"
           pytest -q tests/parity/test_sparse_predict_parity.py
-      - name: Interleave baseline, packed-node experiment, and upstream
+      - name: Interleave baseline, packed-zero experiment, and upstream
         run: |
           source .venv/bin/activate
           python - <<'PY2'
