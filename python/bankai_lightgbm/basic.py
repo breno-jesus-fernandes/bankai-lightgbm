@@ -1117,6 +1117,7 @@ class Dataset:
         # upstream: True when feature names came from the data or `feature_name` (sklearn reads it).
         self._has_non_default_feature_names: bool = False
         self._handle: NativeDataset | None = None
+        self._training_metadata_version = 0
         # the parameters the native Dataset was built with (upstream: its config is fixed here)
         self._built_params: dict[str, Any] | None = None
         self._evaluation_handle: NativeDataset | None = None
@@ -1253,6 +1254,11 @@ class Dataset:
 
     def set_field(self, field_name: str, data: Any) -> Dataset:
         """Set a field by name: ``label``, ``weight``, ``init_score`` or ``group`` (upstream ``set_field``)."""
+        if field_name == "weight" and data is None:
+            # Unlike set_weight(None), upstream set_field clears the native field.
+            self.weight = None
+            self._update_native_fields(weight=[])
+            return self
         setters = {
             "label": self.set_label,
             "weight": self.set_weight,
@@ -1453,6 +1459,8 @@ class Dataset:
                     attribute,
                     handle.with_fields(label=label, weight=weight, group=group),
                 )
+        if label is not None or weight is not None:
+            self._training_metadata_version += 1
 
     def set_label(self, label: Any) -> Dataset:
         """Set the label; a constructed Dataset is updated in place."""
@@ -1487,7 +1495,8 @@ class Dataset:
                 raise LightGBMError("Length of weights differs from the length of #data")
         self.weight = weight
         if self._handle is not None or self._evaluation_handle is not None:
-            self._update_native_fields(weight=values)
+            if weight is not None:
+                self._update_native_fields(weight=values)
             # upstream: set_weight re-reads the field ("original values can be modified at cpp side")
             self.weight = self.get_weight()
         return self
@@ -1927,6 +1936,7 @@ class Booster:
         self._train_data_name = "training"
         self.best_score: dict[str, dict[str, float]] = {}
         self._train_set = train_set
+        self._training_metadata_version: int | None = None
         self._handle: NativeBooster | None = None
         # Trees of the model that continued training starts from (``init_model``).
         self._init_model: NativeBooster | None = None
@@ -2008,6 +2018,7 @@ class Booster:
             self._init_model,
             warn_config=False,
         )
+        self._training_metadata_version = dataset._training_metadata_version
         self.pandas_categorical = dataset.pandas_categorical
 
     def _continue_from(self, init_model: Any) -> None:
@@ -2309,6 +2320,7 @@ class Booster:
             self._init_model,
             warn_config=False,
         )
+        self._training_metadata_version = dataset._training_metadata_version
         self.pandas_categorical = dataset.pandas_categorical
 
     def refit(
@@ -2395,6 +2407,7 @@ class Booster:
             [int(v) for v in leaf_preds.reshape(-1)],
             ncol,
         )
+        new_booster._training_metadata_version = dataset._training_metadata_version
         new_booster.pandas_categorical = dataset.pandas_categorical
         return new_booster
 
@@ -2409,7 +2422,16 @@ class Booster:
                 self._ensure_training_handle()
                 train_set.construct()
                 self._native().reset_training_data(train_set._handle_or_raise())
+                self._training_metadata_version = train_set._training_metadata_version
             self._train_set = train_set
+        active_dataset = self._train_set
+        if (
+            active_dataset is not None
+            and self._training_metadata_version is not None
+            and self._training_metadata_version != active_dataset._training_metadata_version
+        ):
+            self._native().refresh_training_metadata(active_dataset._handle_or_raise())
+            self._training_metadata_version = active_dataset._training_metadata_version
         if fobj is not None:
             if self._handle is not None and self._native().objective() is not None:
                 self._native().reset_custom_objective()
@@ -2541,6 +2563,7 @@ class Booster:
         if isinstance(model_str, str):
             state["_handle"] = NativeBooster.from_string(model_str)
         state.setdefault("_train_set", None)
+        state.setdefault("_training_metadata_version", None)
         state.setdefault("valid_sets", [])
         state.setdefault("name_valid_sets", [])
         state.setdefault("_init_model", None)

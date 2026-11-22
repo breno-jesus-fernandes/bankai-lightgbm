@@ -282,6 +282,31 @@ impl GbdtTrainer {
         Ok(())
     }
 
+    /// Refresh labels and weights edited in place on the current Dataset.
+    ///
+    /// Upstream objectives retain pointers to the label and weight buffers. Edits to those
+    /// buffers are visible without resetting the score updater or sampling state. An objective
+    /// initialized with a null weight pointer still has no weights after a weight field is added.
+    pub fn refresh_training_metadata(&mut self, ds: Arc<Dataset>) -> Result<()> {
+        let t = &mut self.trainer;
+        if Arc::ptr_eq(&t.ds, &ds) {
+            return Ok(());
+        }
+        if ds.num_data() != t.ds.num_data() {
+            return Err(Error::InvalidParameter(
+                "Cannot refresh metadata for a different row count".into(),
+            ));
+        }
+        let mut metadata = ds.metadata.clone();
+        if !t.learner.has_training_weights() {
+            metadata.weights.clear();
+        }
+        let objective = create_objective(&t.cfg, &metadata)?;
+        t.objective = objective;
+        t.ds = ds;
+        Ok(())
+    }
+
     /// Switch to external derivatives, preserving trees and scores.
     /// upstream: src/boosting/gbdt.h (v4.7.0) ResetConfig.
     pub fn reset_custom_objective(&mut self) -> Result<()> {

@@ -773,6 +773,22 @@ impl NativeBooster {
         })
     }
 
+    fn refresh_training_metadata(
+        &mut self,
+        py: Python<'_>,
+        dataset: &NativeDataset,
+    ) -> PyResult<()> {
+        let ds = Arc::clone(&dataset.ds);
+        guard(move || {
+            let trainer = self
+                .trainer
+                .as_mut()
+                .ok_or_else(|| LightGBMError::new_err("Booster has no training Dataset"))?;
+            py.allow_threads(|| trainer.refresh_training_metadata(ds))
+                .map_err(to_py)
+        })
+    }
+
     fn reset_training_data(&mut self, py: Python<'_>, dataset: &NativeDataset) -> PyResult<()> {
         let ds = Arc::clone(&dataset.ds);
         guard(move || {

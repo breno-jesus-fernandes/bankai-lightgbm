@@ -271,6 +271,10 @@ impl SerialTreeLearner {
         }
     }
 
+    pub(crate) fn has_training_weights(&self) -> bool {
+        !self.ds.metadata.weights.is_empty()
+    }
+
     /// upstream: SerialTreeLearner::ResetIsConstantHessian after objective reset.
     pub fn reset_constant_hessian(&mut self, value: bool) {
         self.is_constant_hessian = value;
