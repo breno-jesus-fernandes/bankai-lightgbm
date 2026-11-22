@@ -1,0 +1,88 @@
+name: Linux x86-64 release comparison
+
+on:
+  push:
+    branches: [bench/v1-linux-x86-64]
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      OMP_WAIT_POLICY: PASSIVE
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Install the candidate release build
+        run: |
+          git switch --detach HEAD^
+          git rev-parse HEAD
+          uname -sm
+          test "$(uname -m)" = x86_64
+          lscpu | sed -n '1,20p'
+          rustc --version
+          python -m venv .venv
+          source .venv/bin/activate
+          python -m pip install maturin numpy scipy 'lightgbm==4.7.0'
+          maturin develop -r
+          python -c 'import bankai_lightgbm, lightgbm; print(bankai_lightgbm.__version__, lightgbm.__version__)'
+      - name: Measure against LightGBM 4.7.0
+        run: |
+          source .venv/bin/activate
+          python benches/bench_train_interleaved.py --threads 1 2 --rounds 9 || echo "Training comparison reported a slower case"
+          python - <<'PY'
+          import statistics
+          import sys
+          import time
+
+          sys.path.insert(0, "benches")
+          from bench_train_interleaved import CASES, bk, lightgbm, np
+
+          def compare(label, functions):
+              samples = [[], []]
+              for f in functions:
+                  f()
+              for r in range(9):
+                  for i in ((0, 1) if r % 2 == 0 else (1, 0)):
+                      start = time.perf_counter()
+                      functions[i]()
+                      samples[i].append(time.perf_counter() - start)
+              bankai, upstream = map(statistics.median, samples)
+              print(f"{label}: bankai={bankai*1000:.2f} ms upstream={upstream*1000:.2f} ms ratio={bankai/upstream:.3f}", flush=True)
+
+          for case, make in CASES.items():
+              x, y = make(np.random.default_rng(0))
+              for threads in (1, 2):
+                  cfg = {"num_threads": threads, "verbose": -1}
+                  compare(
+                      f"construct {case} {x.shape} threads={threads}",
+                      [lambda mod=mod: mod.Dataset(x, y, params=cfg).construct()
+                       for mod in (bk, lightgbm)],
+                  )
+              upstream = lightgbm.train(
+                  {"num_threads": 1, "verbose": -1, "objective": "regression"},
+                  lightgbm.Dataset(x, y, params={"verbose": -1, "num_threads": 1}),
+                  num_boost_round=50,
+              )
+              bankai = bk.Booster(model_str=upstream.model_to_string())
+              np.testing.assert_allclose(
+                  bankai.predict(x, num_threads=1),
+                  upstream.predict(x, num_threads=1),
+                  rtol=1e-12,
+                  atol=1e-14,
+              )
+              for threads in (1, 2):
+                  compare(
+                      f"predict {case} {x.shape} 50 trees threads={threads}",
+                      [lambda model=model: model.predict(x, num_threads=threads)
+                       for model in (bankai, upstream)],
+                  )
+          PY
