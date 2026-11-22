@@ -1,4 +1,4 @@
-name: Linux x86-64 prediction investigation
+name: Linux x86-64 zero-node prediction experiment
 
 on:
   push:
@@ -31,64 +31,95 @@ jobs:
           rustc --version
           python -m venv .venv
           source .venv/bin/activate
-          python -m pip install maturin numpy scipy 'lightgbm==4.7.0' py-spy
-          CARGO_PROFILE_RELEASE_DEBUG=1 maturin develop -r
+          python -m pip install maturin numpy scipy 'lightgbm==4.7.0' pytest
+          maturin develop -r
           python -c 'import bankai_lightgbm, lightgbm; print(bankai_lightgbm.__version__, lightgbm.__version__)'
-      - name: Compare prediction costs by input and tree count
+      - name: Build the zero-input experiment and test parity
         run: |
           source .venv/bin/activate
-          cat > "$RUNNER_TEMP/csr-profile.py" <<'PY2'
-          import sys
-          import statistics
-          import time
+          cp python/bankai_lightgbm/_lib.abi3.so "$RUNNER_TEMP/base.so"
+          python - <<'PY2'
           from pathlib import Path
-
-          sys.path.insert(0, "benches")
-          from bench_train_interleaved import bk, lightgbm, np, _sparse
-
-          x, y = _sparse(np.random.default_rng(0))
-          dense = x.toarray()
-          model_path = Path(".prediction-investigation.txt")
-          if len(sys.argv) > 1:
-              mod = bk if sys.argv[1] == "bankai" else lightgbm
-              model = mod.Booster(model_file=str(model_path))
-              end = time.monotonic() + 12
-              while time.monotonic() < end:
-                  model.predict(x, raw_score=True, num_threads=1)
-              sys.exit()
-          upstream = lightgbm.train(
-              dict(objective="regression", num_threads=1, verbose=-1),
-              lightgbm.Dataset(x, y, params=dict(num_threads=1, verbose=-1)),
-              num_boost_round=50,
-          )
-          upstream.save_model(str(model_path))
-          bankai = bk.Booster(model_file=str(model_path))
-          for name, data in (("dense", dense), ("csr", x)):
-              for trees in (1, 5, 25, 50):
-                  for leaf in (False, True):
-                      kwargs = dict(num_iteration=trees, raw_score=not leaf, pred_leaf=leaf, num_threads=1)
-                      models = bankai, upstream
-                      expected = upstream.predict(data, **kwargs)
-                      actual = bankai.predict(data, **kwargs)
-                      np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-14)
-                      times = [[], []]
-                      for r in range(9):
-                          for i in ((0, 1) if r % 2 == 0 else (1, 0)):
-                              start = time.perf_counter()
-                              models[i].predict(data, **kwargs)
-                              times[i].append(time.perf_counter() - start)
-                      a, b = map(statistics.median, times)
-                      print(f"{name} trees={trees} leaf={leaf}: Bankai={a*1e3:.3f} ms upstream={b*1e3:.3f} ms ratio={a/b:.3f}", flush=True)
+          p = Path("crates/lgbm-core/src/tree.rs")
+          src = p.read_text()
+          at = src.index("        if fval.is_nan()", src.index("    fn numerical_decision("))
+          src = src[:at] + """        if fval == 0.0 {
+                      let go_left = if missing_type == MissingType::Zero {
+                          get_decision_type(dt, K_DEFAULT_LEFT_MASK)
+                      } else {
+                          0.0 <= self.threshold[node]
+                      };
+                      return if go_left { self.left_child[node] } else { self.right_child[node] };
+                  }
+          """ + src[at:]
+          p.write_text(src)
           PY2
-          python "$RUNNER_TEMP/csr-profile.py"
-      - name: Collect native CPU samples for both CSR predictors
+          maturin develop -r
+          cp python/bankai_lightgbm/_lib.abi3.so "$RUNNER_TEMP/zero.so"
+          pytest -q tests/parity/test_sparse_predict_parity.py
+      - name: Interleave baseline, zero-input experiment, and upstream
         run: |
-          for library in bankai upstream; do
-            echo "profile: $library"
-            if command -v perf >/dev/null && sudo -n perf record -o "$RUNNER_TEMP/$library.perf" -e cpu-clock:u -F 499 -- .venv/bin/python "$RUNNER_TEMP/csr-profile.py" "$library"; then
-              sudo -n perf report -i "$RUNNER_TEMP/$library.perf" --stdio --sort dso,symbol --percent-limit 1
-            else
-              sudo -n env OMP_WAIT_POLICY=PASSIVE "$PWD/.venv/bin/py-spy" record --native --rate 399 --format raw --output "$RUNNER_TEMP/$library.profile" -- "$PWD/.venv/bin/python" "$RUNNER_TEMP/csr-profile.py" "$library"
-              sudo -n sort -t ' ' -k2,2nr "$RUNNER_TEMP/$library.profile" | head -18
-            fi
-          done
+          source .venv/bin/activate
+          python - <<'PY2'
+          import os
+          import shutil
+          import statistics
+          import subprocess
+          import sys
+          from pathlib import Path
+          tmp = Path(os.environ["RUNNER_TEMP"])
+          extension = Path("python/bankai_lightgbm/_lib.abi3.so")
+          worker = r"""
+          import sys, time
+          sys.path.insert(0, 'benches')
+          from bench_train_interleaved import bk, lightgbm, np, CASES
+          kind = sys.argv[1]
+          mod = lightgbm if kind == 'upstream' else bk
+          data = {key: make(np.random.default_rng(0)) for key,make in CASES.items()}
+          p = dict(objective='regression',num_threads=1,verbose=-1)
+          models = {
+              key:mod.Booster(model_str=lightgbm.train(p,lightgbm.Dataset(x,y,params=p),num_boost_round=50).model_to_string())
+              for key,(x,y) in data.items()
+          }
+          print('ready',flush=True)
+          for inp in sys.stdin:
+              key,nthreads,kind=inp.split()
+              x,_=data[key]
+              kwargs=dict(num_threads=int(nthreads),pred_leaf=kind=='leaf',raw_score=kind=='score')
+              start=time.perf_counter()
+              pred=models[key].predict(x,**kwargs)
+              elapsed=time.perf_counter()-start
+              print(elapsed, pred.size, float(pred.sum()),flush=True)
+          """
+          processes = {}
+          try:
+              for kind in ('base','zero','upstream'):
+                  if kind != 'upstream':
+                      swap=extension.with_suffix('.swap')
+                      shutil.copyfile(tmp/f'{kind}.so',swap)
+                      swap.replace(extension)
+                  p=subprocess.Popen([sys.executable,'-c',worker,kind],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+                  processes[kind]=p
+                  assert p.stdout.readline().strip()=='ready'
+              for case in ('sparse','dense'):
+                  for threads in (1,2):
+                      for mode in ('score','leaf'):
+                          ts={k:[] for k in processes}
+                          for i in range(10):
+                              fingerprints={}
+                              for k in (processes if i%2==0 else reversed(processes)):
+                                  p=processes[k]
+                                  p.stdin.write(f'{case} {threads} {mode}\n')
+                                  p.stdin.flush()
+                                  elapsed,n,total=p.stdout.readline().split()
+                                  fingerprints[k]=(n,total)
+                                  if i:
+                                      ts[k].append(float(elapsed))
+                              assert fingerprints['base']==fingerprints['zero'],fingerprints
+                          meds={k:statistics.median(v)*1000 for k,v in ts.items()}
+                          print(f'{case} threads={threads} {mode}: {meds} candidate/base={meds["zero"]/meds["base"]:.3f}',flush=True)
+          finally:
+              for p in processes.values():
+                  p.stdin.close()
+                  p.wait()
+          PY2
