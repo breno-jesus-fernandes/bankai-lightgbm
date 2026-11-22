@@ -233,12 +233,45 @@ fn as_f64_vec(array: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<f64>> {
 impl NativeDataset {
     /// Load a binary dataset file written by `save_binary` (upstream `DatasetLoader::LoadFromBinFile`).
     #[staticmethod]
-    fn from_binary_file(py: Python<'_>, path: String) -> PyResult<Self> {
+    #[pyo3(signature = (path, label=None, weight=None, group=None, init_score=None))]
+    fn from_binary_file(
+        py: Python<'_>,
+        path: String,
+        label: Option<Vec<f64>>,
+        weight: Option<Vec<f32>>,
+        group: Option<Vec<i32>>,
+        init_score: Option<Vec<f64>>,
+    ) -> PyResult<Self> {
         guard(move || {
             let ds = py
                 .allow_threads(|| -> lgbm_core::Result<Dataset> {
                     let bin = lgbm_core::io::binary::BinaryDataset::read_file(&path)?;
-                    Dataset::from_binary(&bin)
+                    let mut ds = Dataset::from_binary(&bin)?;
+                    if let Some(label) = label {
+                        if label.len() != ds.num_data() {
+                            return Err(lgbm_core::Error::InvalidParameter(
+                                "Length of labels differs from the length of #data".into(),
+                            ));
+                        }
+                        ds.set_label(&label)?;
+                    }
+                    if let Some(weight) = weight {
+                        ds.set_weights(&weight)?;
+                    }
+                    if let Some(group) = group {
+                        let total: i64 = group.iter().map(|&size| i64::from(size)).sum();
+                        if !group.is_empty() && total != ds.num_data() as i64 {
+                            return Err(lgbm_core::Error::InvalidParameter(format!(
+                                "Sum of query counts ({}) differs from the length of #data ({total})",
+                                ds.num_data(),
+                            )));
+                        }
+                        ds.set_group(&group)?;
+                    }
+                    if let Some(init_score) = init_score {
+                        ds.set_init_score(&init_score)?;
+                    }
+                    Ok(ds)
                 })
                 .map_err(to_py)?;
             let (nrow, ncol) = (ds.num_data(), ds.layout.num_total_features);
@@ -371,6 +404,17 @@ impl NativeDataset {
         guard(move || {
             std::fs::write(path, lgbm_core::io::dump::dump_text(&self.ds))
                 .map_err(|err| pyo3::exceptions::PyOSError::new_err(err.to_string()))
+        })
+    }
+
+    /// Query sizes stored in the binned dataset, if it contains query boundaries.
+    fn group(&self) -> Option<Vec<i32>> {
+        let boundaries = &self.ds.metadata.query_boundaries;
+        (!boundaries.is_empty()).then(|| {
+            boundaries
+                .windows(2)
+                .map(|pair| pair[1].wrapping_sub(pair[0]))
+                .collect()
         })
     }
 

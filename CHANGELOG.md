@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Python: binary Dataset files accept a reference and explicit label, weight, group, and init score. They keep the bins saved in the file and apply explicit metadata after loading.
+
 - Python: `Booster.update(train_set=...)` can switch a live GBDT, DART, or Random Forest booster to new rows with aligned bin mappers and continue from its existing trees.
 
 - One-thread CPU training reuses sibling histograms with vectorizable subtraction over checked slices, reducing sparse training time without changing model output.

@@ -1175,3 +1175,10 @@ Entry format:
 - Criterion: seven interleaved release rounds on macOS/aarch64, one thread, against `62c5857` using all 25 `kernels` cases, 0.1 s warmup, 0.2 s measurement, and 20 samples. The slowest ratio was 1.0398x. Numerical split finding (255 bins) was 1.0003x, partition (200k rows) 1.0005x, and the 4096 × 12 mixed row-wise training cases were 1.0016x and 0.9980x. The Rust-only comparison does not run upstream or use OMP_WAIT_POLICY.
 - `scripts/check.sh` reported all green with 2460 Python tests passed.
 - The release parity and upstream Python suites passed 2454 tests.
+
+## D-042: Preserve binary Dataset bins while applying explicit metadata
+
+- Date: 2026-11-21
+- Choice: Match upstream DatasetLoader::LoadFromBinFile and Dataset._lazy_init. A reference can supply construction parameters, while bins and the initial metadata come from the file. Explicit label, weight, group, and init score replace the corresponding fields. Apply them before sharing the native Dataset so its bin storage is not cloned.
+- Evidence: The first parity cases failed on unsupported binary references. The new tests cover the file's own feature layout with a differently shaped reference, reading stored labels, weights and query groups, replacing all four metadata fields, training with overridden metadata, and rejection of invalid lengths.
+- Validation: `scripts/check.sh` ended all green (2467 Python tests). Release parity and upstream Python suites passed 2461 tests.
