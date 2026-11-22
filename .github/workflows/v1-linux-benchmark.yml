@@ -1,4 +1,4 @@
-name: Linux x86-64 no-missing-node prediction experiment
+name: Linux x86-64 packed-node-node prediction experiment
 
 on:
   push:
@@ -34,27 +34,82 @@ jobs:
           python -m pip install maturin numpy scipy 'lightgbm==4.7.0' pytest
           maturin develop -r
           python -c 'import bankai_lightgbm, lightgbm; print(bankai_lightgbm.__version__, lightgbm.__version__)'
-      - name: Build the no-missing experiment and test parity
+      - name: Build the packed-node experiment and test parity
         run: |
           source .venv/bin/activate
           cp python/bankai_lightgbm/_lib.abi3.so "$RUNNER_TEMP/base.so"
           python - <<'PY2'
           from pathlib import Path
-          p = Path("crates/lgbm-core/src/tree.rs")
+          from pathlib import Path
+          p = Path("crates/lgbm-core/src/predictor.rs")
           src = p.read_text()
-          at = src.index("        if fval.is_nan()", src.index("    fn numerical_decision("))
-          src = src[:at] + """        if missing_type == MissingType::None {
-                      let value = if fval.is_nan() { 0.0 } else { fval };
-                      let go_left = value <= self.threshold[node];
-                      return if go_left { self.left_child[node] } else { self.right_child[node] };
+          packed = """
+          struct BenchNode {
+              feature: usize,
+              threshold: f64,
+              left: i32,
+              right: i32,
+              missing: crate::meta::MissingType,
+              default_left: bool,
+          }
+
+          #[inline]
+          fn bench_leaf(nodes: &[BenchNode], row: &[f64]) -> usize {
+              use crate::meta::MissingType;
+              let mut index = 0;
+              if nodes.is_empty() {
+                  return 0;
+              }
+              while index >= 0 {
+                  let node = &nodes[index as usize];
+                  let mut v = row[node.feature];
+                  if v.is_nan() && node.missing != MissingType::NaN {
+                      v = 0.0;
                   }
-          """ + src[at:]
+                  let left = if (node.missing == MissingType::Zero && crate::tree::is_zero(v))
+                      || (node.missing == MissingType::NaN && v.is_nan()) {
+                      node.default_left
+                  } else {
+                      v <= node.threshold
+                  };
+                  index = if left { node.left } else { node.right };
+              }
+              (!index) as usize
+          }
+
+          """
+          i = src.index("/// Prepared prediction")
+          src = src[:i] + packed + src[i:]
+          src = src.replace("    pool: Option<rayon::ThreadPool>,", "    pool: Option<rayon::ThreadPool>,\n    bench_nodes: Vec<Option<Vec<BenchNode>>>,", 1)
+          src = src.replace("        Ok(Predictor {", """        let bench_nodes = model.trees().iter().map(|tree| {
+                      if tree.num_cat != 0 || tree.is_linear || cfg.kind == PredictKind::Contrib {
+                          return None;
+                      }
+                      Some((0..tree.num_leaves.saturating_sub(1)).map(|i| BenchNode {
+                          feature: tree.split_feature[i] as usize,
+                          threshold: tree.threshold[i],
+                          left: tree.left_child[i],
+                          right: tree.right_child[i],
+                          missing: crate::meta::MissingType::from_bits((tree.decision_type[i] >> 2) & 3),
+                          default_left: (tree.decision_type[i] & 2) != 0,
+                      }).collect())
+                  }).collect();
+                  Ok(Predictor {
+                      bench_nodes,""", 1)
+          src = src.replace("out[i] = t.predict_leaf_index(features) as f64;", """out[i] = self.bench_nodes[first + i].as_ref().map_or_else(
+                                  || t.predict_leaf_index(features), |nodes| bench_leaf(nodes, features)
+                              ) as f64;""", 1)
+          src = src.replace("raw[k] += trees[it * ntpi + k].predict(features);", """let index = it * ntpi + k;
+                                  let tree = &trees[index];
+                                  raw[k] += self.bench_nodes[index].as_ref().map_or_else(
+                                      || tree.predict(features), |nodes| tree.leaf_value[bench_leaf(nodes, features)]
+                                  );""", 1)
           p.write_text(src)
           PY2
           maturin develop -r
           cp python/bankai_lightgbm/_lib.abi3.so "$RUNNER_TEMP/zero.so"
           pytest -q tests/parity/test_sparse_predict_parity.py
-      - name: Interleave baseline, no-missing experiment, and upstream
+      - name: Interleave baseline, packed-node experiment, and upstream
         run: |
           source .venv/bin/activate
           python - <<'PY2'
