@@ -20,6 +20,30 @@ use crate::utils::format::format_g;
 use crate::utils::random::Random;
 use std::collections::HashMap;
 
+/// upstream: Dataset::CheckAlign (include/LightGBM/dataset.h, v4.7.0).
+fn aligned_bins(old: &Dataset, ds: &Dataset) -> bool {
+    let mapper = |data: &Dataset, f: usize| {
+        (
+            data.layout.feature2group[f] as usize,
+            data.layout.feature2subfeature[f] as usize,
+        )
+    };
+    old.layout.num_total_features == ds.layout.num_total_features
+        && old.layout.num_features == ds.layout.num_features
+        && old.label_idx == ds.label_idx
+        && (0..old.layout.num_features).all(|f| {
+            let (ag, af) = mapper(old, f);
+            let (bg, bf) = mapper(ds, f);
+            let a = &old.layout.groups[ag].bin_mappers[af];
+            let b = &ds.layout.groups[bg].bin_mappers[bf];
+            a.num_bin == b.num_bin
+                && a.missing_type == b.missing_type
+                && a.bin_type == b.bin_type
+                && a.bin_upper_bound == b.bin_upper_bound
+                && a.bin_2_categorical == b.bin_2_categorical
+        })
+}
+
 /// upstream: `BinMapper::bin_info_string` (stream precision 17)
 fn bin_info_string(m: &crate::io::bin::BinMapper) -> String {
     if m.bin_type == BinType::Categorical {
@@ -204,28 +228,7 @@ impl GbdtTrainer {
         if Arc::ptr_eq(&t.ds, &ds) {
             return Ok(());
         }
-        let old = &t.ds;
-        let mapper = |data: &Dataset, f: usize| {
-            (
-                data.layout.feature2group[f] as usize,
-                data.layout.feature2subfeature[f] as usize,
-            )
-        };
-        let aligned = old.layout.num_total_features == ds.layout.num_total_features
-            && old.layout.num_features == ds.layout.num_features
-            && old.label_idx == ds.label_idx
-            && (0..old.layout.num_features).all(|f| {
-                let (ag, af) = mapper(old, f);
-                let (bg, bf) = mapper(&ds, f);
-                let a = &old.layout.groups[ag].bin_mappers[af];
-                let b = &ds.layout.groups[bg].bin_mappers[bf];
-                a.num_bin == b.num_bin
-                    && a.missing_type == b.missing_type
-                    && a.bin_type == b.bin_type
-                    && a.bin_upper_bound == b.bin_upper_bound
-                    && a.bin_2_categorical == b.bin_2_categorical
-            });
-        if !aligned {
+        if !aligned_bins(&t.ds, &ds) {
             return Err(Error::InvalidParameter(
                 "Cannot reset training data, since new training data has different bin mappers"
                     .into(),
@@ -280,6 +283,49 @@ impl GbdtTrainer {
         t.gradients = replacement.gradients;
         t.hessians = replacement.hessians;
         Ok(())
+    }
+
+    /// Replay training trees onto an aligned binned dataset and return class-major scores.
+    /// upstream: src/boosting/gbdt.cpp (v4.7.0) GBDT::AddValidDataset.
+    pub fn binned_evaluation_scores(&self, ds: &Dataset) -> Result<Vec<f64>> {
+        let t = &self.trainer;
+        if !aligned_bins(&t.ds, ds) {
+            return Err(Error::InvalidParameter(
+                "Cannot add validation data, since it has different bin mappers with training data"
+                    .into(),
+            ));
+        }
+        if t.cfg.linear_tree {
+            return Err(Error::Unsupported(
+                "evaluating linear trees on a binned-only Dataset".into(),
+            ));
+        }
+        let n = ds.num_data();
+        let ntpi = t.num_tree_per_iteration;
+        let mut scores = vec![0.0; n * ntpi];
+        if !ds.metadata.init_score.is_empty() {
+            if ds.metadata.init_score.len() != scores.len() {
+                return Err(Error::InvalidParameter(
+                    "Number of class for initial score error".into(),
+                ));
+            }
+            scores.copy_from_slice(&ds.metadata.init_score);
+        }
+        let rows: Vec<i32> = (0..n as i32).collect();
+        // The validation Dataset already includes initial model predictions in init_score.
+        let start = t.models.len() - t.tree_splits.len();
+        for (index, (tree, splits)) in t.models[start..].iter().zip(&t.tree_splits).enumerate() {
+            let class = index % ntpi;
+            let score = &mut scores[class * n..(class + 1) * n];
+            if t.rf {
+                scale(score, (index / ntpi) as f64);
+            }
+            SerialTreeLearner::add_binned_prediction(ds, tree, splits, &rows, score);
+            if t.rf {
+                scale(score, 1.0 / (index / ntpi + 1) as f64);
+            }
+        }
+        Ok(scores)
     }
 
     /// Refresh labels and weights edited in place on the current Dataset.

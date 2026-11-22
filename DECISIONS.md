@@ -1193,3 +1193,12 @@ Entry format:
 - Preserve the separate `set_field("weight", None)` clear operation, covered by the ported upstream suite.
 - Criterion: macOS/aarch64 bench profile, one thread, seven interleaved runs against the base core at `db1482d`, all 25 kernels. The largest slowdown was 1.0475x (4096-bin histogram leaf subset). Prediction (4096 × 16 × 20 trees) was 1.0111x, numerical split search (255 bins) 1.0108x, and mixed row-wise training (4096 × 12) 1.0012x sparse / 1.0046x dense. Use the `kernels` executable with 0.1 s warmup, 0.2 s measurement, 20 samples. No upstream process participates in Criterion, so OMP_WAIT_POLICY is not applicable. Linux x86-64 end-to-end comparison remains to be run.
 - Validation: `scripts/check.sh` all green with 2471 Python tests, and 2465 tests passed in the release parity and upstream suites.
+
+## D-044: Evaluate aligned binary validation datasets using binned splits
+
+- Date: 2026-11-22
+- Choice: Match upstream `GBDT::AddValidDataset` by checking bin alignment and adding trained tree outputs to a class-major score buffer initialized from validation metadata. Reuse the existing binned split routing. Constant-leaf GBDT, DART, and RF support built-in and Python custom metrics. Linear trees require raw feature values and are rejected on binned-only data.
+- Evidence: Regression validation from an upstream-written binary file failed first because the Python scorer required raw rows. The parity tests compare built-in L2 and a custom MAE against LightGBM 4.7.0 per iteration in all three boosting modes.
+- Scope: Replays are computed at evaluation time, as on the existing raw validation path. They do not add a persistent validation score cache.
+- Validation: `scripts/check.sh` all green with 2474 tests. The release parity and upstream suites passed 2468 tests.
+- Criterion: seven interleaved runs on macOS/aarch64 in the bench profile, one thread, against `9ce3f77`, with the CI function alignment and codegen flags on both builds. Numerical split search (255 bins) was 1.0074x, partition (200k rows) 1.0004x, prediction (4096 × 16 × 20 trees) 1.0246x, and row-wise mixed training (4096 × 12) 0.9976x sparse and 1.0145x dense. One 4096-bin scalar constant-Hessian histogram case initially measured 1.1204x. Its isolated seven-round rerun with 1 s warmup and 2 s measurement was 0.9918x. No remaining case exceeded the 5% limit. The Rust-only measurements do not run upstream or use OMP_WAIT_POLICY.

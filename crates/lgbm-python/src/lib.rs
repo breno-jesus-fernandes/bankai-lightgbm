@@ -575,6 +575,17 @@ struct NativeBooster {
     trainer: Option<GbdtTrainer>,
 }
 
+impl NativeBooster {
+    fn binned_scores(&self, ds: &Dataset) -> lgbm_core::Result<Vec<f64>> {
+        let trainer = self.trainer.as_ref().ok_or_else(|| {
+            lgbm_core::Error::Unsupported(
+                "evaluating a binned Dataset requires a live training Booster".into(),
+            )
+        })?;
+        trainer.binned_evaluation_scores(ds)
+    }
+}
+
 #[pymethods]
 impl NativeBooster {
     #[staticmethod]
@@ -880,47 +891,52 @@ impl NativeBooster {
             let (nrow, ncol) = (dataset.nrow, dataset.ncol);
             py.allow_threads(|| -> lgbm_core::Result<Vec<(String, String, f64, bool)>> {
                 let cfg = Config::from_params(&params)?;
-                let pred_cfg = PredictConfig {
-                    kind: PredictKind::RawScore,
-                    num_threads: cfg.num_threads.max(0) as usize,
-                    ..PredictConfig::default()
-                };
-                let predictor = Predictor::new(model, &pred_cfg)?;
-                let mut row_scores = data.predict(&predictor, nrow, ncol)?;
-                // upstream: the validation ScoreUpdater of a random forest holds the running mean of
-                // its trees (RF::TrainOneIter), so the metric is computed on the averaged score.
-                if model.average_output() {
-                    let iterations = model.num_trees() / model.num_tree_per_iteration().max(1);
-                    if iterations > 0 {
-                        for value in row_scores.iter_mut() {
-                            *value /= iterations as f64;
-                        }
-                    }
-                }
-                let nclass = model.num_class();
-                let scores = if nclass > 1 {
-                    let mut class_major = vec![0.0; row_scores.len()];
-                    for row in 0..nrow {
-                        for class in 0..nclass {
-                            class_major[class * nrow + row] = row_scores[row * nclass + class];
-                        }
-                    }
-                    class_major
+                let scores = if matches!(data.as_ref(), RawRows::Unavailable) {
+                    self.binned_scores(&ds)?
                 } else {
-                    row_scores
+                    let pred_cfg = PredictConfig {
+                        kind: PredictKind::RawScore,
+                        num_threads: cfg.num_threads.max(0) as usize,
+                        ..PredictConfig::default()
+                    };
+                    let predictor = Predictor::new(model, &pred_cfg)?;
+                    let mut row_scores = data.predict(&predictor, nrow, ncol)?;
+                    // upstream: the validation ScoreUpdater of a random forest holds the running mean of
+                    // its trees (RF::TrainOneIter), so the metric is computed on the averaged score.
+                    if model.average_output() {
+                        let iterations = model.num_trees() / model.num_tree_per_iteration().max(1);
+                        if iterations > 0 {
+                            for value in row_scores.iter_mut() {
+                                *value /= iterations as f64;
+                            }
+                        }
+                    }
+                    let nclass = model.num_class();
+                    let scores = if nclass > 1 {
+                        let mut class_major = vec![0.0; row_scores.len()];
+                        for row in 0..nrow {
+                            for class in 0..nclass {
+                                class_major[class * nrow + row] = row_scores[row * nclass + class];
+                            }
+                        }
+                        class_major
+                    } else {
+                        row_scores
+                    };
+                    // upstream: the validation ScoreUpdater starts from the init score.
+                    let mut scores = scores;
+                    if !ds.metadata.init_score.is_empty() {
+                        if ds.metadata.init_score.len() != scores.len() {
+                            return Err(lgbm_core::Error::InvalidParameter(
+                                "Number of class for initial score error".into(),
+                            ));
+                        }
+                        for (score, init) in scores.iter_mut().zip(&ds.metadata.init_score) {
+                            *score += init;
+                        }
+                    }
+                    scores
                 };
-                // upstream: the validation ScoreUpdater starts from the init score.
-                let mut scores = scores;
-                if !ds.metadata.init_score.is_empty() {
-                    if ds.metadata.init_score.len() != scores.len() {
-                        return Err(lgbm_core::Error::InvalidParameter(
-                            "Number of class for initial score error".into(),
-                        ));
-                    }
-                    for (score, init) in scores.iter_mut().zip(&ds.metadata.init_score) {
-                        *score += init;
-                    }
-                }
                 let mut results = Vec::new();
                 for metric_name in &cfg.metric {
                     if let Some(metric) = create_metric(metric_name, &cfg, &ds.metadata)? {
@@ -936,6 +952,36 @@ impl NativeBooster {
                     }
                 }
                 Ok(results)
+            })
+            .map_err(to_py)
+        })
+    }
+
+    /// Validation predictions for custom metrics. Raw-row inputs use the normal predictor.
+    fn binned_eval_predictions(
+        &self,
+        py: Python<'_>,
+        dataset: &NativeDataset,
+    ) -> PyResult<Option<Vec<f64>>> {
+        if !matches!(dataset.data.as_ref(), RawRows::Unavailable) {
+            return Ok(None);
+        }
+        let ds = Arc::clone(&dataset.ds);
+        guard(move || {
+            py.allow_threads(|| -> lgbm_core::Result<Option<Vec<f64>>> {
+                let scores = self.binned_scores(&ds)?;
+                let n = ds.num_data();
+                let classes = self.model.num_class();
+                let mut output = vec![0.0; scores.len()];
+                for (row, result) in output.chunks_exact_mut(classes).enumerate() {
+                    for (class, value) in result.iter_mut().enumerate() {
+                        *value = scores[class * n + row];
+                    }
+                    if let Some(objective) = self.model.objective() {
+                        objective.convert_output(result);
+                    }
+                }
+                Ok(Some(output))
             })
             .map_err(to_py)
         })
