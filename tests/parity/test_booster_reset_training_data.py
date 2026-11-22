@@ -80,3 +80,35 @@ def test_rf_update_with_aligned_training_dataset() -> None:
 
     np.testing.assert_allclose(predictions[1], predictions[0], rtol=1e-12, atol=0)
     np.testing.assert_allclose(evaluations[1], evaluations[0], rtol=1e-12, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("field", "initial_weight"),
+    [("label", True), ("weight", True), ("weight", False), ("clear_weight", True)],
+)
+def test_update_refreshes_metadata_on_same_dataset(field: str, initial_weight: bool) -> None:
+    rng = np.random.default_rng(82)
+    x = rng.normal(size=(128, 5))
+    y = x @ np.arange(1.0, 6.0)
+    params = {
+        "objective": "regression",
+        "num_threads": 1,
+        "min_data_in_leaf": 4,
+        "feature_fraction": 0.6,
+        "verbosity": -1,
+    }
+    outputs = []
+    for lib in (lightgbm, bankai_lightgbm):
+        weights = np.full(len(y), 2.0) if initial_weight else None
+        data = lib.Dataset(x, label=y, weight=weights, params=params)
+        booster = lib.Booster(params, data)
+        booster.update()
+        if field == "label":
+            data.set_label(-2 * y)
+        elif field == "weight":
+            data.set_weight(np.linspace(0.5, 4.0, len(y)))
+        else:
+            data.set_weight(None)
+        booster.update()
+        outputs.append(booster.predict(x, raw_score=True, num_threads=1))
+    np.testing.assert_allclose(outputs[1], outputs[0], rtol=1e-12, atol=0)

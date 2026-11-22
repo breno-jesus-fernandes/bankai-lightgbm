@@ -137,11 +137,11 @@ checkbox open until every behavior it names and its applicable performance gates
 
 ## P6: Python package (drop-in)
 - [ ] `Dataset` (done: dense numpy and pandas incl. categoricals, weight, group, categorical_feature, subsets with source bin mapper reuse; scipy.sparse CSR/CSC (other formats converted like upstream) ✅, `save_binary` ✅ (never overwrites, like upstream); pyarrow/polars ingest ✅ with the dump's `forced_bins` section now populated; binary files with a reference and explicit metadata ✅; pending: remaining file and subset compatibility (unsorted/duplicate indices, weighted query metadata, and empty/out-of-range index errors covered), `get_weight`/`get_group`/`get_init_score`/`set_init_score` ✅; `set_label`/`set_weight`/`set_group` ✅ (also on constructed datasets); `set_field`/`get_field` error types and messages match upstream (unknown field, label and weight length, `set_label(None)`, 2-D label; `test_dataset_field_parity.py`); `set_position` and the other setters are done; dense shared reference binning implemented)
-- [ ] `Booster` (training works: `lgb.train` gives byte-identical model text; Rust `GbdtTrainer` and Python `Booster.update()` support incremental training; `cv` supports seeded/custom folds, metric aggregation, custom evaluation, callbacks, and `CVBooster`; `cv` preprocessing and continued training have upstream tests; `Booster.update(train_set=...)` switches aligned datasets in GBDT, DART, and RF; pending: updating the same Dataset after metadata changes and other Booster edge cases)
+- [ ] `Booster` (training works: `lgb.train` gives byte-identical model text; Rust `GbdtTrainer` and Python `Booster.update()` support incremental training; `cv` supports seeded/custom folds, metric aggregation, custom evaluation, callbacks, and `CVBooster`; `cv` preprocessing and continued training have upstream tests; `Booster.update(train_set=...)` switches aligned datasets in GBDT, DART, and RF; updates on the same Dataset pick up edited labels and existing weights without resetting training; pending: scoring binned-only binary validation sets and other Booster edge cases)
 - [ ] Callbacks: `early_stopping`, `log_evaluation`, `record_evaluation` ✅; `reset_parameter` supports learning-rate schedules and any parameter that does not change the boosting type, objective or number of classes (rebuilds the learner and sampler; the change applies from the next iteration)
-- [ ] sklearn API: `LGBMModel`, `LGBMClassifier`, `LGBMRegressor`, `LGBMRanker`
-- [ ] Plotting: `plot_importance`, `plot_split_value_histogram`, `plot_metric`, `plot_tree`, `create_tree_digraph`
-- [ ] Port upstream `tests/python_package_test` and run it green
+- [x] sklearn API: `LGBMModel`, `LGBMClassifier`, `LGBMRegressor`, `LGBMRanker`
+- [x] Plotting: `plot_importance`, `plot_split_value_histogram`, `plot_metric`, `plot_tree`, `create_tree_digraph`
+- [x] Port upstream `tests/python_package_test` and run it green
 
 ## P7: CLI + C API
 - [x] `lightgbm` CLI: `task=train|predict|refit|save_binary`, config files (done; `task=convert_model` is the separate node below)

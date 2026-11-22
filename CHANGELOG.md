@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Python: an active Booster picks up label edits and changes to existing weight buffers on its current Dataset in the next update.
+
 - Python: binary Dataset files accept a reference and explicit label, weight, group, and init score. They keep the bins saved in the file and apply explicit metadata after loading.
 
 - Python: `Booster.update(train_set=...)` can switch a live GBDT, DART, or Random Forest booster to new rows with aligned bin mappers and continue from its existing trees.
